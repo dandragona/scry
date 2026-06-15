@@ -88,7 +88,7 @@ Or by hand — it's a single file:
 
 ```sh
 chmod +x scry
-ln -s "$PWD/scry" /usr/local/bin/scry   # or copy anywhere on PATH
+sudo mkdir -p /usr/local/bin && sudo ln -sf "$PWD/scry" /usr/local/bin/scry   # or copy anywhere on PATH
 ```
 
 Then set up your panel and confirm your CLIs are logged in (both spend nothing):

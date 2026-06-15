@@ -43,7 +43,7 @@ import threading
 import time
 from pathlib import Path
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 # --------------------------------------------------------------------------- #
 # Prompts
@@ -193,6 +193,51 @@ DEFAULT_CONFIG = {
             },
             "caps": {},
         },
+        # Moonshot via the Kimi CLI (`kimi`). Headless: `kimi --quiet` runs print
+        # mode (`--print --output-format text --final-message-only`), which prints
+        # ONLY the final assistant message as plain text (capture: "text") and
+        # implicitly auto-approves tool calls (`--afk`). The prompt arrives on stdin.
+        # There is no per-call system-prompt flag (folded into the prompt, like
+        # codex/agy) and no argv flag to allow/deny tools or toggle web — so scry
+        # hands kimi a generated read-only *agent file* (`--agent-file`) that inherits
+        # the built-in `default` agent minus the mutating tools, and toggles web by
+        # also excluding the SearchWeb+FetchURL tools when web is off. That is the
+        # faithful equivalent of claude's `--disallowedTools` / codex's read-only
+        # sandbox, and unlike agy it CAN honor `--no-web`. Auth is `kimi login`
+        # (Kimi Code OAuth — reuses your membership, no API key); we unset
+        # KIMI_API_KEY so a stray key can't divert billing off the subscription.
+        "kimi": {
+            "cmd": ["kimi", "--quiet"],
+            "model_flag": "--model",               # -m / --model NAME
+            "capture": "text",                     # --quiet => plain final message
+            "system_flag": None,                   # no system flag -> fold into prompt
+            "prompt": "stdin",
+            "env_unset": ["KIMI_API_KEY"],         # force subscription (OAuth) auth
+            "timeout": 420,
+            "check": {
+                "probe": ["kimi", "--version"], "verifies_auth": False,
+                "note": "log in for subscription auth:  kimi login  "
+                        "(Kimi Code OAuth — reuses your membership, no API key)",
+                "install": "install Kimi CLI — curl -LsSf https://code.kimi.com/install.sh | bash"
+                           "  (or: uv tool install --python 3.13 kimi-cli)",
+            },
+            # Read-only + web on/off are rendered into a temp agent file, not argv.
+            "agent_file": {
+                "flag": "--agent-file",
+                "extend": "default",
+                "exclude_always": [                # deny mutators (read-only panel)
+                    "kimi_cli.tools.shell:Shell",
+                    "kimi_cli.tools.file:WriteFile",
+                    "kimi_cli.tools.file:StrReplaceFile",
+                    "kimi_cli.tools.agent:Agent",
+                ],
+                "exclude_web_off": [               # web OFF => also deny web tools
+                    "kimi_cli.tools.web:SearchWeb",
+                    "kimi_cli.tools.web:FetchURL",
+                ],
+            },
+            "caps": {},                            # nothing to render into argv
+        },
     },
     # Default panel mirrors OpenRouter's "Quality" preset (claude-opus + gpt + gemini-pro).
     # We have the first two; add the gemini member below once installed for the exact preset.
@@ -253,11 +298,15 @@ def parse_panel(spec: str) -> list:
 # --------------------------------------------------------------------------- #
 
 def render_call(p: dict, model: str, system: str | None, web: bool,
-                settings: dict, outfile: str, stream: bool = False) -> tuple:
+                settings: dict, outfile: str, stream: bool = False,
+                agentfile: str = "") -> tuple:
     """Return (argv, env_overrides) for one provider call, applying Fusion knobs.
     When stream=True and the provider declares a `stream` cap, request the CLI's
     realtime/streaming output format instead of buffered JSON (used only for the
-    final synthesis call, so the answer can type itself out token-by-token)."""
+    final synthesis call, so the answer can type itself out token-by-token).
+    `agentfile` is the path to a provider-generated agent file (e.g. kimi's
+    read-only tool policy); it's rendered as `--agent-file <path>` when the
+    provider declares an `agent_file` record."""
     argv = list(p["cmd"])
     env_over: dict = {}
     caps = p.get("caps", {})
@@ -290,6 +339,11 @@ def render_call(p: dict, model: str, system: str | None, web: bool,
     mot = settings.get("max_output_tokens")
     if mot and caps.get("max_tokens_env"):
         env_over[caps["max_tokens_env"]] = str(mot)
+
+    # Agent file (kimi): a generated read-only tool policy with web on/off baked in.
+    af = p.get("agent_file")
+    if af and agentfile:
+        argv += [af.get("flag", "--agent-file"), agentfile]
 
     if p.get("capture") == "outfile":
         argv += [p.get("outfile_flag", "-o"), outfile]
@@ -346,6 +400,22 @@ def _slice_braces(s: str) -> str | None:
     return s[a:b + 1] if (a != -1 and b > a) else None
 
 
+def render_agent_file(af: dict, web: bool) -> str:
+    """Build a minimal Kimi agent file (YAML) that inherits the built-in `default`
+    agent but excludes the mutating tools (read-only, like scry's other panels) and
+    — when web is off — the web tools too. This is how scry renders Fusion's web
+    on/off and the read-only invariant for kimi, which has no argv flags for either.
+    Hand-written YAML (no PyYAML dependency); every value is a fixed constant."""
+    excl = list(af.get("exclude_always", []))
+    if not web:
+        excl += list(af.get("exclude_web_off", []))
+    lines = ["version: 1", "agent:", f"  extend: {af.get('extend', 'default')}"]
+    if excl:
+        lines.append("  exclude_tools:")
+        lines += [f'    - "{t}"' for t in excl]
+    return "\n".join(lines) + "\n"
+
+
 # --------------------------------------------------------------------------- #
 # CLI invocation
 # --------------------------------------------------------------------------- #
@@ -399,70 +469,84 @@ async def call_cli(cfg: dict, provider_name: str, model: str, system: str | None
         fd, outfile = tempfile.mkstemp(prefix="scry-msg-", suffix=".txt", dir=cwd)
         os.close(fd)
 
-    argv, env_over = render_call(p, model, system, web, settings, outfile)
-    argv[0] = exe                          # run the resolved path from any cwd
+    # Providers that take a generated agent file (kimi) get a temp YAML written here
+    # and removed in the finally below, regardless of how the call exits.
+    agentfile = ""
+    af = p.get("agent_file")
+    if af:
+        fd, agentfile = tempfile.mkstemp(prefix="scry-agent-", suffix=".yaml")
+        os.close(fd)
+        Path(agentfile).write_text(render_agent_file(af, web))
 
-    prompt_is_arg = p.get("prompt") == "arg"
-    if prompt_is_arg:                      # prompt goes in argv, not on stdin
-        argv = append_prompt_arg(argv, p, user_text)
-
-    env = os.environ.copy()
-    for k in p.get("env_unset", []):
-        env.pop(k, None)
-    env.update(env_over)
-    env["SCRY_DEPTH"] = str(depth + 1)  # recursion guard
-
-    timeout = float(p.get("timeout", 300))
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv, stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            env=env, cwd=cwd,
-        )
-    except FileNotFoundError:
-        raise ProviderError(f"command not found: {argv[0]}")
+        argv, env_over = render_call(p, model, system, web, settings, outfile,
+                                     agentfile=agentfile)
+        argv[0] = exe                          # run the resolved path from any cwd
 
-    stdin_bytes = b"" if prompt_is_arg else user_text.encode()
-    try:
-        out, err = await asyncio.wait_for(
-            proc.communicate(stdin_bytes), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        raise ProviderError(f"timeout after {int(timeout)}s")
+        prompt_is_arg = p.get("prompt") == "arg"
+        if prompt_is_arg:                      # prompt goes in argv, not on stdin
+            argv = append_prompt_arg(argv, p, user_text)
 
-    rc = proc.returncode
-    err_txt = err.decode(errors="replace").strip()
+        env = os.environ.copy()
+        for k in p.get("env_unset", []):
+            env.pop(k, None)
+        env.update(env_over)
+        env["SCRY_DEPTH"] = str(depth + 1)  # recursion guard
 
-    if p.get("capture") == "outfile":
-        content = ""
+        timeout = float(p.get("timeout", 300))
         try:
-            content = Path(outfile).read_text(errors="replace").strip()
-        except OSError:
-            pass
-        finally:
+            proc = await asyncio.create_subprocess_exec(
+                *argv, stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=env, cwd=cwd,
+            )
+        except FileNotFoundError:
+            raise ProviderError(f"command not found: {argv[0]}")
+
+        stdin_bytes = b"" if prompt_is_arg else user_text.encode()
+        try:
+            out, err = await asyncio.wait_for(
+                proc.communicate(stdin_bytes), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise ProviderError(f"timeout after {int(timeout)}s")
+
+        rc = proc.returncode
+        err_txt = err.decode(errors="replace").strip()
+
+        if p.get("capture") == "outfile":
+            content = ""
             try:
-                os.remove(outfile)
+                content = Path(outfile).read_text(errors="replace").strip()
             except OSError:
                 pass
-        if not content:
-            content = out.decode(errors="replace").strip()
-    else:
-        raw = out.decode(errors="replace").strip()
-        try:
-            obj = json.loads(raw)
-        except ValueError:
-            obj = None
-        result_path = p.get("result_path", "result")
-        err_field = p.get("error_field")
-        if isinstance(obj, dict) and err_field and obj.get(err_field):
-            detail = obj.get(result_path) or err_txt or f"exit {rc}"
-            raise ProviderError(f"model error: {str(detail)[:200]}")
-        content = extract_json_result(raw, result_path)
+            if not content:
+                content = out.decode(errors="replace").strip()
+        else:
+            raw = out.decode(errors="replace").strip()
+            try:
+                obj = json.loads(raw)
+            except ValueError:
+                obj = None
+            result_path = p.get("result_path", "result")
+            err_field = p.get("error_field")
+            if isinstance(obj, dict) and err_field and obj.get(err_field):
+                detail = obj.get(result_path) or err_txt or f"exit {rc}"
+                raise ProviderError(f"model error: {str(detail)[:200]}")
+            content = extract_json_result(raw, result_path)
 
-    if not content:
-        raise ProviderError(f"exit {rc}: {err_txt[:300] or 'empty output'}")
-    return content
+        if not content:
+            raise ProviderError(f"exit {rc}: {err_txt[:300] or 'empty output'}")
+        return content
+    finally:
+        # Remove any temp files on every exit path (success, timeout, error).
+        for tmp in (outfile, agentfile):
+            if tmp:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
 
 def _stream_extract(obj: dict, fmt: str) -> tuple:
@@ -494,6 +578,10 @@ async def stream_call(cfg: dict, provider_name: str, model: str, system: str | N
     fmt = (p.get("stream") or {}).get("format")
     if not fmt:
         raise ProviderError("streaming not supported for this provider")
+    if p.get("agent_file"):
+        # Streaming doesn't render the generated read-only agent file, which would
+        # drop kimi's tool restrictions. Force the buffered path (call_cli) instead.
+        raise ProviderError("streaming not supported with an agent_file policy")
     exe = resolve_command(p["cmd"][0])
     if exe is None:
         raise ProviderError(f"command not found: {p['cmd'][0]}")
@@ -721,22 +809,329 @@ def do_dry_run(cfg: dict, mode: str, settings: dict) -> None:
         if not p:
             print(f"PROPOSER   (unknown provider '{m['provider']}')")
             continue
-        argv, env = render_call(p, m.get("model", ""), None, web, settings, "{OUTFILE}")
+        argv, env = render_call(p, m.get("model", ""), None, web, settings,
+                                "{OUTFILE}", agentfile="{AGENTFILE}")
         argv, note = _dry_prompt(p, argv, "prompt")
         _show("PROPOSER", argv, env, note)
     if mode == "fusion":
         j = cfg["judge"]
         p = cfg["providers"][j["provider"]]
         sysv = JUDGE_SYSTEM if p.get("system_flag") else None
-        argv, env = render_call(p, j.get("model", ""), sysv, web, settings, "{OUTFILE}")
+        argv, env = render_call(p, j.get("model", ""), sysv, web, settings,
+                                "{OUTFILE}", agentfile="{AGENTFILE}")
         argv, note = _dry_prompt(p, argv, "query+responses")
         _show("JUDGE", argv, env, note)
     a = cfg["aggregator"]
     p = cfg["providers"][a["provider"]]
     sysv = MOA_AGGREGATOR_SYSTEM if p.get("system_flag") else None
-    argv, env = render_call(p, a.get("model", ""), sysv, False, settings, "{OUTFILE}")
+    argv, env = render_call(p, a.get("model", ""), sysv, False, settings,
+                            "{OUTFILE}", agentfile="{AGENTFILE}")
     argv, note = _dry_prompt(p, argv, "query+responses")
     _show("AGGREGATOR", argv, env, note)
+
+
+# --------------------------------------------------------------------------- #
+# Setup wizard (`scry init`) — compose a default panel from the subscription CLIs
+# you actually have, and write it to a config.json. Like `openspec init`. The
+# *best* panel is an empirical question (settle it with scry-eval / DRACO); this
+# just makes the one you want easy to set up. Repeats are allowed on purpose —
+# self-pairing a strong model still improves Fusion's output.
+# --------------------------------------------------------------------------- #
+
+# Suggested (model, label) per provider, used to pre-fill the wizard. The kimi
+# default is Kimi K2.6 — the Moonshot member of OpenRouter's "Budget" Fusion panel
+# (Gemini 3 Flash + Kimi K2.6 + DeepSeek V4 Pro) that landed within ~1% of Fable 5.
+INIT_SUGGEST = {
+    "claude": ("opus", "claude-opus"),
+    "codex":  ("", "codex-gpt"),
+    "agy":    ("Gemini 3.1 Pro (High)", "gemini-pro"),
+    "kimi":   ("kimi-k2.6", "kimi-k2.6"),
+}
+
+
+def _ask(msg: str, default: str = "") -> str:
+    """Prompt on stdout, read one line from stdin; return `default` on empty/EOF."""
+    suffix = f" [{default}]" if default else ""
+    try:
+        s = input(f"{msg}{suffix}: ").strip()
+    except EOFError:
+        s = ""
+    return s or default
+
+
+def _uniq_label(base: str, used: set) -> str:
+    """A label not already in `used` (repeated members get -2/-3 suffixes)."""
+    label, n = (base or "member"), 2
+    while label in used:
+        label, n = f"{base}-{n}", n + 1
+    used.add(label)
+    return label
+
+
+class RuneCircle:
+    """The `scry init` welcome sigil — a distinct animation from the run-time orb.
+
+    A violet summoning ring inscribes itself stroke-by-stroke (a traveling spark),
+    the four corner runes — the "seers" you're about to choose — light in sequence,
+    and the central eye opens last. Truecolor; redrawn in place with ANSI cursor
+    moves, the same way ScryingOrb works. Renders one static "complete" frame when
+    animation isn't possible (non-TTY / NO_COLOR / --no-anim)."""
+    ROWS, COLS = 5, 7
+    FPS = 12
+    EYE = (2, 3)
+    RUNES = [(1, 0), (1, 6), (3, 0), (3, 6)]            # the four seers
+    BORDER = {(0, 1): "╭", (0, 2): "─", (0, 3): "◇", (0, 4): "─", (0, 5): "╮",
+              (2, 0): "│", (2, 6): "│",
+              (4, 1): "╰", (4, 2): "─", (4, 3): "◇", (4, 4): "─", (4, 5): "╯"}
+    # Clockwise inscribe order (rune cells included; drawn dim until they light).
+    ORDER = [(0, 3), (0, 4), (0, 5), (1, 6), (2, 6), (3, 6), (4, 5), (4, 4),
+             (4, 3), (4, 2), (4, 1), (3, 0), (2, 0), (1, 0), (0, 1), (0, 2)]
+    RUNES_ON = [(1, 6), (3, 6), (3, 0), (1, 0)]         # order runes light clockwise
+    EYE_GLYPHS = ["·", "◦", "◉"]
+    SPARK = "✦"
+
+    NI = len(ORDER)            # inscribe frames
+    NR = len(RUNES)            # rune-lighting frames
+    NE = len(EYE_GLYPHS)       # eye-opening frames
+    BUILD = NI + NR + NE       # first idle frame
+
+    @staticmethod
+    def _col(h: float, s: float, v: float) -> str:
+        i = int(h / 60) % 6
+        f = h / 60 - int(h / 60)
+        p, q, t = v * (1 - s), v * (1 - s * f), v * (1 - s * (1 - f))
+        r, g, b = [(v, t, p), (q, v, p), (p, v, t),
+                   (p, q, v), (t, p, v), (v, p, q)][i]
+        return f"\x1b[38;2;{int(r * 255)};{int(g * 255)};{int(b * 255)}m"
+
+    def render(self, frame: int, color: bool = True) -> list:
+        grid = [[" "] * self.COLS for _ in range(self.ROWS)]
+        cols = [[None] * self.COLS for _ in range(self.ROWS)]
+
+        def put(cell, ch, c):
+            grid[cell[0]][cell[1]] = ch
+            cols[cell[0]][cell[1]] = c
+
+        runes_on = self.RUNES_ON
+        spark_i = frame if frame < self.NI else -1
+        runes_lit = (frame - self.NI + 1) if self.NI <= frame < self.NI + self.NR \
+            else (self.NR if frame >= self.NI + self.NR else 0)
+        eye_idx = (frame - self.NI - self.NR) if frame >= self.NI + self.NR else -1
+        idle = max(0, frame - self.BUILD)
+
+        dim = self._col(258, 0.55, 0.50)
+        if frame >= self.BUILD:                       # idle: slow hue drift
+            dim = self._col(258 + 18 * math.sin(idle / 6.0), 0.55, 0.55)
+        lit = self._col(292, 0.62, 1.0)
+        spark = self._col(188, 0.70, 1.0)
+
+        for j, cell in enumerate(self.ORDER):
+            if frame < self.NI and j > frame:
+                continue                              # not yet inscribed
+            ch = "◈" if cell in self.RUNES else self.BORDER[cell]
+            put(cell, (self.SPARK if j == spark_i else ch),
+                spark if j == spark_i else dim)
+        for k in range(runes_lit):
+            put(runes_on[k], "◈", lit)
+
+        if eye_idx >= 0:
+            ev = 1.0 if frame < self.BUILD else 0.7 + 0.3 * (0.5 + 0.5 * math.sin(idle / 4.0))
+            put(self.EYE, self.EYE_GLYPHS[min(eye_idx, self.NE - 1)], self._col(45, 0.85, ev))
+        else:
+            put(self.EYE, "·", dim)
+
+        out = []
+        for r in range(self.ROWS):
+            if color:
+                out.append("".join(
+                    (cols[r][cc] + grid[r][cc] + "\x1b[0m") if grid[r][cc] != " " else " "
+                    for cc in range(self.COLS)))
+            else:
+                out.append("".join(grid[r]))
+        return out
+
+
+def _welcome_lines(on: bool, animate: bool) -> list:
+    def c(s, code):
+        return f"\x1b[{code}m{s}\x1b[0m" if on else s
+    last = "press Enter to choose your models…" if animate else "let's choose your models…"
+    return [
+        c("Welcome to scry", "1"),
+        c("gaze into every model you pay for", "2"),
+        "",
+        "this sets up your default panel:",
+        c("  • which model CLIs to fan out to", "2"),
+        c("  • your judge + synthesis model", "2"),
+        "",
+        "then:",
+        "  " + c("scry --check", "1") + c("   verify your logins", "2"),
+        "  " + c('scry "…"', "1") + c("      fuse an answer", "2"),
+        "",
+        c(last, "36"),
+    ]
+
+
+def _compose_welcome(art: list, text: list) -> list:
+    pad = max(0, (len(text) - len(art)) // 2)
+    full = [" " * RuneCircle.COLS] * pad + art \
+        + [" " * RuneCircle.COLS] * max(0, len(text) - len(art) - pad)
+    rows = []
+    for i in range(max(len(full), len(text))):
+        a = full[i] if i < len(full) else " " * RuneCircle.COLS
+        t = text[i] if i < len(text) else ""
+        rows.append("  " + a + "   " + t)
+    return rows
+
+
+def show_init_welcome(no_anim: bool) -> None:
+    """The animated rune-circle splash atop `scry init`. Runs until Enter on an
+    interactive terminal; otherwise prints one static frame and returns without
+    touching stdin (so piped/scripted `scry init` is unaffected)."""
+    s = sys.stderr
+    on = color_enabled(s)
+    reduced = no_anim or ("SCRY_NO_ANIM" in os.environ)
+    try:
+        cols = shutil.get_terminal_size((80, 24)).columns
+    except OSError:
+        cols = 80
+    circle = RuneCircle()
+    animate = on and not reduced and s.isatty() and sys.stdin.isatty() and cols >= 50
+
+    if not animate:
+        art = circle.render(RuneCircle.BUILD, color=on)
+        s.write("\n" + "\n".join(_compose_welcome(art, _welcome_lines(on, False))) + "\n\n")
+        s.flush()
+        return
+
+    try:
+        import select
+    except ImportError:
+        select = None
+    text = _welcome_lines(on, True)
+    s.write("\x1b[?25l")  # hide cursor
+    s.flush()
+    drawn, frame = 0, 0
+    try:
+        while True:
+            lines = _compose_welcome(circle.render(frame), text)
+            buf = [f"\x1b[{drawn}A"] if drawn else []
+            buf += ["\x1b[2K" + ln + "\n" for ln in lines]
+            s.write("".join(buf))
+            s.flush()
+            drawn, frame = len(lines), frame + 1
+            if select is not None:
+                if select.select([sys.stdin], [], [], 1.0 / RuneCircle.FPS)[0]:
+                    sys.stdin.readline()
+                    break
+            else:                                  # no select (e.g. Windows): auto-advance
+                time.sleep(1.0 / RuneCircle.FPS)
+                if frame > RuneCircle.BUILD + 36:
+                    break
+    except (KeyboardInterrupt, OSError):
+        pass
+    finally:
+        if drawn:
+            s.write(f"\x1b[{drawn}A\x1b[0J")       # wipe the splash
+        s.write("\x1b[?25h")                       # restore cursor
+        s.flush()
+
+
+def do_init(cfg: dict, out: str | None, force: bool, no_anim: bool = False) -> int:
+    on = color_enabled(sys.stderr)
+
+    def c(s: str, code: str) -> str:
+        return f"\x1b[{code}m{s}\x1b[0m" if on else s
+
+    providers = cfg.get("providers", {})
+    names = list(providers.keys())
+    if not names:
+        print(c("no providers defined in config — nothing to set up.", "31"))
+        return 1
+
+    show_init_welcome(no_anim)
+    print(c("Choose your panel", "1") + " — the models scry fans each prompt out to."
+          " Repeats are fine (self-pairing still helps).\n")
+    for i, name in enumerate(names, 1):
+        installed = shutil.which(providers[name]["cmd"][0]) is not None
+        mark = c("✓ installed", "32") if installed else c("· not found", "33")
+        sug = INIT_SUGGEST.get(name, ("", name))[0]
+        print(f"  {i}. {name:<7} {mark}" + (f"   suggested model: {sug}" if sug else ""))
+    print()
+
+    sel = _ask("Panel members — comma-separated numbers (repeats ok; add a model "
+               "with ':', e.g. '1,2,4' or '1:opus,4:kimi-k2.6')")
+    panel: list = []
+    used_labels: set = set()
+    for tok in sel.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        idx, sep, model = tok.partition(":")
+        idx, model = idx.strip(), model.strip()
+        if not idx.isdigit() or not (1 <= int(idx) <= len(names)):
+            print(c(f"  ! skipping '{tok}' (not one of 1-{len(names)})", "33"))
+            continue
+        if ":" in model:  # 'provider' is chosen by number, so a model can't contain ':'
+            print(c(f"  ! skipping '{tok}' (model can't contain ':')", "33"))
+            continue
+        name = names[int(idx) - 1]
+        if shutil.which(providers[name]["cmd"][0]) is None:
+            print(c(f"  · note: '{name}' isn't installed yet — added anyway; run "
+                    f"scry --check after installing it", "33"))
+        sug_model, sug_label = INIT_SUGGEST.get(name, ("", name))
+        model = model or sug_model
+        base = sug_label if (model == sug_model and sug_label) \
+            else name + (f"-{model}" if model else "")
+        panel.append({"provider": name, "model": model,
+                      "label": _uniq_label(base, used_labels)})
+
+    if not panel:
+        print(c("\nNo panel members selected — nothing written.", "31"))
+        return 1
+
+    # Judge + aggregator default to the first panel member (Fusion: judge=outer).
+    p0 = panel[0]
+    first = p0["provider"] + (f":{p0['model']}" if p0["model"] else "")
+    judge = _ask("Judge model (provider[:model])", first)
+    aggr = _ask("Aggregator / synthesis model (provider[:model])", first)
+    # Judge/aggregator are free text — validate the provider exists before writing,
+    # so init fails here rather than at the first real run.
+    for role, spec in (("judge", parse_member(judge)), ("aggregator", parse_member(aggr))):
+        if spec["provider"] not in providers:
+            print(c(f"  ! {role} provider '{spec['provider']}' is not configured "
+                    f"(choose from: {', '.join(names)})", "31"))
+            return 1
+    web = _ask("Enable web search on the panel + judge? (y/n)", "y").lower().startswith("y")
+
+    new_cfg = {
+        "mode": "fusion",
+        "settings": {"web_tools": web, "max_tool_calls": 8,
+                     "effort": None, "max_output_tokens": None},
+        "panel": panel,
+        "judge": parse_member(judge),
+        "aggregator": parse_member(aggr),
+    }
+
+    default_out = out or str(Path.cwd() / "config.json")
+    dest = Path(out) if out else Path(_ask("Write config to", default_out))
+    if dest.exists() and not force:
+        if not _ask(f"{dest} exists — overwrite? (y/n)", "n").lower().startswith("y"):
+            print(c("Aborted — nothing written.", "31"))
+            return 1
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps(new_cfg, indent=2) + "\n")
+    except OSError as e:
+        print(c(f"error: could not write {dest}: {e}", "31"))
+        return 1
+
+    print()
+    print(c("✓ wrote ", "32") + str(dest))
+    print(f"  panel: {', '.join(m['label'] for m in panel)}")
+    print(f"  judge: {judge}    aggregator: {aggr}    web: {'on' if web else 'off'}")
+    print("\nNext:  " + c("scry --check", "1")
+          + '   then   ' + c('scry "your question"', "1"))
+    return 0
 
 
 # --------------------------------------------------------------------------- #
@@ -1078,7 +1473,8 @@ def main() -> int:
         prog="scry",
         description="Local OpenRouter-Fusion-style multi-model synthesis over "
                     "headless subscription CLIs.")
-    ap.add_argument("prompt", nargs="*", help="the prompt (or pipe it via stdin)")
+    ap.add_argument("prompt", nargs="*",
+                    help="the prompt (or pipe it via stdin); pass 'init' to run the setup wizard")
     ap.add_argument("--mode", choices=["fusion", "synthesize"], default=None,
                     help="fusion = 3-stage panel/judge/synthesis (default); "
                          "synthesize = 2-stage panel/synthesis")
@@ -1105,7 +1501,11 @@ def main() -> int:
     ap.add_argument("--no-map", action="store_true",
                     help="never print the consensus map")
     ap.add_argument("--config", help="path to a config.json")
-    ap.add_argument("--panel", help="override panel, e.g. 'claude:opus,codex,gemini:pro'")
+    ap.add_argument("--out", help="(with `init`) path to write the generated config.json")
+    ap.add_argument("--force", action="store_true",
+                    help="(with `init`) overwrite an existing config without prompting")
+    ap.add_argument("--panel",
+                    help="override panel, e.g. 'claude:opus,codex,kimi:kimi-k2.6'")
     ap.add_argument("--aggregator", help="override aggregator, e.g. 'claude:opus'")
     ap.add_argument("--judge", help="override judge, e.g. 'claude:opus'")
     ap.add_argument("--quiet", action="store_true", help="suppress progress on stderr")
@@ -1113,6 +1513,11 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+
+    # `scry init` — interactive setup wizard; ignores the run-time overrides below.
+    if args.prompt[:1] == ["init"]:
+        return do_init(cfg, args.out, args.force, args.no_anim)
+
     if args.panel:
         cfg["panel"] = parse_panel(args.panel)
     if args.aggregator:

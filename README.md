@@ -8,7 +8,7 @@
 
 **Local Mixture-of-Agents over the AI subscriptions you already pay for.** `scry` replicates
 **OpenRouter's Fusion** capability *without* OpenRouter and *without* API keys: it drives the AI
-CLIs you already pay for (Claude Code, OpenAI Codex, Google Antigravity) in headless mode, so
+CLIs you already pay for (Claude Code, OpenAI Codex, Google Antigravity, Moonshot Kimi) in headless mode, so
 every call bills against your existing subscription. It fans a prompt out to several models —
 each with web search — has one model deliberate over their answers, and synthesizes a single
 better answer. One stdlib-only Python file; nothing to `pip install`.
@@ -51,7 +51,7 @@ Everything else is matched:
 | Fusion behavior | `scry` |
 |---|---|
 | Parallel panel | ✅ `asyncio` fan-out |
-| `web_search` + `web_fetch` on panel **and** judge, **off** for synthesis | ✅ claude (`WebSearch`/`WebFetch`) + codex (`web_search=live`) + agy (Gemini grounding, on by default; can't be force-disabled) |
+| `web_search` + `web_fetch` on panel **and** judge, **off** for synthesis | ✅ claude (`WebSearch`/`WebFetch`) + codex (`web_search=live`) + kimi (`SearchWeb`/`FetchURL`, toggled via the generated agent file — honors `--no-web`) + agy (Gemini grounding, on by default; can't be force-disabled) |
 | Judge compares → 5-field JSON (consensus/contradictions/partial_coverage/unique_insights/blind_spots) | ✅ |
 | Judge defaults to the outer (synthesis) model | ✅ |
 | `max_tool_calls` cap (default 8) | ✅ claude (`--max-turns`); ⚠️ no codex equivalent |
@@ -69,6 +69,12 @@ Everything else is matched:
   - **Google Antigravity** (`agy`) — Gemini panel member. Headless via `agy -p "<prompt>"`. Wired in by
     default (`Gemini 3.1 Pro (High)`). See "Adding Google" to change the model. **Live web search works**
     via Gemini grounding (on by default — verified).
+  - **Moonshot Kimi** (`kimi`) — `kimi login` (Kimi Code OAuth — reuses your membership, **no API key**).
+    Headless via `kimi --quiet`. Suggested model `kimi-k2.6` (the Kimi member of OpenRouter's near-Fable
+    "Budget" Fusion panel). Web via `SearchWeb`/`FetchURL`. See "Adding Moonshot" below.
+
+> New? Run **`scry init`** — an interactive setup wizard (like `openspec init`) that detects which of
+> these CLIs you have and writes your default panel to a `config.json`.
 
 ## Install
 
@@ -85,15 +91,20 @@ chmod +x scry
 ln -s "$PWD/scry" /usr/local/bin/scry   # or copy anywhere on PATH
 ```
 
-Then confirm your model CLIs are installed and logged in (this spends nothing):
+Then set up your panel and confirm your CLIs are logged in (both spend nothing):
 
 ```sh
-scry --check
+scry init       # interactive: pick which CLIs to use → writes your default panel
+scry --check    # pre-flight: are those CLIs installed + logged in?
 ```
+
+`scry init` is optional — `scry` runs with built-in defaults — but it's the fastest way to
+compose a panel from the subscriptions you actually have (Kimi included).
 
 ## Usage
 
 ```sh
+scry init                                   # interactive setup: choose CLIs → write your panel
 scry --check                                # pre-flight: are my CLIs installed + logged in?
 scry "Explain why my Postgres query is slow and how to fix it"
 cat prompt.txt | scry                       # prompt from stdin
@@ -115,7 +126,7 @@ scry --no-anim "..."                        # plain progress (reduced motion); h
 | `--effort low\|medium\|high\|xhigh\|max` | reasoning effort, every stage (where supported) |
 | `--max-tool-calls N` | cap web tool iterations (Fusion default 8; claude only) |
 | `--max-output-tokens N` | cap output tokens (claude only) |
-| `--panel`, `--judge`, `--aggregator` | override models, e.g. `--panel "claude:opus,codex,gemini:pro"` |
+| `--panel`, `--judge`, `--aggregator` | override models, e.g. `--panel "claude:opus,codex,agy:Gemini 3.1 Pro (High),kimi:kimi-k2.6"` |
 | `--check` | verify each provider CLI is installed + logged in, then exit (no paid calls) |
 | `--no-anim` | disable the scrying-orb animation (reduced motion); also auto-off under `NO_COLOR`/`TERM=dumb` |
 | `--json`, `--show-proposers`, `--dry-run`, `--quiet` | output / debugging |
@@ -129,12 +140,28 @@ Fusion's lift comes from the synthesis step, not model diversity.
 at `~/.config/scry/config.json` (or pass `--config path`). See the bundled [`config.json`](config.json).
 
 - **`settings`** — the Fusion knobs (`web_tools`, `max_tool_calls`, `effort`, `max_output_tokens`).
-- **`providers`** — how to drive each CLI: base `cmd`, `model_flag`, capture (`json`+`result_path`
-  or `outfile`+`-o`), `system_flag`, `env_unset`, `timeout`, and a **`caps`** block mapping each
-  Fusion knob to that CLI's flags (`web_on`/`web_off`, `tool_cap`, `effort`, `max_tokens_env`).
-- **`panel`** — `{provider, model, label}` proposers. Defaults to OpenRouter's "Quality" preset
-  shape (claude-opus + gpt + gemini-pro); ships with the first two installed.
+- **`providers`** — how to drive each CLI: base `cmd`, `model_flag`, capture (`json`+`result_path`,
+  `outfile`+`-o`, or `text`), `system_flag`, `env_unset`, `timeout`, and a **`caps`** block mapping each
+  Fusion knob to that CLI's flags (`web_on`/`web_off`, `tool_cap`, `effort`, `max_tokens_env`). A
+  provider can instead carry an **`agent_file`** block (kimi) when the CLI has no argv flags for
+  tool/web control — scry then writes a temp read-only agent file per call (see "Adding Moonshot").
+- **`panel`** — `{provider, model, label}` proposers. Repeats are allowed (self-pairing still helps).
+  Built-in default mirrors OpenRouter's "Quality" preset shape (claude-opus + gpt + gemini-pro); the
+  best panel is an empirical question, so compose your own with **`scry init`** or `--panel`.
 - **`judge`**, **`aggregator`** — `{provider, model}` per stage (default `claude:opus`).
+
+### Setup wizard (`scry init`)
+
+`scry init` is a small interactive wizard (in the spirit of `openspec init`). It opens with an
+animated **rune-circle** splash — a violet sigil that inscribes itself stroke-by-stroke, lights the
+four "seer" runes, and opens a central eye (distinct from the run-time scrying orb; press Enter to
+continue) — then lists the known provider CLIs with their install status, lets you pick panel members
+— **repeats allowed**, with an optional `:model` (e.g. `1:opus,4:kimi-k2.6`) — then asks for a judge,
+an aggregator, and whether to enable web search, and writes a minimal `config.json` (it references the
+built-in provider records, so the file stays small). Flags: `--out PATH` to choose where to write,
+`--force` to overwrite without a prompt. The splash honors `--no-anim` / `NO_COLOR` / non-TTY (static
+frame, no keypress needed), so scripted `scry init --out …` stays non-interactive. Re-run it any time
+to recompose your panel.
 
 ### Google (Antigravity / `agy`)
 
@@ -152,6 +179,28 @@ no API key. The default panel uses `Gemini 3.1 Pro (High)`, completing the 3-mod
 - **Web search:** works out of the box via Gemini's built-in grounding (**on by default** — verified:
   `agy` returns live, post-cutoff data with `vertexaisearch…/grounding-api-redirect` citations). There's
   no flag to force or disable it, so `--no-web` does *not* suppress agy's grounding (see Caveats).
+
+### Moonshot (Kimi / `kimi`)
+
+Moonshot is wired in via the **Kimi CLI** (`kimi`), authenticated with `kimi login` (Kimi Code OAuth —
+it reuses your Kimi membership, **no API key**; we unset `KIMI_API_KEY` so a stray key can't divert
+billing off the subscription). Install it with `curl -LsSf https://code.kimi.com/install.sh | bash`
+(or `uv tool install --python 3.13 kimi-cli`).
+
+- **Default model:** `kimi-k2.6` — the Kimi member of OpenRouter's **Budget** Fusion panel
+  (Gemini 3 Flash + Kimi K2.6 + DeepSeek V4 Pro), which landed within ~1% of Fable 5 at ~half the cost.
+  Pin a different one per-run: `scry --panel "claude:opus,codex,kimi:kimi-k2-thinking-turbo" "..."`,
+  or via `scry init`.
+- **How it's driven:** `kimi --quiet` runs print mode (`--print --output-format text
+  --final-message-only`), which prints **only the final answer as plain text** (`"capture": "text"`) and
+  auto-approves tool calls (`--afk`); the prompt arrives on **stdin**. There's no per-call
+  system-prompt flag, so (like codex/agy) the system prompt is folded into the prompt.
+- **Read-only + web toggle (the interesting bit):** Kimi has no argv flags to allow/deny tools or turn
+  web on/off. Instead, scry hands each call a **generated agent file** (`--agent-file`) that `extend`s
+  Kimi's built-in `default` agent but excludes the mutating tools (`Shell`, `WriteFile`,
+  `StrReplaceFile`, `Agent`) — making it read-only like the other panels — and, when web is off, also
+  excludes `SearchWeb`/`FetchURL`. So **unlike agy, kimi honors `--no-web`** (web off for synthesis, per
+  Fusion). The file is written to a temp path per call and removed afterward.
 
 ### DeepSeek — the API-key exception (testing only)
 
@@ -203,7 +252,7 @@ scry --check --panel "...,deepseek:deepseek-chat"    # shows: ✓ deepseek insta
   addressed — i.e. what the extra fusion cost actually bought. Auto-shown on a TTY; `--map` forces
   it, `--no-map` hides it.
 - **Accessible** — honors `NO_COLOR` / `FORCE_COLOR` / `TERM=dumb`; `--no-anim` (or `SCRY_NO_ANIM`)
-  swaps the scrying-orb animation for plain progress lines.
+  swaps the scrying-orb animation (and the `scry init` rune-circle splash) for a plain static fallback.
 
 ## Evals — does fusion actually beat the best single model?
 
@@ -299,6 +348,12 @@ variance — this proves the harness, not a benchmark figure).
   `--no-web` can't disable agy's grounding (the panel's other members do honor it). `--sandbox` is
   available if you want terminal restrictions. Default `--print-timeout` is 5m; `scry` sets 400s under a
   420s provider timeout.
+- **Moonshot (`kimi`).** Auth is `kimi login` (Kimi Code OAuth — reuses your membership, no API key);
+  `KIMI_API_KEY` is unset so a stray key can't divert billing off the subscription. Print mode
+  auto-approves tool calls (`--afk`), so scry constrains it to **read-only** via a generated
+  `--agent-file` (no `Shell`/`WriteFile`/`StrReplaceFile`/`Agent`); that same file is how `--no-web` is
+  honored (it also drops `SearchWeb`/`FetchURL`). `kimi --version` only confirms the binary — login isn't
+  cheaply verifiable, so `scry --check` reports "installed & runnable", not "logged in". 420s timeout.
 - **`ANTHROPIC_API_KEY`** is unset for `claude` calls so it never silently bills the Console API.
   Don't run `claude` here under `--bare` (that path requires a key).
 - **Cost** ≈ sum of every panel member + judge + synthesis call (like real Fusion), plus web-search

@@ -13,6 +13,20 @@ All notable changes to this project are documented here. The format follows
   its name: gaze into the orb, see one answer from many models.
 
 ### Added
+- **Moonshot Kimi provider (`kimi`)** — fan a prompt out to Kimi via the Kimi CLI in
+  headless print mode (`kimi --quiet`), authenticated with `kimi login` (Kimi Code
+  OAuth — reuses your membership, no API key). Default model `kimi-k2.6` (the Kimi
+  member of OpenRouter's near-Fable "Budget" panel). Because Kimi's print mode has no
+  argv flags for tool/web control, scry drives it with a **generated per-call agent
+  file** (`--agent-file`) that makes it read-only (no `Shell`/`WriteFile`/`StrReplaceFile`/
+  `Agent`) and toggles web by excluding `SearchWeb`/`FetchURL` — so, unlike agy, kimi
+  honors `--no-web`. Wired into `config.json`, `scry --check`, and `scry-eval`.
+- **`scry init`** — an interactive setup wizard (in the spirit of `openspec init`) that
+  lists your installed provider CLIs, lets you compose a panel (**repeats allowed**, with
+  optional `:model`), pick a judge + aggregator, toggle web search, and writes a minimal
+  `config.json`. Flags: `--out PATH`, `--force`. It opens with an animated **rune-circle**
+  welcome splash (a self-inscribing violet sigil — distinct from the run-time scrying orb)
+  that degrades to a static frame under `--no-anim` / `NO_COLOR` / non-TTY.
 - **Streaming** — on an interactive terminal the fused answer now types itself out
   token-by-token as the synthesizer writes it (claude aggregator, `stream-json`),
   instead of appearing as a sudden block. Buffered fallback for piped/`--json`

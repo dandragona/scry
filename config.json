@@ -82,6 +82,22 @@
         "install": "install Google Antigravity and its 'agy' CLI"
       },
       "caps": {}
+    },
+
+    "deepseek": {
+      "_note": "API-KEY EXCEPTION (testing only). DeepSeek has no subscription CLI, so the scry-deepseek adapter (a sibling script resolved next to scry) calls DeepSeek's OpenAI-compatible API and needs DEEPSEEK_API_KEY. Deliberately NOT in the default panel — add via --panel '...,deepseek:deepseek-chat' or here. Knowledge-only (no web search). Set model to the V4 Pro id, e.g. 'deepseek-chat' or 'deepseek-reasoner'.",
+      "cmd": ["scry-deepseek"],
+      "model_flag": "--model",
+      "capture": "text",
+      "system_flag": "--system",
+      "prompt": "stdin",
+      "timeout": 360,
+      "check": {
+        "verifies_auth": false,
+        "note": "the one API-key provider — set DEEPSEEK_API_KEY; knowledge-only (no web)",
+        "install": "ships with scry as ./scry-deepseek; export DEEPSEEK_API_KEY"
+      },
+      "caps": {}
     }
   },
 

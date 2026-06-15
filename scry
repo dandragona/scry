@@ -174,6 +174,25 @@ DEFAULT_CONFIG = {
             },
             "caps": {},
         },
+        # DeepSeek — the API-key EXCEPTION. No subscription CLI exists, so the
+        # `scry-deepseek` adapter (a sibling script, resolved next to scry) calls
+        # DeepSeek's OpenAI-compatible API and needs DEEPSEEK_API_KEY. For TESTING /
+        # recreating OpenRouter's budget-panel DRACO result only — deliberately NOT
+        # in the default panel. Knowledge-only (the raw API has no web search).
+        "deepseek": {
+            "cmd": ["scry-deepseek"],
+            "model_flag": "--model",
+            "capture": "text",
+            "system_flag": "--system",
+            "prompt": "stdin",
+            "timeout": 360,
+            "check": {
+                "verifies_auth": False,
+                "note": "the one API-key provider — set DEEPSEEK_API_KEY; knowledge-only (no web)",
+                "install": "ships with scry as ./scry-deepseek; export DEEPSEEK_API_KEY",
+            },
+            "caps": {},
+        },
     },
     # Default panel mirrors OpenRouter's "Quality" preset (claude-opus + gpt + gemini-pro).
     # We have the first two; add the gemini member below once installed for the exact preset.
@@ -342,14 +361,34 @@ class AllPanelsFailed(RuntimeError):
         self.responses = responses
 
 
+def resolve_command(cmd0: str):
+    """Resolve a provider command to a runnable path: PATH first, then a script
+    sitting next to scry, then the cwd. Returning an absolute path lets a local
+    adapter (e.g. scry-deepseek) run even though proposers execute in a throwaway
+    cwd. Returns the path string, or None if nothing executable is found."""
+    found = shutil.which(cmd0)
+    if found:
+        return found
+    if os.sep in cmd0 or (os.altsep and os.altsep in cmd0):  # explicit path
+        cand = Path(cmd0)
+        if cand.is_file() and os.access(str(cand), os.X_OK):
+            return str(cand.resolve())
+    for base in (Path(__file__).resolve().parent, Path.cwd()):
+        cand = base / cmd0
+        if cand.is_file() and os.access(str(cand), os.X_OK):
+            return str(cand)
+    return None
+
+
 async def call_cli(cfg: dict, provider_name: str, model: str, system: str | None,
                    user: str, cwd: str, depth: int, web: bool, settings: dict) -> str:
     providers = cfg.get("providers", {})
     if provider_name not in providers:
         raise ProviderError(f"unknown provider '{provider_name}'")
     p = providers[provider_name]
-    if shutil.which(p["cmd"][0]) is None:
-        raise ProviderError(f"command not found on PATH: {p['cmd'][0]}")
+    exe = resolve_command(p["cmd"][0])
+    if exe is None:
+        raise ProviderError(f"command not found: {p['cmd'][0]}")
 
     user_text = user
     if system and not p.get("system_flag"):  # fold system into prompt (e.g. codex)
@@ -361,6 +400,7 @@ async def call_cli(cfg: dict, provider_name: str, model: str, system: str | None
         os.close(fd)
 
     argv, env_over = render_call(p, model, system, web, settings, outfile)
+    argv[0] = exe                          # run the resolved path from any cwd
 
     prompt_is_arg = p.get("prompt") == "arg"
     if prompt_is_arg:                      # prompt goes in argv, not on stdin
@@ -454,13 +494,15 @@ async def stream_call(cfg: dict, provider_name: str, model: str, system: str | N
     fmt = (p.get("stream") or {}).get("format")
     if not fmt:
         raise ProviderError("streaming not supported for this provider")
-    if shutil.which(p["cmd"][0]) is None:
-        raise ProviderError(f"command not found on PATH: {p['cmd'][0]}")
+    exe = resolve_command(p["cmd"][0])
+    if exe is None:
+        raise ProviderError(f"command not found: {p['cmd'][0]}")
 
     user_text = user
     if system and not p.get("system_flag"):
         user_text = system + "\n\n" + user
     argv, env_over = render_call(p, model, system, False, settings, "", stream=True)
+    argv[0] = exe
 
     env = os.environ.copy()
     for k in p.get("env_unset", []):
@@ -770,8 +812,8 @@ def do_check(cfg: dict, mode: str, settings: dict) -> int:
             continue
         chk = p.get("check") or {}
         binary = p["cmd"][0]
-        if shutil.which(binary) is None:
-            print(f"  {c('✗', '31')} {name:<9} {c('not installed', '31')} — '{binary}' not on PATH")
+        if resolve_command(binary) is None:
+            print(f"  {c('✗', '31')} {name:<9} {c('not installed', '31')} — '{binary}' not found")
             if chk.get("install"):
                 print(f"      {c('↳ ' + chk['install'], '2')}")
             hard_fail = True

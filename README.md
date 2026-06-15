@@ -13,6 +13,12 @@ every call bills against your existing subscription. It fans a prompt out to sev
 each with web search — has one model deliberate over their answers, and synthesizes a single
 better answer. One stdlib-only Python file; nothing to `pip install`.
 
+<p align="center">
+  <img src="docs/demo.gif" alt="scry in action: a panel of models race, a judge compares them, the fused answer streams in, then a consensus map of where they agreed and clashed" width="720">
+</p>
+
+<sub>A real run (`--no-web`, sonnet panel): the orb gazes while the panel races, the answer streams in token-by-token, then the consensus map shows where the models agreed, contradicted, and what they all missed.</sub>
+
 ```
                  ┌──────────► claude  (opus)  + web ─┐
    your prompt ──┤                                   ├─ PANEL  (parallel, web on)
@@ -146,6 +152,34 @@ no API key. The default panel uses `Gemini 3.1 Pro (High)`, completing the 3-mod
 - **Web search:** works out of the box via Gemini's built-in grounding (**on by default** — verified:
   `agy` returns live, post-cutoff data with `vertexaisearch…/grounding-api-redirect` citations). There's
   no flag to force or disable it, so `--no-web` does *not* suppress agy's grounding (see Caveats).
+
+### DeepSeek — the API-key exception (testing only)
+
+scry is built to avoid API keys, but DeepSeek has **no subscription CLI** — only its API. For
+*testing* (e.g. recreating OpenRouter's budget-panel DRACO result), scry ships a small stdlib
+adapter, **`scry-deepseek`**, that calls DeepSeek's OpenAI-compatible API. It is the **one provider
+that needs an API key**:
+
+```sh
+cp .env.example .env && $EDITOR .env                 # add DEEPSEEK_API_KEY=sk-… (gitignored; recommended)
+# …or, equivalently, export it in your shell:
+export DEEPSEEK_API_KEY=sk-...                        # platform.deepseek.com (metered, pay-as-you-go)
+scry --panel "claude:opus,codex,deepseek:deepseek-chat" "..."
+scry --check --panel "...,deepseek:deepseek-chat"    # shows: ✓ deepseek installed
+```
+
+- **Key management:** put `DEEPSEEK_API_KEY` in a local **`.env`** (copy `.env.example`; it's gitignored —
+  never commit it) or `export` it. `scry-deepseek` auto-loads `.env`; real environment variables win. Using
+  `.env` keeps the key scoped to the `scry-deepseek` process — the other providers never see it. Keys never
+  belong in `config.json`. See [SECURITY.md](SECURITY.md).
+- The adapter **resolves automatically as a sibling of `scry`** — scry now resolves a provider command
+  by PATH → next-to-scry → cwd, so no install/symlink is needed even though proposers run in a temp cwd.
+- **Not in the default panel** — opt in via `--panel` or `config.json`.
+- **Knowledge-only:** the raw chat API has no web search, so this member is handicapped on web-research
+  tasks like DRACO. Set the model to your target id (`deepseek-chat`, `deepseek-reasoner`, or the V4 Pro
+  id); base URL overridable via `DEEPSEEK_BASE_URL`.
+- This deliberately **breaks the no-API-key rule** — it bills per token, not against a flat
+  subscription. Keep it for testing; drop it from the panel for normal use.
 
 ## Robustness
 

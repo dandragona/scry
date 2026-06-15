@@ -20,6 +20,14 @@ shells out to subprocesses and handles credentials indirectly, so:
 - **It unsets `ANTHROPIC_API_KEY`** for `claude` calls (`env_unset` in
   `config.json`) so a run authenticates against your Claude subscription and can
   **never silently bill the Console/API**. Don't remove that unless you mean to.
+- **API keys live in the environment, never the repo.** The subscription CLIs
+  (`claude`/`codex`/`agy`/`kimi`) authenticate via their own logins — `scry` never
+  sees or stores those. The only key `scry` itself reads is **`DEEPSEEK_API_KEY`**
+  (the optional DeepSeek provider). Put it in your shell or a local **`.env`**
+  (gitignored — copy `.env.example`); real environment variables take precedence.
+  Keeping it in `.env` rather than `export`-ing it scopes the key to the
+  `scry-deepseek` process, so the other providers' subprocesses never receive it.
+  Never commit `.env`, and never put keys in `config.json`.
 - **Panel/judge calls run with web tools and read-only file tools enabled, but
   mutators disabled** (`--disallowedTools Bash Edit Write NotebookEdit`), and in
   a throwaway temp working directory so a proposer can't see or modify your repo.

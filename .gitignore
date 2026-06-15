@@ -1,3 +1,11 @@
+# --- secrets ---------------------------------------------------------------
+# API keys live in the environment or a local .env — NEVER commit them. scry's
+# subscription CLIs manage their own login; the only key scry reads is
+# DEEPSEEK_API_KEY (optional DeepSeek provider). Copy .env.example -> .env.
+.env
+.env.*
+!.env.example
+
 # --- scry run/eval artifacts ----------------------------------------------
 # The DRACO dataset is fetched on demand (see README) — never commit it (~900 KB).
 eval/draco-test.jsonl

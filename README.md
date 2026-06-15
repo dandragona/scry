@@ -158,6 +158,19 @@ no API key. The default panel uses `Gemini 3.1 Pro (High)`, completing the 3-mod
 - **No repo bleed-in** — proposers run in a throwaway temp cwd, so they answer as plain models.
 - **Recursion guard** — `SCRY_DEPTH` is set in child env.
 
+## Live output & the consensus map
+
+- **Streaming** — on an interactive terminal the fused answer types itself out token-by-token as
+  the synthesizer writes it (claude aggregator, via `--output-format stream-json`). Piped or
+  `--json` output stays byte-clean and buffered; a provider that can't stream falls back silently.
+- **Consensus map** — after a fusion run, `scry` surfaces the judge's analysis (otherwise computed
+  and discarded) as a colored panel: what the panel **agreed** on (trust it), where they
+  **contradicted** (scrutinize), each model's **unique insight**, and the **blind spots** none
+  addressed — i.e. what the extra fusion cost actually bought. Auto-shown on a TTY; `--map` forces
+  it, `--no-map` hides it.
+- **Accessible** — honors `NO_COLOR` / `FORCE_COLOR` / `TERM=dumb`; `--no-anim` (or `SCRY_NO_ANIM`)
+  swaps the scrying-orb animation for plain progress lines.
+
 ## Evals — does fusion actually beat the best single model?
 
 Anecdotes ("the fused answer looked better") aren't evidence. `scry-eval` measures the
@@ -259,5 +272,6 @@ variance — this proves the harness, not a benchmark figure).
 
 ## Out of scope
 
-`temperature` / `max_completion_tokens` (no CLI equivalent), multi-layer MoA, streaming the final
-answer token-by-token.
+`temperature` / `max_completion_tokens` (no CLI equivalent) and multi-layer MoA. (Streaming the
+final answer token-by-token is now supported for the synthesis stage on a TTY — see "Live output
+& the consensus map" above.)

@@ -115,6 +115,12 @@ DEFAULT_CONFIG = {
                         "'claude -p' draws from your monthly Agent SDK credit.",
                 "install": "install Claude Code — https://claude.com/claude-code",
             },
+            # Realtime output for the final synthesis (token-by-token reveal).
+            "stream": {
+                "format": "claude",
+                "args": ["--output-format", "stream-json",
+                         "--include-partial-messages", "--verbose"],
+            },
             "caps": {
                 # web ON: allow web + read-only tools, deny mutators
                 "web_on": ["--allowedTools", "WebSearch,WebFetch,Read,Grep,Glob"],
@@ -228,15 +234,20 @@ def parse_panel(spec: str) -> list:
 # --------------------------------------------------------------------------- #
 
 def render_call(p: dict, model: str, system: str | None, web: bool,
-                settings: dict, outfile: str) -> tuple:
-    """Return (argv, env_overrides) for one provider call, applying Fusion knobs."""
+                settings: dict, outfile: str, stream: bool = False) -> tuple:
+    """Return (argv, env_overrides) for one provider call, applying Fusion knobs.
+    When stream=True and the provider declares a `stream` cap, request the CLI's
+    realtime/streaming output format instead of buffered JSON (used only for the
+    final synthesis call, so the answer can type itself out token-by-token)."""
     argv = list(p["cmd"])
     env_over: dict = {}
     caps = p.get("caps", {})
 
     if model and p.get("model_flag"):
         argv += [p["model_flag"], model]
-    if p.get("capture") == "json" and p.get("json_output_flag"):
+    if stream and (p.get("stream") or {}).get("args"):
+        argv += list(p["stream"]["args"])
+    elif p.get("capture") == "json" and p.get("json_output_flag"):
         argv += list(p["json_output_flag"])
     if system and p.get("system_flag"):
         argv += [p["system_flag"], system]
@@ -414,6 +425,95 @@ async def call_cli(cfg: dict, provider_name: str, model: str, system: str | None
     return content
 
 
+def _stream_extract(obj: dict, fmt: str) -> tuple:
+    """From one parsed stream-event object return (delta_text|None, final_text|None)."""
+    if fmt == "claude":
+        t = obj.get("type")
+        if t == "stream_event":
+            ev = obj.get("event") or {}
+            if ev.get("type") == "content_block_delta":
+                return (ev.get("delta") or {}).get("text"), None
+            return None, None
+        if t == "result":
+            r = obj.get("result")
+            return None, (r if isinstance(r, str) else None)
+        if t == "assistant":  # full message — a fallback final if no deltas/result
+            parts = (obj.get("message") or {}).get("content") or []
+            txt = "".join(p.get("text", "") for p in parts
+                          if isinstance(p, dict) and p.get("type") == "text")
+            return None, (txt or None)
+    return None, None
+
+
+async def stream_call(cfg: dict, provider_name: str, model: str, system: str | None,
+                      user: str, cwd: str, depth: int, settings: dict, sink) -> dict:
+    """Run one provider call in streaming mode, writing text deltas to `sink` as
+    they arrive. Returns {"text": full_answer, "streamed": bool}. Raises
+    ProviderError if nothing could be streamed (caller falls back to buffered)."""
+    p = cfg["providers"][provider_name]
+    fmt = (p.get("stream") or {}).get("format")
+    if not fmt:
+        raise ProviderError("streaming not supported for this provider")
+    if shutil.which(p["cmd"][0]) is None:
+        raise ProviderError(f"command not found on PATH: {p['cmd'][0]}")
+
+    user_text = user
+    if system and not p.get("system_flag"):
+        user_text = system + "\n\n" + user
+    argv, env_over = render_call(p, model, system, False, settings, "", stream=True)
+
+    env = os.environ.copy()
+    for k in p.get("env_unset", []):
+        env.pop(k, None)
+    env.update(env_over)
+    env["SCRY_DEPTH"] = str(depth + 1)
+
+    proc = await asyncio.create_subprocess_exec(
+        *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE, env=env, cwd=cwd)
+    try:
+        proc.stdin.write(user_text.encode())
+        await proc.stdin.drain()
+        proc.stdin.close()
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        pass
+
+    timeout = float(p.get("timeout", 300))
+    acc: list = []
+    final_text = ""
+    streamed_any = False
+    try:
+        while True:
+            line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
+            if not line:
+                break
+            s = line.decode(errors="replace").strip()
+            if not s:
+                continue
+            try:
+                obj = json.loads(s)
+            except ValueError:
+                continue
+            delta, fin = _stream_extract(obj, fmt)
+            if delta:
+                sink(delta)
+                acc.append(delta)
+                streamed_any = True
+            if fin:
+                final_text = fin
+        await proc.wait()
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        if not streamed_any:
+            raise ProviderError(f"stream timeout after {int(timeout)}s")
+
+    text = final_text or "".join(acc)
+    if not text:
+        raise ProviderError("empty stream output")
+    return {"text": text, "streamed": streamed_any}
+
+
 # --------------------------------------------------------------------------- #
 # Pipeline
 # --------------------------------------------------------------------------- #
@@ -432,7 +532,8 @@ def _failure_reason(failed: list) -> str:
     return "all_panels_failed"
 
 
-async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log) -> dict:
+async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
+                   stream_final: bool = False, on_stream_start=None) -> dict:
     cwd = tempfile.mkdtemp(prefix="scry-run-")  # clean cwd: no repo context bleed-in
     depth = int(os.environ.get("SCRY_DEPTH", "0") or "0")
     web = bool(settings.get("web_tools"))
@@ -505,9 +606,33 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log) -> di
         auser += ("Write the single best final answer to the original query directly — do "
                   "not mention your own tools, your knowledge cutoff, or this synthesis "
                   "process.")
-        # Synthesis stage runs WITHOUT web tools, matching Fusion.
-        final = await call_cli(cfg, a["provider"], a.get("model", ""),
-                               MOA_AGGREGATOR_SYSTEM, auser, cwd, depth, False, settings)
+        # Synthesis stage runs WITHOUT web tools, matching Fusion. When the caller
+        # wants a live answer and the aggregator can stream, type it out token by
+        # token; otherwise buffer it. Falls back to buffered if streaming yields
+        # nothing (so correctness never depends on the stream parser).
+        streamed = False
+        a_prov = a["provider"]
+        can_stream = stream_final and (cfg["providers"].get(a_prov) or {}).get("stream")
+
+        async def _buffered() -> str:
+            return await call_cli(cfg, a_prov, a.get("model", ""),
+                                  MOA_AGGREGATOR_SYSTEM, auser, cwd, depth, False, settings)
+
+        if can_stream:
+            if on_stream_start:
+                on_stream_start()  # tear the orb down before the first token lands
+            try:
+                r = await stream_call(cfg, a_prov, a.get("model", ""),
+                                      MOA_AGGREGATOR_SYSTEM, auser, cwd, depth, settings,
+                                      lambda d: (sys.stdout.write(d), sys.stdout.flush()))
+                final, streamed = r["text"], r["streamed"]
+                if streamed:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+            except ProviderError:
+                final = await _buffered()  # nothing streamed yet -> safe to buffer
+        else:
+            final = await _buffered()
 
         return {
             "status": "ok",
@@ -518,6 +643,7 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log) -> di
                           for r in responses],
             "analysis": analysis,
             "final": final,
+            "streamed": streamed,
         }
     finally:
         shutil.rmtree(cwd, ignore_errors=True)
@@ -681,6 +807,47 @@ def do_check(cfg: dict, mode: str, settings: dict) -> int:
         return 1
     print("\n" + c("✓ ready", "32") + ' — try:  scry "your question"')
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# Consensus map — surface the judge's 5-field analysis (otherwise computed and
+# silently discarded in non-JSON mode). Shows where the panel agreed, clashed,
+# and what they collectively missed — i.e. what the extra fusion cost bought.
+# --------------------------------------------------------------------------- #
+
+_MAP_FIELDS = [
+    ("consensus",        "✓", "consensus",        "32"),  # green  — high-confidence
+    ("contradictions",   "⚠", "contradictions",   "33"),  # yellow — scrutinize
+    ("unique_insights",  "✦", "unique insights",  "36"),  # cyan   — only one model
+    ("partial_coverage", "◐", "partial coverage", "34"),  # blue   — some covered
+    ("blind_spots",      "✗", "blind spots",      "31"),  # red    — nobody addressed
+]
+
+
+def render_consensus_map(analysis: dict, on: bool, max_items: int = 4) -> str:
+    """Render the judge analysis as a compact colored panel, or '' if empty."""
+    if not isinstance(analysis, dict):
+        return ""
+
+    def c(s: str, code: str) -> str:
+        return f"\x1b[{code}m{s}\x1b[0m" if on else s
+
+    lines = [c("  ◉ consensus map", "1")]
+    any_field = False
+    for key, glyph, label, code in _MAP_FIELDS:
+        items = analysis.get(key) or []
+        if not isinstance(items, list):
+            items = [items]
+        items = [str(x).strip() for x in items if str(x).strip()]
+        if not items:
+            continue
+        any_field = True
+        lines.append(f"  {c(glyph, code)} {c(label, code)}")
+        for it in items[:max_items]:
+            lines.append(f"      • {it}")
+        if len(items) > max_items:
+            lines.append(c(f"      … (+{len(items) - max_items} more)", "2"))
+    return "\n".join(lines) if any_field else ""
 
 
 # --------------------------------------------------------------------------- #
@@ -891,6 +1058,10 @@ def main() -> int:
                     help="verify each provider CLI is installed + logged in, then exit (no paid calls)")
     ap.add_argument("--no-anim", action="store_true",
                     help="disable the scrying-orb animation (reduced motion); plain progress lines instead")
+    ap.add_argument("--map", action="store_true",
+                    help="always print the consensus map (judge's agreement/contradiction summary)")
+    ap.add_argument("--no-map", action="store_true",
+                    help="never print the consensus map")
     ap.add_argument("--config", help="path to a config.json")
     ap.add_argument("--panel", help="override panel, e.g. 'claude:opus,codex,gemini:pro'")
     ap.add_argument("--aggregator", help="override aggregator, e.g. 'claude:opus'")
@@ -952,14 +1123,26 @@ def main() -> int:
         else:
             orb.note(msg)
 
+    # Stream the fused answer live only when stdout is an interactive terminal
+    # and we're not emitting JSON or running quiet. Panel + judge stay buffered;
+    # only the final synthesis types itself out, token by token.
+    stream_final = (not args.as_json and not args.quiet and sys.stdout.isatty())
+
+    orb_stopped = {"v": False}
+
+    def stop_orb() -> None:
+        if orb is not None and not orb_stopped["v"]:
+            orb.stop()
+            orb_stopped["v"] = True
+
     try:
         if orb is not None:
             orb.start("awakening the orb…")
         try:
-            result = asyncio.run(scry_run(cfg, prompt, mode, settings, log))
+            result = asyncio.run(scry_run(cfg, prompt, mode, settings, log,
+                                          stream_final, stop_orb))
         finally:
-            if orb is not None:
-                orb.stop()
+            stop_orb()
     except AllPanelsFailed as e:
         if args.as_json:
             print(json.dumps({"status": "error", "failure_reason": e.failure_reason,
@@ -972,6 +1155,15 @@ def main() -> int:
     except KeyboardInterrupt:
         return 130
 
+    # Consensus map: show the judge's analysis (auto on an interactive stderr;
+    # --map forces it, --no-map suppresses it; never under --json/--quiet).
+    analysis = result.get("analysis")
+    if (analysis and not args.no_map and not args.as_json and not args.quiet
+            and (args.map or sys.stderr.isatty())):
+        rendered = render_consensus_map(analysis, color_enabled(sys.stderr))
+        if rendered:
+            print(rendered + "\n", file=sys.stderr)
+
     if args.show_proposers:
         for r in result["responses"]:
             tag = "ok" if r["ok"] else "FAILED"
@@ -980,8 +1172,10 @@ def main() -> int:
         print("\n----- fused answer -----", file=sys.stderr)
 
     if args.as_json:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
+        out = {k: v for k, v in result.items() if k != "streamed"}
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+    elif not result.get("streamed"):
+        # If the answer already streamed to stdout during synthesis, don't reprint it.
         print(result["final"])
     return 0
 

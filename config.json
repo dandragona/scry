@@ -30,6 +30,11 @@
         "note": "login isn't auto-verifiable — run /login (Pro/Max). Programmatic 'claude -p' draws from your monthly Agent SDK credit.",
         "install": "install Claude Code — https://claude.com/claude-code"
       },
+      "stream": {
+        "_note": "Realtime output for the final synthesis only (token-by-token reveal). Used when stdout is a TTY and not --json/--quiet; falls back to buffered if unavailable.",
+        "format": "claude",
+        "args": ["--output-format", "stream-json", "--include-partial-messages", "--verbose"]
+      },
       "caps": {
         "web_on": ["--allowedTools", "WebSearch,WebFetch,Read,Grep,Glob"],
         "mutator_disallow": ["--disallowedTools", "Bash Edit Write NotebookEdit"],

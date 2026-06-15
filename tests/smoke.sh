@@ -72,4 +72,27 @@ PATH="$STUB:$PATH" "$SCRY" --mode synthesize --dry-run "x" | grep -q "^JUDGE" \
   && fail "synthesize mode should not emit a JUDGE stage" || true
 pass "--mode synthesize skips the judge"
 
+# --- streaming plumbing: final answer types out token-by-token ---------------
+python3 - "$ROOT" "$STUB" <<'PY' || fail "stream_call plumbing"
+import asyncio, json, os, sys, tempfile
+from importlib.machinery import SourceFileLoader
+root, stub = sys.argv[1], sys.argv[2]
+m = SourceFileLoader("scry_sut", os.path.join(root, "scry")).load_module()
+cfg = m.load_config(os.path.join(root, "config.json"))
+claude = os.path.join(stub, "claude")
+with open(claude, "w") as f:
+    f.write('#!/usr/bin/env python3\nimport sys, json\nsys.stdin.read()\n'
+            'for ch in "streamed ok":\n'
+            '    print(json.dumps({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":ch}}}), flush=True)\n'
+            'print(json.dumps({"type":"result","result":"streamed ok"}), flush=True)\n')
+os.chmod(claude, 0o755)
+os.environ["PATH"] = stub + ":" + os.environ["PATH"]
+chunks = []
+r = asyncio.run(m.stream_call(cfg, "claude", "", None, "hi",
+                              tempfile.mkdtemp(prefix="scry-run-"), 0,
+                              cfg["settings"], lambda d: chunks.append(d)))
+assert "".join(chunks) == "streamed ok" and r["streamed"] is True, (chunks, r)
+PY
+pass "stream_call streams deltas + reconstructs the final answer"
+
 printf '\n\033[32mAll smoke checks passed.\033[0m\n'

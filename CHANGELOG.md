@@ -21,6 +21,13 @@ All notable changes to this project are documented here. The format follows
   file** (`--agent-file`) that makes it read-only (no `Shell`/`WriteFile`/`StrReplaceFile`/
   `Agent`) and toggles web by excluding `SearchWeb`/`FetchURL` — so, unlike agy, kimi
   honors `--no-web`. Wired into `config.json`, `scry --check`, and `scry-eval`.
+- **`scry update`** — a self-update command. Downloads the latest single-file build
+  from GitHub, verifies it's **complete** (declared length, entry-point marker, and
+  that it compiles — so a dropped connection can't brick the binary) and not a
+  downgrade, then **atomically** swaps it in place (same-directory temp + `os.replace`),
+  preserving the exec bit. No `sudo` unless installed to a system dir (it prints the
+  exact elevated command, preserving any overrides). Honors `SCRY_REPO` / `SCRY_REF` /
+  `SCRY_UPDATE_URL`, mirroring `install.sh`.
 - **`scry init`** — an interactive setup wizard (in the spirit of `openspec init`) that
   lists your installed provider CLIs, lets you compose a panel (**repeats allowed**, with
   optional `:model`), pick a judge + aggregator, toggle web search, and writes a minimal
@@ -44,6 +51,14 @@ All notable changes to this project are documented here. The format follows
   color is disabled), falling back to plain progress lines.
 - `LICENSE` (MIT), `.gitignore`, `CONTRIBUTING.md`, `SECURITY.md`, and a one-line
   `install.sh`.
+
+### Fixed
+- **`install.sh` on a fresh machine** — the installer defaulted to `/usr/local/bin`
+  but never created it, so on a clean macOS (where that directory doesn't exist) the
+  `sudo mv` failed with "No such file or directory". It now creates the destination
+  first (`mkdir -p`, escalating to `sudo` only when needed), cleans up its temp file
+  on failure, and reports the version from the installed path. The README's manual
+  `ln -s` snippet had the same gap and now creates the directory too.
 
 ## [0.2.0] — 2026-06-14
 

@@ -15,8 +15,9 @@ All notable changes to this project are documented here. The format follows
 ### Added
 - **Moonshot Kimi provider (`kimi`)** — fan a prompt out to Kimi via the Kimi CLI in
   headless print mode (`kimi --quiet`), authenticated with `kimi login` (Kimi Code
-  OAuth — reuses your membership, no API key). Default model `kimi-k2.6` (the Kimi
-  member of OpenRouter's near-Fable "Budget" panel). Because Kimi's print mode has no
+  OAuth — reuses your membership, no API key). Uses your account's default model
+  (the Kimi Code membership exposes `kimi-for-coding`); pin a specific id with
+  `kimi:<model>` only if your `~/.kimi/config.toml` defines it. Because Kimi's print mode has no
   argv flags for tool/web control, scry drives it with a **generated per-call agent
   file** (`--agent-file`) that makes it read-only (no `Shell`/`WriteFile`/`StrReplaceFile`/
   `Agent`) and toggles web by excluding `SearchWeb`/`FetchURL` — so, unlike agy, kimi

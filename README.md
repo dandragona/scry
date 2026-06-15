@@ -98,6 +98,20 @@ scry init       # interactive: pick which CLIs to use → writes your default pa
 scry --check    # pre-flight: are those CLIs installed + logged in?
 ```
 
+### Updating
+
+```sh
+scry update     # fetch the latest single-file build and swap it in place
+```
+
+`scry update` downloads the newest `scry` from GitHub, verifies it's complete and
+valid (length, entry point, and that it compiles), and **atomically** replaces your
+installed copy — preserving the executable bit. It won't install a truncated download
+or an older version (pass `--force` to downgrade). No `sudo` needed unless scry lives
+in a system directory (e.g. `/usr/local/bin`), in which case it prints the exact
+elevated command to run. Honors the same `SCRY_REPO` / `SCRY_REF` / `SCRY_UPDATE_URL`
+overrides as the installer.
+
 `scry init` is optional — `scry` runs with built-in defaults — but it's the fastest way to
 compose a panel from the subscriptions you actually have (Kimi included).
 
@@ -105,6 +119,7 @@ compose a panel from the subscriptions you actually have (Kimi included).
 
 ```sh
 scry init                                   # interactive setup: choose CLIs → write your panel
+scry update                                 # upgrade scry to the latest build, in place
 scry --check                                # pre-flight: are my CLIs installed + logged in?
 scry "Explain why my Postgres query is slow and how to fix it"
 cat prompt.txt | scry                       # prompt from stdin

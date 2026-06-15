@@ -94,6 +94,7 @@ DEFAULT_SETTINGS = {
     "max_tool_calls": 8,       # Fusion default (range 1-16); applied where supported
     "effort": None,            # reasoning effort; None = each CLI's own default
     "max_output_tokens": None,  # applied where supported (claude only)
+    "save_history": True,      # record each run to ~/.scry (scry last / scry log)
     # NOTE: temperature has no equivalent on the claude/codex CLIs — see README.
 }
 
@@ -123,6 +124,18 @@ DEFAULT_CONFIG = {
                 "format": "claude",
                 "args": ["--output-format", "stream-json",
                          "--include-partial-messages", "--verbose"],
+            },
+            # Real cost/token accounting. claude -p --output-format json (and the
+            # stream-json `result` event) report these; dotted paths are read from
+            # the parsed object. Providers without a `usage` block report nothing
+            # (subscription CLIs that aren't metered per call).
+            "usage": {
+                "cost_usd": "total_cost_usd",
+                "input_tokens": "usage.input_tokens",
+                "cache_creation_tokens": "usage.cache_creation_input_tokens",
+                "cache_read_tokens": "usage.cache_read_input_tokens",
+                "output_tokens": "usage.output_tokens",
+                "web_searches": "usage.server_tool_use.web_search_requests",
             },
             "caps": {
                 # web ON: allow web + read-only tools, deny mutators
@@ -419,6 +432,96 @@ def render_agent_file(af: dict, web: bool) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _dig(obj, dotted: str):
+    """Walk a dotted path (e.g. 'usage.server_tool_use.web_search_requests')
+    through nested dicts; return the leaf value or None if any hop is missing."""
+    cur = obj
+    for key in dotted.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur
+
+
+def extract_usage(obj, p: dict) -> dict:
+    """Pull cost/token numbers from a provider's parsed JSON output using its
+    config-driven `usage` path map. Returns {} when the provider declares no
+    `usage` block or the object isn't a dict — so non-metered CLIs report nothing
+    rather than guessing."""
+    spec = p.get("usage")
+    if not isinstance(spec, dict) or not isinstance(obj, dict):
+        return {}
+    meta = {}
+    for field, path in spec.items():
+        if field.startswith("_") or not isinstance(path, str):
+            continue
+        val = _dig(obj, path)
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            meta[field] = val
+    return meta
+
+
+def summarize_cost(meters: list, elapsed: float) -> dict:
+    """Roll per-stage usage records up into the run's `cost` block. total_usd is
+    None when no stage reported a cost (e.g. a panel of only non-metered CLIs),
+    so we never imply $0 when we simply don't know."""
+    total, have_cost = 0.0, False
+    in_tok = out_tok = web = 0
+    for m in meters:
+        c = m.get("cost_usd")
+        if isinstance(c, (int, float)) and not isinstance(c, bool):
+            total += c
+            have_cost = True
+        in_tok += sum(m.get(k) or 0 for k in
+                      ("input_tokens", "cache_creation_tokens", "cache_read_tokens"))
+        out_tok += m.get("output_tokens") or 0
+        web += m.get("web_searches") or 0
+    metered = sum(1 for m in meters
+                  if isinstance(m.get("cost_usd"), (int, float))
+                  and not isinstance(m.get("cost_usd"), bool))
+    return {
+        "total_usd": round(total, 4) if have_cost else None,
+        "calls": len(meters),
+        "metered_calls": metered,
+        "input_tokens": in_tok or None,
+        "output_tokens": out_tok or None,
+        "web_searches": web or None,
+        "seconds": round(elapsed, 1),
+        "by_stage": meters,
+    }
+
+
+def _ktok(n) -> str:
+    if not n:
+        return "0"
+    if n >= 10000:
+        return f"{round(n / 1000)}k"
+    if n >= 1000:
+        return f"{n / 1000:.1f}k"
+    return str(int(n))
+
+
+def format_cost_tally(cost: dict, color: bool) -> str:
+    """One-line run footer: calls · $ · tokens · web · seconds, honest about
+    which calls were actually metered."""
+    parts = [f"{cost.get('calls', 0)} calls"]
+    if cost.get("total_usd") is not None:
+        parts.append(f"${cost['total_usd']:.2f}")
+    it, ot = cost.get("input_tokens"), cost.get("output_tokens")
+    if it or ot:
+        parts.append(f"{_ktok(it)}→{_ktok(ot)} tok")
+    if cost.get("web_searches"):
+        parts.append(f"{cost['web_searches']} web")
+    parts.append(f"{cost.get('seconds', 0):.0f}s")
+    line = "✦ " + " · ".join(parts)
+    metered, calls = cost.get("metered_calls", 0), cost.get("calls", 0)
+    if cost.get("total_usd") is None:
+        line += "  (no per-call cost reported by these providers)"
+    elif metered < calls:
+        line += f"  ($ from {metered}/{calls} metered calls; subscription CLIs report none)"
+    return f"\x1b[2m{line}\x1b[0m" if color else line
+
+
 # --------------------------------------------------------------------------- #
 # CLI invocation
 # --------------------------------------------------------------------------- #
@@ -454,7 +557,8 @@ def resolve_command(cmd0: str):
 
 
 async def call_cli(cfg: dict, provider_name: str, model: str, system: str | None,
-                   user: str, cwd: str, depth: int, web: bool, settings: dict) -> str:
+                   user: str, cwd: str, depth: int, web: bool, settings: dict,
+                   meta: dict | None = None) -> str:
     providers = cfg.get("providers", {})
     if provider_name not in providers:
         raise ProviderError(f"unknown provider '{provider_name}'")
@@ -537,6 +641,8 @@ async def call_cli(cfg: dict, provider_name: str, model: str, system: str | None
             if isinstance(obj, dict) and err_field and obj.get(err_field):
                 detail = obj.get(result_path) or err_txt or f"exit {rc}"
                 raise ProviderError(f"model error: {str(detail)[:200]}")
+            if meta is not None:
+                meta.update(extract_usage(obj, p))
             content = extract_json_result(raw, result_path)
 
         if not content:
@@ -615,6 +721,7 @@ async def stream_call(cfg: dict, provider_name: str, model: str, system: str | N
     acc: list = []
     final_text = ""
     streamed_any = False
+    meta: dict = {}
     try:
         while True:
             line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
@@ -627,6 +734,7 @@ async def stream_call(cfg: dict, provider_name: str, model: str, system: str | N
                 obj = json.loads(s)
             except ValueError:
                 continue
+            meta.update(extract_usage(obj, p))  # populated only by the `result` event
             delta, fin = _stream_extract(obj, fmt)
             if delta:
                 sink(delta)
@@ -644,7 +752,7 @@ async def stream_call(cfg: dict, provider_name: str, model: str, system: str | N
     text = final_text or "".join(acc)
     if not text:
         raise ProviderError("empty stream output")
-    return {"text": text, "streamed": streamed_any}
+    return {"text": text, "streamed": streamed_any, "meta": meta}
 
 
 # --------------------------------------------------------------------------- #
@@ -670,6 +778,8 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
     cwd = tempfile.mkdtemp(prefix="scry-run-")  # clean cwd: no repo context bleed-in
     depth = int(os.environ.get("SCRY_DEPTH", "0") or "0")
     web = bool(settings.get("web_tools"))
+    run_t0 = time.time()
+    meters: list = []  # one usage record per stage invocation (panel/judge/synth)
     try:
         panel = cfg.get("panel", [])
         log(f"▸ panel: {len(panel)} proposers — "
@@ -681,16 +791,21 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
         async def run_one(m: dict) -> dict:
             label = m.get("label", m["provider"])
             t0 = time.time()
+            cmeta: dict = {}
             try:
                 content = await call_cli(cfg, m["provider"], m.get("model", ""),
-                                         None, prompt, cwd, depth, web, settings)
+                                         None, prompt, cwd, depth, web, settings, cmeta)
                 dt = time.time() - t0
                 log(f"  ✓ {label} ({dt:.0f}s)")
+                meters.append({"stage": "panel", "label": label,
+                               "provider": m["provider"], "ok": True, **cmeta})
                 return {"label": label, "model": m.get("model", ""), "ok": True,
                         "content": content, "error": None, "seconds": round(dt, 1)}
             except Exception as e:  # noqa: BLE001 — one bad proposer must not abort
                 dt = time.time() - t0
                 log(f"  ✗ {label}: {e}")
+                meters.append({"stage": "panel", "label": label,
+                               "provider": m["provider"], "ok": False})
                 return {"label": label, "model": m.get("model", ""), "ok": False,
                         "content": None, "error": str(e), "seconds": round(dt, 1)}
 
@@ -712,14 +827,19 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
             j = cfg["judge"]
             juser = (f"User query:\n{prompt}\n\nModel responses:\n{numbered}\n\n"
                      "Return ONLY the JSON object.")
+            jmeta: dict = {}
             try:
                 jtext = await call_cli(cfg, j["provider"], j.get("model", ""),
-                                       JUDGE_SYSTEM, juser, cwd, depth, web, settings)
+                                       JUDGE_SYSTEM, juser, cwd, depth, web, settings, jmeta)
                 analysis = tolerant_json(jtext)
                 if analysis is None:
                     log("  ! judge output was not valid JSON; synthesizing without it")
+                meters.append({"stage": "judge", "label": "judge",
+                               "provider": j["provider"], "ok": True, **jmeta})
             except Exception as e:  # noqa: BLE001
                 log(f"  ! judge failed: {e}; synthesizing without analysis")
+                meters.append({"stage": "judge", "label": "judge",
+                               "provider": j["provider"], "ok": False})
 
         log("▸ synthesis: writing the fused answer…")
         a = cfg["aggregator"]
@@ -747,9 +867,11 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
         a_prov = a["provider"]
         can_stream = stream_final and (cfg["providers"].get(a_prov) or {}).get("stream")
 
+        ameta: dict = {}  # shared object: the buffered closure and the stream path both fill it
+
         async def _buffered() -> str:
             return await call_cli(cfg, a_prov, a.get("model", ""),
-                                  MOA_AGGREGATOR_SYSTEM, auser, cwd, depth, False, settings)
+                                  MOA_AGGREGATOR_SYSTEM, auser, cwd, depth, False, settings, ameta)
 
         if can_stream:
             if on_stream_start:
@@ -759,6 +881,7 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
                                       MOA_AGGREGATOR_SYSTEM, auser, cwd, depth, settings,
                                       lambda d: (sys.stdout.write(d), sys.stdout.flush()))
                 final, streamed = r["text"], r["streamed"]
+                ameta.update(r.get("meta") or {})
                 if streamed:
                     sys.stdout.write("\n")
                     sys.stdout.flush()
@@ -766,6 +889,10 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
                 final = await _buffered()  # nothing streamed yet -> safe to buffer
         else:
             final = await _buffered()
+
+        meters.append({"stage": "synth", "label": "synth",
+                       "provider": a_prov, "ok": True, **ameta})
+        cost = summarize_cost(meters, time.time() - run_t0)
 
         return {
             "status": "ok",
@@ -777,6 +904,7 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
             "analysis": analysis,
             "final": final,
             "streamed": streamed,
+            "cost": cost,
         }
     finally:
         shutil.rmtree(cwd, ignore_errors=True)
@@ -1617,11 +1745,108 @@ def read_prompt(pos_args: list) -> str:
     return ""
 
 
+# --------------------------------------------------------------------------- #
+# Run history (~/.scry) — `scry last` / `scry log`
+# --------------------------------------------------------------------------- #
+
+def _scry_home() -> Path:
+    return Path(os.environ.get("SCRY_HOME") or (Path.home() / ".scry"))
+
+
+def save_run(result: dict) -> None:
+    """Persist a completed run for `scry last` / `scry log`. Best-effort: any
+    failure here must never break a run that already produced an answer."""
+    try:
+        home = _scry_home()
+        runs = home / "runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        ts_ms = int(time.time() * 1000)          # ms precision avoids same-second collisions
+        path = runs / f"{ts_ms}.json"
+        record = {k: v for k, v in result.items() if k != "streamed"}
+        record["ts"] = ts_ms / 1000
+        path.write_text(json.dumps(record, ensure_ascii=False, indent=2))
+        cost = result.get("cost") or {}
+        summary = {
+            "ts": ts_ms / 1000, "file": path.name,
+            "prompt": (result.get("prompt") or "")[:200],
+            "mode": result.get("mode"),
+            "calls": cost.get("calls"), "cost_usd": cost.get("total_usd"),
+            "seconds": cost.get("seconds"),
+            "ok": sum(1 for r in result.get("responses", []) if r.get("ok")),
+            "n": len(result.get("responses", [])),
+        }
+        with (home / "history.jsonl").open("a") as f:
+            f.write(json.dumps(summary, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def _read_history() -> list:
+    try:
+        lines = (_scry_home() / "history.jsonl").read_text().splitlines()
+    except OSError:
+        return []
+    out = []
+    for ln in lines:
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            out.append(json.loads(ln))
+        except ValueError:
+            continue
+    return out
+
+
+def do_history(cmd: str, rest: list) -> int:
+    color = color_enabled(sys.stdout)
+    entries = _read_history()
+    if not entries:
+        print("scry: no runs recorded yet (~/.scry is empty)", file=sys.stderr)
+        return 0
+    if cmd == "last":
+        last = entries[-1]
+        try:
+            rec = json.loads((_scry_home() / "runs" / (last.get("file") or "")).read_text())
+        except OSError:
+            print("scry: the last run's transcript is missing", file=sys.stderr)
+            return 1
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(rec.get("ts", 0)))
+        head = f"# {when} · {(rec.get('prompt') or '')[:80]}"
+        print(f"\x1b[2m{head}\x1b[0m" if color else head, file=sys.stderr)
+        print(rec.get("final", ""))                      # answer to stdout (pipeable)
+        if rec.get("cost"):
+            print(format_cost_tally(rec["cost"], color), file=sys.stderr)
+        return 0
+    # cmd == "log": a compact table of recent runs (newest last).
+    n = int(rest[0]) if (rest and rest[0].isdigit()) else 20
+    for e in entries[-n:]:
+        when = time.strftime("%m-%d %H:%M", time.localtime(e.get("ts", 0)))
+        c = e.get("cost_usd")
+        costs = f"${c:.2f}" if isinstance(c, (int, float)) and not isinstance(c, bool) else "—"
+        okn = f"{e.get('ok', '?')}/{e.get('n', '?')}"
+        prompt = (e.get("prompt") or "").replace("\n", " ")[:64]
+        print(f"{when}  {costs:>7}  {okn:>4}  {prompt}")
+    return 0
+
+
 def main() -> int:
+    # History sub-commands: `scry last`, `scry log [N]`. Intercepted before
+    # argparse, and only when unambiguous (no extra words/flags) so a real prompt
+    # that merely starts with "last"/"log" still runs as a normal query.
+    argv = sys.argv[1:]
+    if argv and argv[0] in ("last", "log"):
+        rest = argv[1:]
+        if argv[0] == "last" and not rest:
+            return do_history("last", [])
+        if argv[0] == "log" and (not rest or (len(rest) == 1 and rest[0].isdigit())):
+            return do_history("log", rest)
     ap = argparse.ArgumentParser(
         prog="scry",
         description="Local OpenRouter-Fusion-style multi-model synthesis over "
-                    "headless subscription CLIs.")
+                    "headless subscription CLIs.",
+        epilog="history: `scry last` re-prints the most recent answer; "
+               "`scry log [N]` lists recent runs (stored in ~/.scry).")
     ap.add_argument("prompt", nargs="*",
                     help="the prompt (or pipe it via stdin); pass 'init' to run the "
                          "setup wizard or 'update' to upgrade scry in place")
@@ -1660,6 +1885,8 @@ def main() -> int:
     ap.add_argument("--aggregator", help="override aggregator, e.g. 'claude:opus'")
     ap.add_argument("--judge", help="override judge, e.g. 'claude:opus'")
     ap.add_argument("--quiet", action="store_true", help="suppress progress on stderr")
+    ap.add_argument("--no-save", action="store_true",
+                    help="don't record this run to ~/.scry (scry last / scry log)")
     ap.add_argument("--version", action="version", version=f"scry {VERSION}")
     args = ap.parse_args()
 
@@ -1765,6 +1992,16 @@ def main() -> int:
         rendered = render_consensus_map(analysis, color_enabled(sys.stderr))
         if rendered:
             print(rendered + "\n", file=sys.stderr)
+
+    # Cost/usage tally: a one-line run footer on stderr (the numbers also ride
+    # along in --json). Suppressed under --quiet/--json so piped output stays clean.
+    cost = result.get("cost")
+    if cost and not args.as_json and not args.quiet:
+        print(format_cost_tally(cost, color_enabled(sys.stderr)), file=sys.stderr)
+
+    # Record the run for `scry last` / `scry log` (best-effort, never fatal).
+    if settings.get("save_history", True) and not args.no_save:
+        save_run(result)
 
     if args.show_proposers:
         for r in result["responses"]:

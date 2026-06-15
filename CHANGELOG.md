@@ -35,6 +35,16 @@ All notable changes to this project are documented here. The format follows
   `config.json`. Flags: `--out PATH`, `--force`. It opens with an animated **rune-circle**
   welcome splash (a self-inscribing violet sigil — distinct from the run-time scrying orb)
   that degrades to a static frame under `--no-anim` / `NO_COLOR` / non-TTY.
+- **Cost & token meter** — every run now reports what it actually spent: a one-line
+  footer (`✦ 5 calls · $0.34 · 47k→6k tok · 3 web · 72s`) on an interactive run, and
+  a `cost` block (per-stage `total_usd` / tokens / web searches) in `--json`. Read
+  from each provider's output via a config-driven `usage` path map; providers that
+  don't meter per call (subscription CLIs) are reported honestly as such rather than
+  shown as `$0`.
+- **Run history** — each run is saved under `~/.scry/` (full transcript +
+  `history.jsonl`). `scry last` re-prints the most recent answer (pipeable on
+  stdout); `scry log [N]` lists recent runs with cost and pass/fail counts. Gated by
+  `settings.save_history` (default on); `--no-save` skips recording a single run.
 - **Streaming** — on an interactive terminal the fused answer now types itself out
   token-by-token as the synthesizer writes it (claude aggregator, `stream-json`),
   instead of appearing as a sudden block. Buffered fallback for piped/`--json`

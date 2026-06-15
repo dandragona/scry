@@ -1,0 +1,990 @@
+#!/usr/bin/env python3
+"""scry — local "Fusion" over headless AI CLIs.
+
+Replicates OpenRouter's Fusion (a Mixture-of-Agents pipeline) without OpenRouter
+and without API keys: it fans a prompt out to several models running through their
+*subscription* CLIs in headless mode, then deliberates + synthesizes one answer.
+
+Pipeline (mirrors OpenRouter Fusion):
+  1. PANEL      — every configured proposer answers the prompt in parallel, each
+                  with web_search + web_fetch enabled (Fusion behavior).
+  2. JUDGE      — (mode=fusion) one model, also web-enabled, compares the answers
+                  and emits a 5-field JSON analysis (consensus / contradictions /
+                  partial_coverage / unique_insights / blind_spots) — it compares,
+                  it does not merge.
+  3. SYNTHESIS  — one aggregator model (no web tools, per Fusion) writes the final
+                  answer (Mixture-of-Agents "Aggregate-and-Synthesize" prompt,
+                  arXiv:2406.04692).
+
+The only intended differences from real Fusion are (a) which models sit in the
+panel and (b) the internal prompts (OpenRouter's are unpublished; we use the
+canonical MoA aggregator + a reconstructed judge). Everything else — parallel
+panel, web tools on panel+judge, judge=outer model, max_tool_calls cap, reasoning
+effort, the 5-field analysis, and the {status, analysis, responses} output shape —
+is matched. See README.md.
+
+Zero dependencies: standard library only, runs on Python 3.9+ (system python3).
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import copy
+import json
+import math
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+VERSION = "0.2.0"
+
+# --------------------------------------------------------------------------- #
+# Prompts
+# --------------------------------------------------------------------------- #
+
+# Mixture-of-Agents "Aggregate-and-Synthesize" system prompt (Table 1 of
+# arXiv:2406.04692; "open-source" generalized to "various"). The established
+# template for the synthesis step.
+MOA_AGGREGATOR_SYSTEM = (
+    "You have been provided with a set of responses from various models to the "
+    "latest user query. Your task is to synthesize these responses into a single, "
+    "high-quality response. It is crucial to critically evaluate the information "
+    "provided in these responses, recognizing that some of it may be biased or "
+    "incorrect. Your response should not simply replicate the given answers but "
+    "should offer a refined, accurate, and comprehensive reply to the instruction. "
+    "Ensure your response is well-structured, coherent, and adheres to the highest "
+    "standards of accuracy and reliability."
+)
+
+# Judge system prompt — a faithful reconstruction of OpenRouter Fusion's documented
+# behaviour (the exact internal prompt is not published). Compare, don't merge;
+# emit exactly the five documented fields.
+JUDGE_SYSTEM = (
+    "You are an impartial judge in a multi-model deliberation. You have received "
+    "several models' responses to the user's query. Compare them — do NOT merge or "
+    "rewrite them. Output ONLY a single JSON object (no prose, no markdown code "
+    "fences) with exactly these keys, each mapping to an array of short strings:\n"
+    '  "consensus":        points all or most responses agree on (higher-confidence),\n'
+    '  "contradictions":   points where the responses disagree,\n'
+    '  "partial_coverage": points only some responses covered,\n'
+    '  "unique_insights":  valuable points raised by only one response,\n'
+    '  "blind_spots":      important aspects none of the responses addressed.\n'
+    "Return the JSON object and nothing else."
+)
+
+# --------------------------------------------------------------------------- #
+# Default configuration. A provider record describes how to drive one CLI for a
+# single headless text generation; `caps` describes how to render Fusion knobs
+# (web tools, reasoning effort, tool-call cap, max output tokens) into that CLI.
+# Overridable via ./config.json, ~/.config/scry/config.json, or --config.
+# --------------------------------------------------------------------------- #
+
+DEFAULT_SETTINGS = {
+    "web_tools": True,         # web_search+web_fetch on panel + judge (Fusion behavior)
+    "max_tool_calls": 8,       # Fusion default (range 1-16); applied where supported
+    "effort": None,            # reasoning effort; None = each CLI's own default
+    "max_output_tokens": None,  # applied where supported (claude only)
+    # NOTE: temperature has no equivalent on the claude/codex CLIs — see README.
+}
+
+DEFAULT_CONFIG = {
+    "mode": "fusion",
+    "settings": dict(DEFAULT_SETTINGS),
+    "providers": {
+        "claude": {
+            "cmd": ["claude", "-p"],
+            "model_flag": "--model",
+            "capture": "json",
+            "result_path": "result",
+            "error_field": "is_error",            # truthy -> failure
+            "json_output_flag": ["--output-format", "json"],
+            "system_flag": "--append-system-prompt",
+            "prompt": "stdin",
+            "env_unset": ["ANTHROPIC_API_KEY"],    # force subscription auth
+            "timeout": 360,
+            "check": {
+                "probe": ["claude", "--version"], "verifies_auth": False,
+                "note": "login isn't auto-verifiable — run /login (Pro/Max). Programmatic "
+                        "'claude -p' draws from your monthly Agent SDK credit.",
+                "install": "install Claude Code — https://claude.com/claude-code",
+            },
+            "caps": {
+                # web ON: allow web + read-only tools, deny mutators
+                "web_on": ["--allowedTools", "WebSearch,WebFetch,Read,Grep,Glob"],
+                "mutator_disallow": ["--disallowedTools", "Bash Edit Write NotebookEdit"],
+                # web OFF: deny mutators AND web (pure generation)
+                "web_off": ["--disallowedTools", "Bash Edit Write NotebookEdit WebFetch WebSearch"],
+                "tool_cap": ["--max-turns", "{max_tool_calls}"],
+                "effort": ["--effort", "{effort}"],
+                "max_tokens_env": "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+            },
+        },
+        "codex": {
+            "cmd": ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check"],
+            "model_flag": "-m",
+            "capture": "outfile",
+            "outfile_flag": "-o",
+            "system_flag": None,                   # no exec system flag -> fold into prompt
+            "stdin_arg": "-",
+            "prompt": "stdin",
+            "timeout": 420,
+            "check": {
+                "probe": ["codex", "login", "status"], "verifies_auth": True,
+                "hint": "log in:  codex login",
+                "install": "install Codex — npm i -g @openai/codex (see OpenAI docs)",
+            },
+            "caps": {
+                "web_on": ["-c", "web_search=live"],     # hosted; sandbox doesn't block it
+                "web_off": ["-c", "web_search=disabled"],
+                "effort": ["-c", "model_reasoning_effort={effort}"],
+                # no tool_cap / max_output_tokens equivalent (documented gap)
+            },
+        },
+        # Google via the Antigravity CLI (`agy`). Headless: `agy -p "<prompt>"`
+        # takes the prompt as an ARG (not stdin) and prints plain text. There is no
+        # system-prompt flag (folded into the prompt) and no effort flag. Web search
+        # works via Gemini's built-in grounding, ON BY DEFAULT (verified: returns
+        # live post-cutoff data with grounding-redirect citations); there's no flag
+        # to toggle it, so caps is empty and `--no-web` can't disable agy's grounding.
+        "agy": {
+            "cmd": ["agy", "--print-timeout", "400s"],
+            "model_flag": "--model",
+            "capture": "text",
+            "system_flag": None,
+            "prompt": "arg",
+            "prompt_flag": "-p",
+            "timeout": 420,
+            "check": {
+                "probe": ["agy", "--version"], "verifies_auth": False,
+                "note": "sign in via the Antigravity app; 'agy models' should then list models",
+                "install": "install Google Antigravity and its 'agy' CLI",
+            },
+            "caps": {},
+        },
+    },
+    # Default panel mirrors OpenRouter's "Quality" preset (claude-opus + gpt + gemini-pro).
+    # We have the first two; add the gemini member below once installed for the exact preset.
+    "panel": [
+        {"provider": "claude", "model": "opus", "label": "claude-opus"},
+        {"provider": "codex",  "model": "",     "label": "codex-gpt"},
+        {"provider": "agy", "model": "Gemini 3.1 Pro (High)", "label": "gemini-pro"},
+    ],
+    # Judge defaults to the outer (synthesis) model, as in Fusion.
+    "judge":      {"provider": "claude", "model": "opus"},
+    "aggregator": {"provider": "claude", "model": "opus"},
+}
+
+
+# --------------------------------------------------------------------------- #
+# Config + small parsers
+# --------------------------------------------------------------------------- #
+
+def load_config(path: str | None) -> dict:
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
+    candidates = [Path(path)] if path else [
+        Path.cwd() / "config.json",
+        Path.home() / ".config" / "scry" / "config.json",
+    ]
+    for c in candidates:
+        try:
+            if c.exists():
+                cfg.update(json.loads(c.read_text()))
+                break
+        except (OSError, ValueError) as e:
+            sys.stderr.write(f"scry: warning: ignoring bad config {c}: {e}\n")
+    # Settings always backfilled with defaults so partial overrides are safe.
+    cfg["settings"] = {**DEFAULT_SETTINGS, **cfg.get("settings", {})}
+    return cfg
+
+
+def parse_member(spec: str) -> dict:
+    """'claude:opus' -> {'provider':'claude','model':'opus'}; 'codex' -> model ''."""
+    spec = spec.strip()
+    prov, _, model = spec.partition(":")
+    return {"provider": prov.strip(), "model": model.strip()}
+
+
+def parse_panel(spec: str) -> list:
+    members = []
+    for item in spec.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        m = parse_member(item)
+        m["label"] = m["provider"] + (f"-{m['model']}" if m["model"] else "")
+        members.append(m)
+    return members
+
+
+# --------------------------------------------------------------------------- #
+# argv / env rendering
+# --------------------------------------------------------------------------- #
+
+def render_call(p: dict, model: str, system: str | None, web: bool,
+                settings: dict, outfile: str) -> tuple:
+    """Return (argv, env_overrides) for one provider call, applying Fusion knobs."""
+    argv = list(p["cmd"])
+    env_over: dict = {}
+    caps = p.get("caps", {})
+
+    if model and p.get("model_flag"):
+        argv += [p["model_flag"], model]
+    if p.get("capture") == "json" and p.get("json_output_flag"):
+        argv += list(p["json_output_flag"])
+    if system and p.get("system_flag"):
+        argv += [p["system_flag"], system]
+
+    # Web tools (Fusion: on for panel + judge, off for synthesis).
+    if web:
+        argv += list(caps.get("web_on", []))
+        argv += list(caps.get("mutator_disallow", []))
+    else:
+        argv += list(caps.get("web_off", []))
+
+    # Tool-call cap only matters while tools can run.
+    mtc = settings.get("max_tool_calls")
+    if web and mtc and caps.get("tool_cap"):
+        argv += [t.replace("{max_tool_calls}", str(mtc)) for t in caps["tool_cap"]]
+
+    eff = settings.get("effort")
+    if eff and caps.get("effort"):
+        argv += [t.replace("{effort}", str(eff)) for t in caps["effort"]]
+
+    mot = settings.get("max_output_tokens")
+    if mot and caps.get("max_tokens_env"):
+        env_over[caps["max_tokens_env"]] = str(mot)
+
+    if p.get("capture") == "outfile":
+        argv += [p.get("outfile_flag", "-o"), outfile]
+    if p.get("stdin_arg"):
+        argv += [p["stdin_arg"]]
+    return argv, env_over
+
+
+def append_prompt_arg(argv: list, p: dict, text: str) -> list:
+    """Some CLIs take the prompt as a command-line argument, not on stdin
+    (provider `prompt: "arg"`, e.g. antigravity's `agy -p "<prompt>"`). Append
+    [prompt_flag, text] (or a bare positional if no prompt_flag is set)."""
+    pf = p.get("prompt_flag")
+    return argv + ([pf, text] if pf else [text])
+
+
+def extract_json_result(text: str, result_path: str) -> str:
+    text = text.strip()
+    try:
+        v = json.loads(text)
+    except ValueError:
+        return text
+    if isinstance(v, dict):
+        val = v.get(result_path)
+        if isinstance(val, str):
+            return val.strip()
+        for k in ("result", "response", "text", "content", "output_text"):
+            if isinstance(v.get(k), str):
+                return v[k].strip()
+    return text
+
+
+def tolerant_json(s: str) -> dict | None:
+    if not s:
+        return None
+    s = s.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z0-9]*\s*", "", s)
+        s = re.sub(r"\s*```$", "", s.strip())
+    for candidate in (s, _slice_braces(s)):
+        if not candidate:
+            continue
+        try:
+            v = json.loads(candidate)
+            if isinstance(v, dict):
+                return v
+        except ValueError:
+            continue
+    return None
+
+
+def _slice_braces(s: str) -> str | None:
+    a, b = s.find("{"), s.rfind("}")
+    return s[a:b + 1] if (a != -1 and b > a) else None
+
+
+# --------------------------------------------------------------------------- #
+# CLI invocation
+# --------------------------------------------------------------------------- #
+
+class ProviderError(RuntimeError):
+    pass
+
+
+class AllPanelsFailed(RuntimeError):
+    def __init__(self, reason: str, message: str, responses: list):
+        super().__init__(message)
+        self.failure_reason = reason            # Fusion-style enum
+        self.responses = responses
+
+
+async def call_cli(cfg: dict, provider_name: str, model: str, system: str | None,
+                   user: str, cwd: str, depth: int, web: bool, settings: dict) -> str:
+    providers = cfg.get("providers", {})
+    if provider_name not in providers:
+        raise ProviderError(f"unknown provider '{provider_name}'")
+    p = providers[provider_name]
+    if shutil.which(p["cmd"][0]) is None:
+        raise ProviderError(f"command not found on PATH: {p['cmd'][0]}")
+
+    user_text = user
+    if system and not p.get("system_flag"):  # fold system into prompt (e.g. codex)
+        user_text = system + "\n\n" + user
+
+    outfile = ""
+    if p.get("capture") == "outfile":
+        fd, outfile = tempfile.mkstemp(prefix="scry-msg-", suffix=".txt", dir=cwd)
+        os.close(fd)
+
+    argv, env_over = render_call(p, model, system, web, settings, outfile)
+
+    prompt_is_arg = p.get("prompt") == "arg"
+    if prompt_is_arg:                      # prompt goes in argv, not on stdin
+        argv = append_prompt_arg(argv, p, user_text)
+
+    env = os.environ.copy()
+    for k in p.get("env_unset", []):
+        env.pop(k, None)
+    env.update(env_over)
+    env["SCRY_DEPTH"] = str(depth + 1)  # recursion guard
+
+    timeout = float(p.get("timeout", 300))
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=env, cwd=cwd,
+        )
+    except FileNotFoundError:
+        raise ProviderError(f"command not found: {argv[0]}")
+
+    stdin_bytes = b"" if prompt_is_arg else user_text.encode()
+    try:
+        out, err = await asyncio.wait_for(
+            proc.communicate(stdin_bytes), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise ProviderError(f"timeout after {int(timeout)}s")
+
+    rc = proc.returncode
+    err_txt = err.decode(errors="replace").strip()
+
+    if p.get("capture") == "outfile":
+        content = ""
+        try:
+            content = Path(outfile).read_text(errors="replace").strip()
+        except OSError:
+            pass
+        finally:
+            try:
+                os.remove(outfile)
+            except OSError:
+                pass
+        if not content:
+            content = out.decode(errors="replace").strip()
+    else:
+        raw = out.decode(errors="replace").strip()
+        try:
+            obj = json.loads(raw)
+        except ValueError:
+            obj = None
+        result_path = p.get("result_path", "result")
+        err_field = p.get("error_field")
+        if isinstance(obj, dict) and err_field and obj.get(err_field):
+            detail = obj.get(result_path) or err_txt or f"exit {rc}"
+            raise ProviderError(f"model error: {str(detail)[:200]}")
+        content = extract_json_result(raw, result_path)
+
+    if not content:
+        raise ProviderError(f"exit {rc}: {err_txt[:300] or 'empty output'}")
+    return content
+
+
+# --------------------------------------------------------------------------- #
+# Pipeline
+# --------------------------------------------------------------------------- #
+
+def numbered_responses(ok_responses: list) -> str:
+    return "\n".join(f"{i + 1}. {r['content']}" for i, r in enumerate(ok_responses))
+
+
+def _failure_reason(failed: list) -> str:
+    """Map an all-failed panel onto a Fusion-style failure_reason enum."""
+    blob = " ".join((r.get("error") or "").lower() for r in failed)
+    if "rate" in blob or "429" in blob or "overloaded" in blob:
+        return "rate_limited"
+    if "credit" in blob or "insufficient" in blob or "quota" in blob or "balance" in blob:
+        return "insufficient_credits"
+    return "all_panels_failed"
+
+
+async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log) -> dict:
+    cwd = tempfile.mkdtemp(prefix="scry-run-")  # clean cwd: no repo context bleed-in
+    depth = int(os.environ.get("SCRY_DEPTH", "0") or "0")
+    web = bool(settings.get("web_tools"))
+    try:
+        panel = cfg.get("panel", [])
+        log(f"▸ panel: {len(panel)} proposers — "
+            + ", ".join(m.get("label", m["provider"]) for m in panel)
+            + (f"  [web {'on' if web else 'off'}"
+               + (f", effort {settings['effort']}" if settings.get("effort") else "")
+               + "]"))
+
+        async def run_one(m: dict) -> dict:
+            label = m.get("label", m["provider"])
+            t0 = time.time()
+            try:
+                content = await call_cli(cfg, m["provider"], m.get("model", ""),
+                                         None, prompt, cwd, depth, web, settings)
+                dt = time.time() - t0
+                log(f"  ✓ {label} ({dt:.0f}s)")
+                return {"label": label, "model": m.get("model", ""), "ok": True,
+                        "content": content, "error": None, "seconds": round(dt, 1)}
+            except Exception as e:  # noqa: BLE001 — one bad proposer must not abort
+                dt = time.time() - t0
+                log(f"  ✗ {label}: {e}")
+                return {"label": label, "model": m.get("model", ""), "ok": False,
+                        "content": None, "error": str(e), "seconds": round(dt, 1)}
+
+        responses = await asyncio.gather(*(run_one(m) for m in panel))
+        ok = [r for r in responses if r["ok"]]
+        if not ok:
+            reason = _failure_reason(responses)
+            raise AllPanelsFailed(
+                reason,
+                f"{reason}: every proposer failed "
+                + "; ".join(f"{r['label']}: {r['error']}" for r in responses),
+                responses)
+
+        numbered = numbered_responses(ok)
+
+        analysis = None
+        if mode == "fusion":
+            log("▸ judge: comparing responses…")
+            j = cfg["judge"]
+            juser = (f"User query:\n{prompt}\n\nModel responses:\n{numbered}\n\n"
+                     "Return ONLY the JSON object.")
+            try:
+                jtext = await call_cli(cfg, j["provider"], j.get("model", ""),
+                                       JUDGE_SYSTEM, juser, cwd, depth, web, settings)
+                analysis = tolerant_json(jtext)
+                if analysis is None:
+                    log("  ! judge output was not valid JSON; synthesizing without it")
+            except Exception as e:  # noqa: BLE001
+                log(f"  ! judge failed: {e}; synthesizing without analysis")
+
+        log("▸ synthesis: writing the fused answer…")
+        a = cfg["aggregator"]
+        auser = f"Original user query:\n{prompt}\n\nResponses from models:\n{numbered}"
+        if analysis:
+            auser += ("\n\nAn impartial judge compared these responses and produced "
+                      "this analysis (JSON):\n"
+                      + json.dumps(analysis, ensure_ascii=False, indent=2)
+                      + "\n\nUse the consensus as higher-confidence, preserve valuable "
+                      "unique insights, resolve contradictions where possible, and "
+                      "address the noted blind spots.")
+        if web:
+            auser += ("\n\nThe responses above were produced by models with live web "
+                      "access, so rely on their cited evidence as your source of truth. ")
+        else:
+            auser += "\n\n"
+        auser += ("Write the single best final answer to the original query directly — do "
+                  "not mention your own tools, your knowledge cutoff, or this synthesis "
+                  "process.")
+        # Synthesis stage runs WITHOUT web tools, matching Fusion.
+        final = await call_cli(cfg, a["provider"], a.get("model", ""),
+                               MOA_AGGREGATOR_SYSTEM, auser, cwd, depth, False, settings)
+
+        return {
+            "status": "ok",
+            "prompt": prompt,
+            "mode": mode,
+            "responses": [{"model": r["label"], "content": r["content"],
+                           "ok": r["ok"], "error": r["error"], "seconds": r["seconds"]}
+                          for r in responses],
+            "analysis": analysis,
+            "final": final,
+        }
+    finally:
+        shutil.rmtree(cwd, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
+# Dry run
+# --------------------------------------------------------------------------- #
+
+def _trunc(tok: str, n: int = 64) -> str:
+    return tok if len(tok) <= n else tok[: n - 1] + "…"
+
+
+def _dry_prompt(p: dict, argv: list, what: str) -> tuple:
+    """For --dry-run: render how the prompt reaches a provider (stdin vs arg)."""
+    if p.get("prompt") == "arg":
+        return append_prompt_arg(argv, p, f"{{{what.upper()}}}"), f"{what} as arg"
+    return argv, f"{what} on stdin"
+
+
+def _show(role: str, argv: list, env_over: dict, stdin_note: str) -> None:
+    envp = " ".join(f"{k}={v}" for k, v in env_over.items())
+    envp = (envp + " ") if envp else ""
+    print(f"{role:<10} {envp}{shlex.join(_trunc(t) for t in argv)}   <{stdin_note}>")
+
+
+def do_dry_run(cfg: dict, mode: str, settings: dict) -> None:
+    web = bool(settings.get("web_tools"))
+    print(f"[dry-run] mode={mode}  web_tools={web}  max_tool_calls={settings.get('max_tool_calls')}"
+          f"  effort={settings.get('effort')}  max_output_tokens={settings.get('max_output_tokens')}\n")
+    for m in cfg.get("panel", []):
+        p = cfg["providers"].get(m["provider"])
+        if not p:
+            print(f"PROPOSER   (unknown provider '{m['provider']}')")
+            continue
+        argv, env = render_call(p, m.get("model", ""), None, web, settings, "{OUTFILE}")
+        argv, note = _dry_prompt(p, argv, "prompt")
+        _show("PROPOSER", argv, env, note)
+    if mode == "fusion":
+        j = cfg["judge"]
+        p = cfg["providers"][j["provider"]]
+        sysv = JUDGE_SYSTEM if p.get("system_flag") else None
+        argv, env = render_call(p, j.get("model", ""), sysv, web, settings, "{OUTFILE}")
+        argv, note = _dry_prompt(p, argv, "query+responses")
+        _show("JUDGE", argv, env, note)
+    a = cfg["aggregator"]
+    p = cfg["providers"][a["provider"]]
+    sysv = MOA_AGGREGATOR_SYSTEM if p.get("system_flag") else None
+    argv, env = render_call(p, a.get("model", ""), sysv, False, settings, "{OUTFILE}")
+    argv, note = _dry_prompt(p, argv, "query+responses")
+    _show("AGGREGATOR", argv, env, note)
+
+
+# --------------------------------------------------------------------------- #
+# Color / accessibility
+# --------------------------------------------------------------------------- #
+
+def color_enabled(stream=sys.stderr) -> bool:
+    """Whether to emit ANSI color. Honors the NO_COLOR (https://no-color.org)
+    and FORCE_COLOR conventions and TERM=dumb, falling back to is-a-tty."""
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    if "NO_COLOR" in os.environ:
+        return False
+    if os.environ.get("TERM", "") in ("", "dumb"):
+        return False
+    try:
+        return stream.isatty()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# --------------------------------------------------------------------------- #
+# Doctor (`scry --check`) — verify every provider CLI is installed + logged in
+# before a real, paid run. Probes are zero-cost (no generation calls).
+# --------------------------------------------------------------------------- #
+
+def _probe(argv: list, env_unset, expect_code: int = 0,
+           expect_text: str = "", timeout: int = 15) -> tuple:
+    """Run a non-billing liveness/auth probe; return (ok, one-line detail)."""
+    env = os.environ.copy()
+    for k in (env_unset or []):
+        env.pop(k, None)
+    try:
+        r = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
+                           text=True, timeout=timeout, env=env)
+    except FileNotFoundError:
+        return False, "binary not found"
+    except subprocess.TimeoutExpired:
+        return False, f"timed out after {timeout}s"
+    except OSError as e:  # noqa: BLE001
+        return False, str(e)[:80]
+    blob = (r.stdout or "") + (r.stderr or "")
+    first = next((ln.strip() for ln in blob.splitlines() if ln.strip()), "")
+    ok = (r.returncode == expect_code)
+    if expect_text:
+        ok = ok and (expect_text.lower() in blob.lower())
+    return ok, first[:80]
+
+
+def do_check(cfg: dict, mode: str, settings: dict) -> int:
+    on = color_enabled(sys.stderr)
+
+    def c(s: str, code: str) -> str:
+        return f"\x1b[{code}m{s}\x1b[0m" if on else s
+
+    providers = cfg.get("providers", {})
+    used: list = [m["provider"] for m in cfg.get("panel", [])]
+    if mode == "fusion":
+        used.append(cfg.get("judge", {}).get("provider"))
+    used.append(cfg.get("aggregator", {}).get("provider"))
+    seen: list = []
+    for p in used:
+        if p and p not in seen:
+            seen.append(p)
+
+    print(c("scry --check", "1") + "  — verifying your model CLIs (no paid calls)\n")
+    hard_fail = False
+    for name in seen:
+        p = providers.get(name)
+        if not p:
+            print(f"  {c('✗', '31')} {name:<9} unknown provider (not in config)")
+            hard_fail = True
+            continue
+        chk = p.get("check") or {}
+        binary = p["cmd"][0]
+        if shutil.which(binary) is None:
+            print(f"  {c('✗', '31')} {name:<9} {c('not installed', '31')} — '{binary}' not on PATH")
+            if chk.get("install"):
+                print(f"      {c('↳ ' + chk['install'], '2')}")
+            hard_fail = True
+            continue
+        probe = chk.get("probe")
+        if not probe:
+            print(f"  {c('✓', '32')} {name:<9} installed ({binary})")
+            continue
+        ok, detail = _probe(probe, p.get("env_unset"), chk.get("expect_code", 0),
+                            chk.get("expect_text", ""), chk.get("timeout", 15))
+        if not ok:
+            print(f"  {c('✗', '31')} {name:<9} {c('probe failed', '31')}: {detail}")
+            print(f"      {c('↳ ' + chk.get('hint', 'check that ' + binary + ' is logged in'), '2')}")
+            hard_fail = True
+        elif chk.get("verifies_auth"):
+            print(f"  {c('✓', '32')} {name:<9} {c('logged in', '32')}"
+                  + (f"  ({detail})" if detail else ""))
+        else:
+            print(f"  {c('✓', '32')} {name:<9} installed & runnable")
+            if chk.get("note"):
+                print(f"      {c('↳ ' + chk['note'], '2')}")
+
+    panel = [m.get("label", m["provider"]) for m in cfg.get("panel", [])]
+    calls = len(panel) + (2 if mode == "fusion" else 1)
+    web = bool(settings.get("web_tools"))
+    print()
+    print(f"  panel ({len(panel)}): " + ", ".join(panel))
+    print(f"  mode: {mode}  →  ~{calls} model calls/run"
+          f" (panel{'+judge' if mode == 'fusion' else ''}+synthesis)"
+          + (c("  · +web-search billing", "2") if web else ""))
+    if hard_fail:
+        print("\n" + c("✗ not ready", "31") + " — fix the items above, then re-run scry --check.")
+        return 1
+    print("\n" + c("✓ ready", "32") + ' — try:  scry "your question"')
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Scrying orb — a live progress animation while the pipeline gazes
+# --------------------------------------------------------------------------- #
+
+class ScryingOrb:
+    """A 'scrying orb' progress animation for an interactive stderr.
+
+    A glowing crystal ball with swirling mist is drawn in place on a background
+    thread while scry works. Phase changes update the caption beneath it; other
+    log lines (proposer ✓/✗, judge notes) scroll above the orb and stay. On a
+    non-TTY or under --quiet this class is never constructed and scry falls back
+    to plain stderr logging, so piped/JSON output is untouched.
+    """
+    MIST = " ·∘•✶✦✧❋"           # rarefied -> dense vapor
+    SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"       # braille shimmer
+    W, H = 23, 11
+    FPS = 12.0
+
+    def __init__(self, stream=sys.stderr):
+        self._s = stream
+        self._caption = "gazing…"
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._frame = 0
+        self._t0 = time.monotonic()
+        self._lines = 0
+        self._drawn = False
+
+    # ---- public API ----
+    def start(self, caption: str = "gazing…") -> None:
+        self._caption = caption
+        self._t0 = time.monotonic()
+        self._s.write("\x1b[?25l")  # hide cursor
+        self._s.flush()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def set_caption(self, text: str) -> None:
+        with self._lock:
+            self._caption = text
+
+    def note(self, msg: str) -> None:
+        """Print a line that scrolls above the orb and stays."""
+        with self._lock:
+            if self._drawn and self._lines:
+                self._s.write(f"\x1b[{self._lines}A\x1b[0J")
+            self._s.write(msg.rstrip("\n") + "\n")
+            self._s.flush()
+            self._drawn = False  # next tick repaints the orb beneath the note
+
+    def stop(self, clear: bool = True) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=1.0)
+        with self._lock:
+            if clear and self._drawn and self._lines:
+                self._s.write(f"\x1b[{self._lines}A\x1b[0J")
+            self._s.write("\x1b[?25h")  # restore cursor
+            self._s.flush()
+            self._drawn = False
+
+    # ---- internals ----
+    def _run(self) -> None:
+        try:
+            self._tick()
+            while not self._stop.wait(1.0 / self.FPS):
+                self._tick()
+        except Exception:  # noqa: BLE001 — eye candy must never abort the run
+            pass
+
+    def _tick(self) -> None:
+        frame = self._frame
+        with self._lock:
+            cap, t0 = self._caption, self._t0
+        lines = self._render(frame, cap, time.monotonic() - t0)
+        with self._lock:
+            buf = []
+            if self._drawn:
+                buf.append(f"\x1b[{self._lines}A")
+            for ln in lines:
+                buf.append("\x1b[2K" + ln + "\n")
+            self._s.write("".join(buf))
+            self._s.flush()
+            self._lines = len(lines)
+            self._drawn = True
+        self._frame += 1
+
+    @staticmethod
+    def _rgb(h: float, s: float, v: float) -> tuple:
+        i = int(h / 60) % 6
+        f = h / 60 - int(h / 60)
+        p, q, t = v * (1 - s), v * (1 - s * f), v * (1 - s * (1 - f))
+        r, g, b = [(v, t, p), (q, v, p), (p, v, t),
+                   (p, q, v), (t, p, v), (v, p, q)][i]
+        return int(r * 255), int(g * 255), int(b * 255)
+
+    def _color(self, h: float, s: float, v: float) -> str:
+        r, g, b = self._rgb(h % 360, s, v)
+        return f"\x1b[38;2;{r};{g};{b}m"
+
+    def _render(self, frame: int, caption: str, elapsed: float) -> list:
+        W, H = self.W, self.H
+        cx, cy = (W - 1) / 2, (H - 1) / 2
+        rx, ry = W / 2.0, H / 2.0
+        inside = [[((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 <= 1.0
+                   for x in range(W)] for y in range(H)]
+        present = [y for y in range(H) if any(inside[y])]
+        top_y, bot_y = present[0], present[-1]
+        base_hue = 232 + 46 * math.sin(frame * 0.06)   # cyan <-> violet drift
+        glow = 0.78 + 0.22 * math.sin(frame * 0.22)     # gentle breathing pulse
+        RESET = "\x1b[0m"
+        out = []
+        for y in range(H):
+            xs = [x for x in range(W) if inside[y][x]]
+            if not xs:
+                out.append(" " * W)
+                continue
+            lo, hi = min(xs), max(xs)
+            row = [" "] * W
+            for x in range(lo, hi + 1):
+                nx, ny = (x - cx) / rx, (y - cy) / ry
+                d = math.hypot(nx, ny)
+                ang = math.atan2(ny, nx)
+                rim = (y == top_y or y == bot_y or x == lo or x == hi)
+                if y == top_y:
+                    ch = "/" if x == lo else "\\" if x == hi else "‾"
+                elif y == bot_y:
+                    ch = "\\" if x == lo else "/" if x == hi else "_"
+                elif x == lo:
+                    ch = "("
+                elif x == hi:
+                    ch = ")"
+                else:
+                    swirl = math.sin(ang * 3 + frame * 0.3 - d * 6)
+                    spark = math.sin(x * 12.9 + y * 78.2 + frame * 0.7)
+                    if spark > 0.93:
+                        ch = "✦"
+                    else:
+                        ch = self.MIST[int((swirl + 1) / 2 * (len(self.MIST) - 1))]
+                if ch == " ":
+                    continue
+                if rim:
+                    col = self._color(base_hue, 0.55, glow)
+                elif ch == "✦":
+                    col = "\x1b[38;2;255;255;245m"  # a bright vision-spark
+                else:
+                    dens = self.MIST.index(ch) / (len(self.MIST) - 1)
+                    v = min(1.0, 0.30 + 0.7 * dens) * glow
+                    col = self._color(base_hue + ang * 18, 0.85, v)
+                row[x] = col + ch + RESET
+            out.append("".join(row))
+        # pedestal
+        dim = self._color(base_hue, 0.45, 0.45)
+        pad = " " * ((W - 9) // 2)
+        out.append(pad + dim + r"  \\_//  " + RESET)
+        out.append(pad + dim + r" (_____) " + RESET)
+        # caption + elapsed + braille shimmer
+        spin = self.SPIN[frame % len(self.SPIN)]
+        cap_col = self._color(base_hue, 0.6, 0.95)
+        out.append(f"  {cap_col}{spin}  {caption}{RESET}  "
+                   f"\x1b[2m{elapsed:4.0f}s\x1b[0m")
+        return out
+
+
+# --------------------------------------------------------------------------- #
+# Entry point
+# --------------------------------------------------------------------------- #
+
+def read_prompt(pos_args: list) -> str:
+    # A positional prompt wins and must NEVER block on stdin: in non-interactive
+    # contexts stdin is not a tty but also never reaches EOF, so an unconditional
+    # stdin.read() would hang. Only read stdin when no prompt was given.
+    pos = " ".join(pos_args).strip()
+    if pos:
+        return pos
+    if not sys.stdin.isatty():
+        return sys.stdin.read().strip()
+    return ""
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        prog="scry",
+        description="Local OpenRouter-Fusion-style multi-model synthesis over "
+                    "headless subscription CLIs.")
+    ap.add_argument("prompt", nargs="*", help="the prompt (or pipe it via stdin)")
+    ap.add_argument("--mode", choices=["fusion", "synthesize"], default=None,
+                    help="fusion = 3-stage panel/judge/synthesis (default); "
+                         "synthesize = 2-stage panel/synthesis")
+    ap.add_argument("--no-web", action="store_true",
+                    help="disable web_search/web_fetch on the panel + judge")
+    ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"],
+                    help="reasoning effort for every stage (where the CLI supports it)")
+    ap.add_argument("--max-tool-calls", type=int, metavar="N",
+                    help="cap web tool-call iterations (Fusion default 8; claude only)")
+    ap.add_argument("--max-output-tokens", type=int, metavar="N",
+                    help="cap output tokens (claude only)")
+    ap.add_argument("--json", action="store_true", dest="as_json",
+                    help="emit JSON: {status, responses, analysis, final}")
+    ap.add_argument("--show-proposers", action="store_true",
+                    help="print each proposer's raw answer to stderr")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print the commands that would run, then exit")
+    ap.add_argument("--check", action="store_true",
+                    help="verify each provider CLI is installed + logged in, then exit (no paid calls)")
+    ap.add_argument("--no-anim", action="store_true",
+                    help="disable the scrying-orb animation (reduced motion); plain progress lines instead")
+    ap.add_argument("--config", help="path to a config.json")
+    ap.add_argument("--panel", help="override panel, e.g. 'claude:opus,codex,gemini:pro'")
+    ap.add_argument("--aggregator", help="override aggregator, e.g. 'claude:opus'")
+    ap.add_argument("--judge", help="override judge, e.g. 'claude:opus'")
+    ap.add_argument("--quiet", action="store_true", help="suppress progress on stderr")
+    ap.add_argument("--version", action="version", version=f"scry {VERSION}")
+    args = ap.parse_args()
+
+    cfg = load_config(args.config)
+    if args.panel:
+        cfg["panel"] = parse_panel(args.panel)
+    if args.aggregator:
+        cfg["aggregator"] = parse_member(args.aggregator)
+    if args.judge:
+        cfg["judge"] = parse_member(args.judge)
+    mode = args.mode or cfg.get("mode", "fusion")
+
+    settings = dict(cfg["settings"])
+    if args.no_web:
+        settings["web_tools"] = False
+    if args.effort:
+        settings["effort"] = args.effort
+    if args.max_tool_calls is not None:
+        settings["max_tool_calls"] = args.max_tool_calls
+    if args.max_output_tokens is not None:
+        settings["max_output_tokens"] = args.max_output_tokens
+
+    if args.dry_run:
+        do_dry_run(cfg, mode, settings)
+        return 0
+
+    if args.check:
+        return do_check(cfg, mode, settings)
+
+    prompt = read_prompt(args.prompt)
+    if not prompt:
+        ap.error("no prompt given (pass as arguments or pipe via stdin)")
+
+    # The scrying orb animates only on an interactive, color-capable stderr.
+    # Reduced motion (--no-anim / SCRY_NO_ANIM) or a no-color terminal (NO_COLOR,
+    # TERM=dumb) falls back to plain log lines, so piped/redirected/low-vision
+    # output stays clean. (color_enabled() already encodes the isatty check.)
+    reduced_motion = args.no_anim or ("SCRY_NO_ANIM" in os.environ)
+    animate = (not args.quiet and not reduced_motion
+               and color_enabled(sys.stderr) and sys.stderr.isatty())
+    orb = ScryingOrb() if animate else None
+
+    def log(msg: str) -> None:
+        if args.quiet:
+            return
+        if orb is None:
+            print(msg, file=sys.stderr, flush=True)
+            return
+        # A leading "▸" marks a new stage -> it becomes the orb's caption;
+        # everything else (proposer ✓/✗, judge notes) scrolls above the orb.
+        s = msg.strip()
+        if s.startswith("▸"):
+            orb.set_caption(s.lstrip("▸").strip())
+        else:
+            orb.note(msg)
+
+    try:
+        if orb is not None:
+            orb.start("awakening the orb…")
+        try:
+            result = asyncio.run(scry_run(cfg, prompt, mode, settings, log))
+        finally:
+            if orb is not None:
+                orb.stop()
+    except AllPanelsFailed as e:
+        if args.as_json:
+            print(json.dumps({"status": "error", "failure_reason": e.failure_reason,
+                              "responses": [{"model": r["label"], "ok": r["ok"],
+                                             "error": r["error"]} for r in e.responses]},
+                             indent=2))
+        else:
+            print(f"scry: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+    if args.show_proposers:
+        for r in result["responses"]:
+            tag = "ok" if r["ok"] else "FAILED"
+            print(f"\n----- {r['model']} ({tag}, {r['seconds']}s) -----", file=sys.stderr)
+            print(r["content"] or r["error"] or "", file=sys.stderr)
+        print("\n----- fused answer -----", file=sys.stderr)
+
+    if args.as_json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(result["final"])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

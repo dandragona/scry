@@ -1,0 +1,946 @@
+#!/usr/bin/env python3
+"""scry-eval — does fusion actually beat the best single model?
+
+Anecdotes ("the fused answer looked better") are not evidence. This measures it.
+
+Two regimes:
+  OBJECTIVE   items have a verifiable answer. We score every solo proposer AND the
+              fused answer against ground truth with code — no LLM judge, so no
+              circularity. The question: is `scry` at least as accurate as the best
+              single model, and does it stay correct when a weak member is wrong?
+  SUBJECTIVE  open-ended items. A BLIND, order-randomized, FAMILY-NEUTRAL judge
+              compares the fused answer against each solo answer. "Family-neutral"
+              = for a fused-vs-X matchup we only let a judge whose model family is
+              neither the synthesizer's (Claude) nor X's vote, which removes the
+              obvious self-enhancement bias. Each pair is judged in BOTH orderings
+              to cancel position bias. We report fused's win-rate vs the field and
+              vs its single toughest competitor.
+
+  DRACO       Perplexity's deep-research benchmark — the one OpenRouter Fusion
+              headlines. Each task ships a weighted rubric (~39 criteria); we grade
+              the fused answer (and optionally each solo) against it with the
+              OFFICIAL per-criterion MET/UNMET method + normalization from the MIT
+              `rubric` scorer, driven by a subscription-CLI grader. Measures OUR
+              scry on DRACO's 0–100 scale — NOT a reproduction of OpenRouter's
+              headline (their model builds / Exa retrieval / judge differ).
+
+The system under test is the REAL `./scry --json` (we evaluate the shipped CLI,
+end-to-end). Judging reuses scry's own provider plumbing (so it speaks to the same
+subscription CLIs, including agy's prompt-as-arg path). Pilot-scale by design:
+N is tiny, so this VALIDATES THE METHOD and shows direction — it is not a powered
+statistical result. Scale up the dataset for that.
+
+Usage:
+  ./scry-eval                       # objective + subjective dataset
+  ./scry-eval --only objective      # one regime
+  ./scry-eval --limit 1             # first N items of each regime (smoke test)
+  ./scry-eval --draco --draco-tasks 1                    # DRACO, 1 task (smoke)
+  ./scry-eval --draco --draco-stratified --grade-solos   # DRACO, 1 task/domain, fused vs solos
+Stdlib only; Python 3.9+.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import importlib.util
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+
+# Model family per provider. Used for family-neutral judge selection.
+FAMILY = {"claude": "anthropic", "codex": "openai", "agy": "google"}
+# Canonical judge per family (a strong model from each).
+FAMILY_JUDGE = {
+    "anthropic": {"provider": "claude", "model": "opus"},
+    "openai":    {"provider": "codex",  "model": ""},
+    "google":    {"provider": "agy",    "model": "Gemini 3.1 Pro (High)"},
+}
+
+JUDGE_SYSTEM = (
+    "You are a blind, impartial evaluator. You are shown a user prompt and two "
+    "candidate answers labelled A and B. Decide which answer better satisfies the "
+    "prompt, judging ONLY on correctness, completeness, and relevance — ignore "
+    "length, formatting, and writing style, and do not assume either label is "
+    "better. If they are genuinely equal, call it a tie. Respond with EXACTLY one "
+    "line and nothing else: 'VERDICT: A', 'VERDICT: B', or 'VERDICT: TIE'."
+)
+
+
+# --------------------------------------------------------------------------- #
+# Load scry as a module to reuse its provider plumbing (load_config, call_cli).
+# --------------------------------------------------------------------------- #
+
+def load_scry_module(scry_path: Path):
+    # scry has no .py extension, so give spec_from_file_location an explicit loader.
+    from importlib.machinery import SourceFileLoader
+    loader = SourceFileLoader("scry_sut", str(scry_path))
+    spec = importlib.util.spec_from_loader("scry_sut", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)                 # defines symbols; main() not called (name != __main__)
+    return mod
+
+
+# --------------------------------------------------------------------------- #
+# System under test: run the real ./scry --json
+# --------------------------------------------------------------------------- #
+
+def run_scry(scry_path: Path, prompt: str, extra_args, timeout: float = 900.0) -> dict:
+    """Return parsed `scry --json` output, or a {'status':'sut_error',...} dict."""
+    argv = [str(scry_path), "--json", *extra_args, prompt]
+    t0 = time.time()
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"status": "sut_error", "error": f"scry timed out after {int(timeout)}s"}
+    dt = time.time() - t0
+    raw = (proc.stdout or "").strip()
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {"status": "sut_error",
+                "error": f"non-JSON scry output (exit {proc.returncode}): "
+                         f"{(proc.stderr or raw)[:300]}"}
+    data["_seconds"] = round(dt, 1)
+    return data
+
+
+# --------------------------------------------------------------------------- #
+# Objective grading (code only)
+# --------------------------------------------------------------------------- #
+
+def find_answer_line(text: str):
+    if not text:
+        return None
+    hits = re.findall(r"(?im)^\s*answer\s*[:=]\s*(.+?)\s*$", text)
+    return hits[-1].strip() if hits else None
+
+
+def token_match(hay: str, token: str) -> bool:
+    """Match `token` in `hay` with light boundaries so '20' doesn't match '120'
+    and '9.9' doesn't match '19.9' — but phrases like '5 cents.' still match."""
+    pat = r"(?<![\w.])" + re.escape(token.strip()) + r"(?![\w])"
+    return re.search(pat, hay, re.IGNORECASE) is not None
+
+
+def grade_objective(text: str, expected):
+    """Return (correct, evidence, matched_token). Prefer the ANSWER: line; fall
+    back to full text (logged) when the synthesizer dropped the format."""
+    line = find_answer_line(text or "")
+    hay = line if line is not None else (text or "")
+    for tok in expected:
+        if token_match(hay, tok):
+            return True, (line if line is not None else "(full text)"), tok
+    return False, (line if line is not None else "(full text)"), None
+
+
+# --------------------------------------------------------------------------- #
+# Subjective judging (blind, order-swapped, family-neutral)
+# --------------------------------------------------------------------------- #
+
+def parse_verdict(text: str):
+    if not text:
+        return None
+    hits = re.findall(r"(?i)verdict\s*[:\-]?\s*(a|b|tie)\b", text)
+    return hits[-1].upper() if hits else None
+
+
+async def judge_once(mod, cfg, settings, judge, cwd, prompt, ans_a, ans_b):
+    juser = (f"User prompt:\n{prompt}\n\n"
+             f"Response A:\n{ans_a}\n\nResponse B:\n{ans_b}\n\n"
+             "Which response better answers the prompt? Reply with one line only.")
+    try:
+        out = await mod.call_cli(cfg, judge["provider"], judge.get("model", ""),
+                                 JUDGE_SYSTEM, juser, cwd, 0, False, settings)
+    except Exception as e:  # noqa: BLE001 — a flaky judge call must not abort the eval
+        return None, str(e)
+    return parse_verdict(out), None
+
+
+async def judge_matchup(mod, cfg, settings, cwd, sem, prompt, fused, solo,
+                        judges):
+    """Judge fused-vs-solo. For each judge, both orderings. fused gets
+    win=1/tie=0.5/loss=0; matchup score = mean over judges & valid orderings."""
+    async def one(judge, fused_is_a):
+        async with sem:
+            a, b = (fused, solo) if fused_is_a else (solo, fused)
+            v, err = await judge_once(mod, cfg, settings, judge, cwd, prompt, a, b)
+            if v is None:
+                return None
+            if v == "TIE":
+                return 0.5
+            fused_label = "A" if fused_is_a else "B"
+            return 1.0 if v == fused_label else 0.0
+
+    tasks = []
+    for j in judges:
+        tasks.append(one(j, True))
+        tasks.append(one(j, False))
+    scores = [s for s in await asyncio.gather(*tasks) if s is not None]
+    return (sum(scores) / len(scores)) if scores else None, len(scores)
+
+
+def judges_for(fused_family: str, solo_family: str):
+    fams = [f for f in FAMILY_JUDGE if f not in (fused_family, solo_family)]
+    return [FAMILY_JUDGE[f] for f in fams], fams
+
+
+# --------------------------------------------------------------------------- #
+# DRACO regime — Perplexity's deep-research benchmark (the one OpenRouter Fusion
+# headlines). Each task ships a weighted rubric (~39 criteria across 4 axes).
+# We grade fused + each solo against the rubric using the OFFICIAL per-criterion
+# MET/UNMET method and normalization from the MIT `rubric` scorer
+# (github.com/The-LLM-Data-Company/rubric), driven by a subscription-CLI grader.
+# This measures OUR scry on DRACO's 0–100 scale; it does NOT reproduce
+# OpenRouter's headline (different model builds / Exa retrieval / judge). See README.
+# --------------------------------------------------------------------------- #
+
+# Verbatim system prompt from rubric/autograders/per_criterion_grader.py
+# (DEFAULT_SYSTEM_PROMPT) so MET/UNMET semantics match the official scorer exactly.
+DRACO_GRADER_SYSTEM = """You are evaluating a response for a given query against a single criterion.
+
+You will receive the response to evaluate, a single criterion to check, and a <criterion_type> field indicating if the criterion is positive or negative.
+
+CRITERION TYPES:
+The <criterion_type> field tells you whether this criterion describes something desirable (positive) or undesirable (negative). Your job is THE SAME for both types: determine if the thing described in the criterion is actually present in the response.
+
+POSITIVE CRITERIA:
+Positive criteria describe desired traits, requirements, or content that should be present.
+- MET (criterion_status: "MET"): The response contains/satisfies the requirement
+- UNMET (criterion_status: "UNMET"): The response does not contain/satisfy the requirement
+
+NEGATIVE CRITERIA:
+Negative criteria describe active errors or mistakes that the response is making.
+- MET (criterion_status: "MET"): The response advocates, states, or recommends the problematic thing
+- UNMET (criterion_status: "UNMET"): The response does NOT make this error, OR it mentions the thing only to warn against it or mention why it's wrong
+
+Examples of what does NOT count as MET for negative criteria:
+- "This is often misdiagnosed as X, but it's actually Y" -> NOT stating it's X (UNMET)
+- "Avoid doing X because..." -> NOT recommending X (UNMET)
+- "Unlike X, the correct approach is Y" -> NOT advocating for X (UNMET)
+- "A common mistake is thinking X" -> NOT claiming X is correct (UNMET)
+
+EVALUATION RULES:
+- For numerical values: Check if they fall within specified ranges or match exactly as required.
+- For factual claims: Verify the information is present and accurate, regardless of exact phrasing.
+- For required elements: Confirm presence, counting precisely when numbers are specified.
+- For exclusion requirements: Confirm that restricted content is absent.
+- For length requirements: Carefully measure the number of words, characters, items, etc.
+- Be strict about factual accuracy but flexible about wording.
+- Accept semantically equivalent statements or implications where appropriate.
+- Pay careful attention to negation, warnings, and contrasts.
+
+CONDITIONAL VS UNCONDITIONAL ACTIONS (CRITICAL):
+When a criterion requires an action to be done "immediately", "now", "as soon as possible", or unconditionally, you must distinguish:
+- UNCONDITIONAL: "Give epinephrine now" or "Administer X immediately" -> action IS being taken
+- CONDITIONAL: "If Y occurs, give epinephrine" or "Start X if condition Z" -> action is NOT being taken immediately; it's contingent on a future condition
+
+If the criterion says something should happen "immediately" or without conditions, a conditional statement does NOT satisfy the criterion. Mark as UNMET.
+
+Example:
+- Criterion: "Administers alteplase immediately for acute ischemic stroke"
+- Output: "If CT confirms no hemorrhage, consider alteplase" -> UNMET (conditional, not immediate)
+- Output: "Give alteplase now per acute stroke protocol" -> MET (immediate, unconditional)
+
+IMPLICIT VS EXPLICIT SATISFACTION:
+Consider whether a criterion can be satisfied implicitly through context, tone, or logical implication, not just explicit statements:
+- "States there is no location in China" can be MET by "Locations are only in United States and Canada"-if locations are ONLY in US and Canada, China is excluded; no need to mention China
+- "Confirms the user is logged out" can be MET by "Session expired at 3:42 PM"-an expired session means the user is logged out, even without stating it directly
+
+CRITERION STATUS:
+"criterion_status" has *nothing* to do with quality or correctness. It only means:
+- "MET": The thing described in the criterion IS present/occurring in the response
+- "UNMET": The thing described in the criterion IS NOT present/occurring in the response
+
+Your response must be valid JSON with this exact format:
+
+{
+"explanation": "Brief explanation of why the criterion is MET.",
+"criterion_status": "MET"
+}
+
+Return only raw JSON starting with {, no back-ticks, no 'json' prefix."""
+
+
+def parse_criterion_verdict(text: str):
+    """Extract MET/UNMET from a grader reply (prefer the JSON field, then fall back)."""
+    if not text:
+        return None
+    t = text.strip()
+    t2 = re.sub(r"^```[a-zA-Z0-9]*\s*", "", t)
+    t2 = re.sub(r"\s*```$", "", t2.strip())
+    for cand in (t2, t):
+        try:
+            o = json.loads(cand)
+            if isinstance(o, dict):
+                v = o.get("criterion_status")
+                if isinstance(v, str) and v.upper() in ("MET", "UNMET"):
+                    return v.upper()
+        except ValueError:
+            pass
+    m = re.search(r'criterion_status"?\s*[:=]\s*"?\s*(MET|UNMET)', text, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    toks = re.findall(r"\b(UNMET|MET)\b", text, re.IGNORECASE)  # UNMET checked first
+    return toks[-1].upper() if toks else None
+
+
+def draco_aggregate(reports):
+    """Official normalization from rubric/autograders/per_criterion_grader.py.
+    reports: list of (verdict, weight); verdict in {'MET','UNMET',None}. None
+    (failed grade) counts as not-MET, and is also reported as `ungraded`."""
+    pos = sum(max(0.0, w) for _, w in reports)
+    neg = sum(abs(w) for v, w in reports if w < 0)
+    wsum = sum((1.0 if v == "MET" else 0.0) * w for v, w in reports)
+    if pos > 0:
+        score = max(0.0, min(1.0, wsum / pos))
+    elif neg > 0:                       # all-negative rubric: start at 1.0, errors subtract
+        score = max(0.0, min(1.0, 1.0 + wsum / neg))
+    else:
+        score = 0.0
+    graded = sum(1 for v, _ in reports if v is not None)
+    return {"score": round(score * 100, 2), "raw": round(wsum, 2),
+            "graded": graded, "ungraded": len(reports) - graded,
+            "met": sum(1 for v, _ in reports if v == "MET"), "total": len(reports)}
+
+
+def load_draco(path, n_tasks=0, stratified=False, criteria_limit=0):
+    rows = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    items = []
+    for r in rows:
+        ans = json.loads(r["answer"]) if isinstance(r["answer"], str) else r["answer"]
+        crit = []
+        for s in ans.get("sections", []):
+            for c in s.get("criteria", []):
+                crit.append({"weight": float(c["weight"]), "requirement": c["requirement"],
+                             "section": s.get("id")})
+        if criteria_limit:
+            crit = crit[:criteria_limit]
+        items.append({"id": r["id"], "domain": r.get("domain", ""),
+                      "problem": r["problem"], "criteria": crit})
+    if stratified:                      # one task per domain (max coverage at min cost)
+        seen, strat = set(), []
+        for it in items:
+            if it["domain"] not in seen:
+                seen.add(it["domain"])
+                strat.append(it)
+        items = strat
+    return items[:n_tasks] if n_tasks else items
+
+
+TRANSIENT_HINTS = ("rate", "429", "overload", "quota", "limit", "timeout",
+                   "throttl", "503", "502", "unavailable", "exhausted")
+
+
+def is_transient(msg: str) -> bool:
+    m = (msg or "").lower()
+    return any(h in m for h in TRANSIENT_HINTS)
+
+
+async def call_with_retry(make_coro, attempts=4, base_delay=5.0):
+    """Await make_coro(); on transient (rate-limit-ish) errors retry with
+    exponential backoff (5s, 15s, 45s). Re-raise non-transient errors at once."""
+    last = None
+    for i in range(attempts):
+        try:
+            return await make_coro()
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if i == attempts - 1 or not is_transient(str(e)):
+                raise
+            await asyncio.sleep(base_delay * (3 ** i))
+    raise last  # unreachable
+
+
+async def grade_against_rubric(mod, cfg, settings, grader, cwd, sem, query, to_grade, criteria):
+    """Grade one text against all criteria (one CLI call each, in parallel).
+    Each call retries on transient/rate-limit errors; a still-failing criterion
+    degrades to None (counted UNMET + reported as ungraded) rather than aborting."""
+    async def one(c):
+        async with sem:
+            ctype = "negative" if c["weight"] < 0 else "positive"
+            user = (f"<criterion_type>\n{ctype}\n</criterion_type>\n\n"
+                    f"<criterion>\n{c['requirement']}\n</criterion>\n\n"
+                    f"<query>{query}</query>\n\n"
+                    f"<response>\n{to_grade}\n</response>")
+            try:
+                out = await call_with_retry(lambda: mod.call_cli(
+                    cfg, grader["provider"], grader.get("model", ""),
+                    DRACO_GRADER_SYSTEM, user, cwd, 0, False, settings))
+            except Exception:  # noqa: BLE001 — exhausted/non-transient -> ungraded
+                return (None, c["weight"])
+            return (parse_criterion_verdict(out), c["weight"])
+    return list(await asyncio.gather(*(one(c) for c in criteria)))
+
+
+# Verbatim system prompt from rubric/autograders/per_criterion_one_shot_grader.py.
+# One call grades ALL criteria -> ~1/N the calls + tokens of per-criterion (the only
+# way DRACO grading fits under a subscription's token quota). Same MET/UNMET semantics
+# and same normalization; the default grading mode.
+DRACO_ONESHOT_SYSTEM = """You are evaluating a response for a given query against a list of criteria.
+
+You will receive the response to evaluate, and a numbered list of criteria to check (numbered 0, 1, 2, etc.). Each criterion is marked as POSITIVE or NEGATIVE. You must evaluate each criterion and return results with criterion_idx matching the indices in the list.
+
+CRITERION TYPES:
+Each criterion is marked as positive or negative. Your job is THE SAME for both types: determine if the thing described in the criterion is actually present in the response.
+
+POSITIVE CRITERIA:
+Positive criteria describe desired traits, requirements, or content that should be present.
+- MET (criterion_status: "MET"): The response contains/satisfies the requirement
+- UNMET (criterion_status: "UNMET"): The response does not contain/satisfy the requirement
+
+NEGATIVE CRITERIA:
+Negative criteria describe active errors or mistakes that the response is making.
+- MET (criterion_status: "MET"): The response advocates, states, or recommends the problematic thing
+- UNMET (criterion_status: "UNMET"): The response does NOT make this error, OR it mentions the thing only to warn against it or mention why it's wrong
+
+Examples of what does NOT count as MET for negative criteria:
+- "This is often misdiagnosed as X, but it's actually Y" -> NOT stating it's X (UNMET)
+- "Avoid doing X because..." -> NOT recommending X (UNMET)
+- "Unlike X, the correct approach is Y" -> NOT advocating for X (UNMET)
+- "A common mistake is thinking X" -> NOT claiming X is correct (UNMET)
+
+EVALUATION RULES:
+- For numerical values: Check if they fall within specified ranges or match exactly as required.
+- For factual claims: Verify the information is present and accurate, regardless of exact phrasing.
+- For required elements: Confirm presence, counting precisely when numbers are specified.
+- For exclusion requirements: Confirm that restricted content is absent.
+- For length requirements: Carefully measure the number of words, characters, items, etc.
+- Be strict about factual accuracy but flexible about wording.
+- Accept semantically equivalent statements or implications where appropriate.
+- Pay careful attention to negation, warnings, and contrasts.
+
+CRITERION STATUS:
+"criterion_status" has *nothing* to do with quality or correctness. It only means:
+- "MET": The thing described in the criterion IS present/occurring in the response
+- "UNMET": The thing described in the criterion IS NOT present/occurring in the response
+
+Positive criterion: "States Q4 2023 base margin as 17.2%"
+Response: "The Q4 2023 base margin was 17.2% before adjustments."
+{
+"explanation": "The response states Q4 2023 base margin as 17.2%, as required.",
+"criterion_status": "MET"
+}
+
+Negative criterion: "States that the patient has diabetes"
+Response: "This patient does not have diabetes."
+{
+"explanation": "The response explicitly states the patient does NOT have diabetes, so this error is not present.",
+"criterion_status": "UNMET"
+}
+
+For each criterion, provide:
+- The criterion_idx (0-indexed, matching the index from the criteria list above)
+- An explanation containing a brief justification
+- A criterion_status (MET or UNMET)
+
+IMPORTANT: You must evaluate ALL criteria provided. The criterion_idx is 0-indexed (starts at 0)
+and must match the index shown in the criteria list (0, 1, 2, etc.).
+Do not skip any criteria.
+
+Do NOT provide an overall score - only evaluate each criterion.
+
+Respond ONLY with valid JSON in this exact format:
+{
+  "criteria_evaluations": [
+    {
+      "criterion_idx": 0,
+      "explanation": "Brief explanation",
+      "criterion_status": "MET"
+    },
+    ...
+  ]
+}"""
+
+
+def parse_oneshot(text):
+    """Parse {criteria_evaluations:[{criterion_idx,criterion_status,...}]} -> {idx: verdict}."""
+    if not text:
+        return None
+    t = text.strip()
+    t = re.sub(r"^```[a-zA-Z0-9]*\s*", "", t)
+    t = re.sub(r"\s*```$", "", t.strip())
+    obj = None
+    try:
+        obj = json.loads(t)
+    except ValueError:
+        a, b = t.find("{"), t.rfind("}")
+        if a != -1 and b > a:
+            try:
+                obj = json.loads(t[a:b + 1])
+            except ValueError:
+                obj = None
+    if not isinstance(obj, dict) or not isinstance(obj.get("criteria_evaluations"), list):
+        return None
+    m = {}
+    for e in obj["criteria_evaluations"]:
+        if isinstance(e, dict) and isinstance(e.get("criterion_idx"), int):
+            st = e.get("criterion_status")
+            if isinstance(st, str) and st.upper() in ("MET", "UNMET"):
+                m[e["criterion_idx"]] = st.upper()
+    return m
+
+
+async def grade_oneshot(mod, cfg, settings, grader, cwd, query, to_grade, criteria):
+    """Grade all criteria in ONE call. Missing criteria -> UNMET (official). A failed
+    or badly-truncated call -> all None (ungraded), so the task is flagged incomplete."""
+    lines = []
+    for i, c in enumerate(criteria):
+        ctype = ("NEGATIVE (status MET if error IS present, UNMET if error is NOT present)"
+                 if c["weight"] < 0 else
+                 "POSITIVE (status MET if requirement IS present, UNMET if requirement is NOT present)")
+        lines.append(f"{i}. [{ctype}] (weight: {c['weight']}) {c['requirement']}")
+    user = ("Evaluate the response against the following criteria:\n<criteria>\n"
+            + "\n".join(lines) + "\n</criteria>\n\n"
+            f"<query>{query}</query>\n\n"
+            f"<response>\n{to_grade}\n</response>\n\n"
+            "Provide your evaluation as JSON only.")
+    try:
+        out = await call_with_retry(lambda: mod.call_cli(
+            cfg, grader["provider"], grader.get("model", ""),
+            DRACO_ONESHOT_SYSTEM, user, cwd, 0, False, settings))
+    except Exception:  # noqa: BLE001
+        return [(None, c["weight"]) for c in criteria]
+    emap = parse_oneshot(out)
+    if not emap or len(emap) < max(1, len(criteria) // 2):   # garbage/truncated -> ungraded
+        return [(None, c["weight"]) for c in criteria]
+    return [(emap.get(i, "UNMET"), c["weight"]) for i, c in enumerate(criteria)]
+
+
+async def grade_output(mode, mod, cfg, settings, grader, cwd, sem, query, to_grade, criteria):
+    """Dispatch to the chosen grading mode; return (reports, n_calls)."""
+    if mode == "one-shot":
+        return await grade_oneshot(mod, cfg, settings, grader, cwd, query, to_grade, criteria), 1
+    reps = await grade_against_rubric(mod, cfg, settings, grader, cwd, sem,
+                                      query, to_grade, criteria)
+    return reps, len(criteria)
+
+
+def task_complete(r) -> bool:
+    """A task is done (skippable on resume) only if its fused answer was actually
+    graded — i.e. the grader call succeeded (ungraded == 0). A throttled task whose
+    grading failed has ungraded > 0 and will be re-run on resume."""
+    return bool(r.get("sut_ok")) and r.get("fused", {}).get("ungraded", 1) == 0
+
+
+async def eval_draco(mod, cfg, scry_path, items, extra_args, grader, concurrency,
+                     grade_solos, grader_mode="one-shot", initial_results=None, save_cb=None):
+    """Run DRACO over `items`, checkpointing after every task via save_cb so a
+    rate-limit/quota death loses at most the in-flight task (resume re-runs it)."""
+    settings = dict(cfg.get("settings", {}))
+    sem = asyncio.Semaphore(concurrency)   # created on the running loop (3.9 binds here)
+    cwd = tempfile.mkdtemp(prefix="scry-draco-")
+    results = list(initial_results or [])
+    grade_calls = 0
+    try:
+        for it in items:
+            try:
+                crit = it["criteria"]
+                print(f"  · draco[{it['id'][:8]}] {it['domain']} ({len(crit)} criteria) — running scry…",
+                      file=sys.stderr, flush=True)
+                data = run_scry(scry_path, it["problem"], extra_args)
+                if data.get("status") != "ok":
+                    print("    ! SUT failed (will retry on resume)", file=sys.stderr)
+                    results.append({"id": it["id"], "domain": it["domain"], "sut_ok": False,
+                                    "error": data.get("error") or data.get("failure_reason")})
+                    continue
+                print(f"    grading FUSED ({len(crit)} criteria, {grader_mode})…",
+                      file=sys.stderr, flush=True)
+                freps, nc = await grade_output(grader_mode, mod, cfg, settings, grader, cwd, sem,
+                                               it["problem"], data["final"], crit)
+                grade_calls += nc
+                fused_eval = draco_aggregate(freps)
+                solo_evals = {}
+                if grade_solos:
+                    for r in data["responses"]:
+                        if not (r["ok"] and r.get("content")):
+                            solo_evals[r["model"]] = {"score": None}
+                            continue
+                        print(f"    grading solo {r['model']}…", file=sys.stderr, flush=True)
+                        sreps, nc = await grade_output(grader_mode, mod, cfg, settings, grader, cwd,
+                                                       sem, it["problem"], r["content"], crit)
+                        grade_calls += nc
+                        solo_evals[r["model"]] = draco_aggregate(sreps)
+                best = max((e["score"] for e in solo_evals.values()
+                            if e.get("score") is not None), default=None)
+                print(f"    → fused {fused_eval['score']:.1f}"
+                      + (f"  best-solo {best:.1f}" if best is not None else "")
+                      + f"  (graded {fused_eval['graded']}/{fused_eval['total']})",
+                      file=sys.stderr, flush=True)
+                results.append({"id": it["id"], "domain": it["domain"], "sut_ok": True,
+                                "scry_seconds": data.get("_seconds"), "n_criteria": len(crit),
+                                "fused": fused_eval, "solos": solo_evals})
+            except Exception as e:  # noqa: BLE001 — one bad task must not lose the run
+                print(f"    ! task error ({e}); recorded, continuing", file=sys.stderr)
+                results.append({"id": it["id"], "domain": it.get("domain", ""),
+                                "sut_ok": False, "error": f"task exception: {e}"})
+            if save_cb:
+                save_cb(results, grade_calls)   # atomic checkpoint after every task
+    finally:
+        import shutil
+        shutil.rmtree(cwd, ignore_errors=True)
+    return results, grade_calls
+
+
+# --------------------------------------------------------------------------- #
+# Eval driver
+# --------------------------------------------------------------------------- #
+
+async def eval_subjective(mod, cfg, scry_path, items, extra_args, concurrency):
+    settings = dict(cfg.get("settings", {}))
+    sem = asyncio.Semaphore(concurrency)   # created on the running loop (3.9 binds here)
+    label2prov = {m.get("label", m["provider"]): m["provider"] for m in cfg.get("panel", [])}
+    fused_family = FAMILY.get(cfg.get("aggregator", {}).get("provider", "claude"), "anthropic")
+    cwd = tempfile.mkdtemp(prefix="scry-eval-")
+    results = []
+    judge_calls = 0
+    try:
+        for it in items:
+            print(f"  · subjective[{it['id']}] running scry…", file=sys.stderr, flush=True)
+            data = run_scry(scry_path, it["prompt"], extra_args)
+            if data.get("status") != "ok":
+                print(f"    ! SUT failed: {data.get('error') or data.get('failure_reason')}",
+                      file=sys.stderr)
+                results.append({"id": it["id"], "sut_ok": False,
+                                "error": data.get("error") or data.get("failure_reason")})
+                continue
+            fused = data["final"]
+            solos = [r for r in data["responses"] if r["ok"] and r.get("content")]
+            matchups = []
+            for r in solos:
+                solo_fam = FAMILY.get(label2prov.get(r["model"], ""), "?")
+                judges, jf = judges_for(fused_family, solo_fam)
+                if not judges:
+                    continue
+                print(f"    judging fused vs {r['model']} "
+                      f"(judges: {', '.join(jf)})…", file=sys.stderr, flush=True)
+                score, n = await judge_matchup(mod, cfg, settings, cwd, sem,
+                                               it["prompt"], fused, r["content"], judges)
+                judge_calls += n
+                matchups.append({"opponent": r["model"], "judge_families": jf,
+                                 "fused_score": score, "n_votes": n})
+            scored = [m for m in matchups if m["fused_score"] is not None]
+            field = (sum(m["fused_score"] for m in scored) / len(scored)) if scored else None
+            toughest = min(scored, key=lambda m: m["fused_score"]) if scored else None
+            results.append({
+                "id": it["id"], "sut_ok": True, "scry_seconds": data.get("_seconds"),
+                "matchups": matchups,
+                "fused_winrate_vs_field": field,
+                "vs_toughest": toughest,
+            })
+    finally:
+        import shutil
+        shutil.rmtree(cwd, ignore_errors=True)
+    return results, judge_calls
+
+
+def eval_objective(scry_path, items, extra_args):
+    results = []
+    for it in items:
+        print(f"  · objective[{it['id']}] running scry…", file=sys.stderr, flush=True)
+        data = run_scry(scry_path, it["prompt"], extra_args)
+        if data.get("status") != "ok":
+            print(f"    ! SUT failed: {data.get('error') or data.get('failure_reason')}",
+                  file=sys.stderr)
+            results.append({"id": it["id"], "sut_ok": False,
+                            "error": data.get("error") or data.get("failure_reason")})
+            continue
+        per_solo = {}
+        for r in data["responses"]:
+            if not r["ok"]:
+                per_solo[r["model"]] = {"correct": None, "evidence": "(failed)"}
+                continue
+            ok, ev, tok = grade_objective(r["content"], it["expected"])
+            per_solo[r["model"]] = {"correct": ok, "evidence": ev, "matched": tok}
+        f_ok, f_ev, f_tok = grade_objective(data["final"], it["expected"])
+        results.append({
+            "id": it["id"], "sut_ok": True, "scry_seconds": data.get("_seconds"),
+            "expected": it["expected"],
+            "solos": per_solo,
+            "fused": {"correct": f_ok, "evidence": f_ev, "matched": f_tok},
+            "any_solo_correct": any(v["correct"] for v in per_solo.values()),
+        })
+    return results
+
+
+# --------------------------------------------------------------------------- #
+# Reporting
+# --------------------------------------------------------------------------- #
+
+def _mark(v):
+    return {True: "✓", False: "✗", None: "—"}[v]
+
+
+def report(obj_results, subj_results, model_names):
+    print("\n" + "=" * 72)
+    print("OBJECTIVE  (ground-truth accuracy — no LLM judge)")
+    print("=" * 72)
+    if obj_results:
+        cols = model_names + ["FUSED"]
+        header = "item".ljust(18) + "".join(c[:12].ljust(13) for c in cols)
+        print(header)
+        tally = {c: [0, 0] for c in cols}  # [correct, graded]
+        for r in obj_results:
+            if not r.get("sut_ok"):
+                print(r["id"].ljust(18) + "SUT FAILED")
+                continue
+            row = r["id"].ljust(18)
+            for m in model_names:
+                c = r["solos"].get(m, {}).get("correct")
+                row += _mark(c).ljust(13)
+                if c is not None:
+                    tally[m][1] += 1
+                    tally[m][0] += int(c)
+            fc = r["fused"]["correct"]
+            row += _mark(fc).ljust(13)
+            tally["FUSED"][1] += 1
+            tally["FUSED"][0] += int(fc)
+            print(row)
+        print("-" * len(header))
+        acc_row = "accuracy".ljust(18)
+        for c in cols:
+            got, n = tally[c]
+            acc_row += (f"{got}/{n}" if n else "—").ljust(13)
+        print(acc_row)
+        # The comparison that matters: fused vs the best single model.
+        best_model, best_acc = None, -1.0
+        for m in model_names:
+            got, n = tally[m]
+            if n and got / n > best_acc:
+                best_model, best_acc = m, got / n
+        fgot, fn = tally["FUSED"]
+        if best_model and fn:
+            facc = fgot / fn
+            verdict = ("fused ≥ best single" if facc >= best_acc
+                       else "fused WORSE than best single")
+            print(f"\n  best single model: {best_model} ({best_acc:.0%})   "
+                  f"fused: {facc:.0%}   →  {verdict}")
+
+    print("\n" + "=" * 72)
+    print("SUBJECTIVE  (blind, order-swapped, family-neutral judges)")
+    print("  fused score per matchup: 1=fused wins, 0.5=tie, 0=solo wins")
+    print("=" * 72)
+    fields = []
+    for r in subj_results:
+        if not r.get("sut_ok"):
+            print(f"{r['id']}: SUT FAILED ({r.get('error')})")
+            continue
+        print(f"\n{r['id']}:")
+        for m in r["matchups"]:
+            s = m["fused_score"]
+            s_txt = f"{s:.2f}" if s is not None else "—"
+            print(f"   fused vs {m['opponent']:<14} {s_txt}  "
+                  f"(judges: {','.join(m['judge_families'])}, {m['n_votes']} votes)")
+        if r["fused_winrate_vs_field"] is not None:
+            fields.append(r["fused_winrate_vs_field"])
+            tough = r["vs_toughest"]
+            print(f"   → vs field: {r['fused_winrate_vs_field']:.2f}   "
+                  f"vs toughest ({tough['opponent']}): {tough['fused_score']:.2f}")
+    if fields:
+        print(f"\n  mean fused win-rate vs field across items: "
+              f"{sum(fields)/len(fields):.2f}  (0.5 = no better than the panel)")
+
+
+def parse_grader(spec: str):
+    prov, _, model = spec.partition(":")
+    return {"provider": prov.strip(), "model": model.strip()}
+
+
+def report_draco(results, grade_solos):
+    print("\n" + "=" * 72)
+    print("DRACO  (Perplexity deep-research rubric — official per-criterion scoring)")
+    print("  normalized 0–100; fused vs each solo graded on the SAME rubric")
+    print("=" * 72)
+    fused_scores, solo_agg = [], {}
+    beats = ties = total_cmp = 0
+    for r in results:
+        if not r.get("sut_ok"):
+            print(f"{r['id'][:8]} ({r['domain']}): SUT FAILED ({r.get('error')})")
+            continue
+        fs = r["fused"]["score"]
+        fused_scores.append(fs)
+        line = f"{r['id'][:8]}  {r['domain'][:20]:<20} fused {fs:5.1f}"
+        if grade_solos and r["solos"]:
+            parts, best, bestm = [], None, None
+            for m, e in r["solos"].items():
+                sc = e.get("score")
+                parts.append(f"{m}={sc:.1f}" if sc is not None else f"{m}=—")
+                if sc is not None:
+                    solo_agg.setdefault(m, []).append(sc)
+                    if best is None or sc > best:
+                        best, bestm = sc, m
+            line += "   solos: " + ", ".join(parts)
+            if best is not None:
+                total_cmp += 1
+                if fs > best + 1e-9:
+                    beats += 1
+                    tag = "fused>best"
+                elif abs(fs - best) <= 1e-9:
+                    ties += 1
+                    tag = "tie"
+                else:
+                    tag = "fused<best"
+                line += f"   [{tag} vs {bestm}]"
+        ug = r["fused"].get("ungraded", 0)
+        if ug:
+            line += f"  (⚠ {ug} ungraded)"
+        print(line)
+    if fused_scores:
+        print("-" * 72)
+        print(f"mean fused: {sum(fused_scores)/len(fused_scores):.1f}")
+        if grade_solos and solo_agg:
+            for m, xs in solo_agg.items():
+                print(f"mean {m}:  {sum(xs)/len(xs):.1f}")
+            if total_cmp:
+                verdict = ("fused ≥ best-solo overall" if beats + ties >= total_cmp - beats
+                           else "fused sometimes < best-solo")
+                print(f"\nper-task: fused beat best-solo on {beats}/{total_cmp} "
+                      f"({ties} ties)  →  {verdict}")
+    print("\nNOTE: this is OUR scry on DRACO's scale — NOT a reproduction of "
+          "OpenRouter's headline (different models / Exa retrieval / judge).")
+
+
+# --------------------------------------------------------------------------- #
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="scry-eval",
+                                 description="Measure whether scry beats the best single model.")
+    ap.add_argument("--scry", default=str(HERE / "scry"), help="path to the scry CLI")
+    ap.add_argument("--dataset", default=str(HERE / "eval" / "dataset.json"))
+    ap.add_argument("--only", choices=["objective", "subjective", "both"], default="both")
+    ap.add_argument("--limit", type=int, default=0, help="first N items per regime (0 = all)")
+    ap.add_argument("--concurrency", type=int, default=4, help="max parallel judge calls")
+    ap.add_argument("--no-web", action="store_true", help="run the SUT with --no-web")
+    ap.add_argument("--out", default=str(HERE / "eval" / "results.json"))
+    # DRACO regime (Perplexity deep-research rubric — the benchmark OpenRouter headlines)
+    ap.add_argument("--draco", action="store_true",
+                    help="run the DRACO rubric regime instead of objective/subjective")
+    ap.add_argument("--draco-dataset", default=str(HERE / "eval" / "draco-test.jsonl"))
+    ap.add_argument("--draco-tasks", type=int, default=0, help="first N DRACO tasks (0 = all 100)")
+    ap.add_argument("--draco-stratified", action="store_true", help="one task per domain")
+    ap.add_argument("--grader", default="codex",
+                    help="grader for DRACO criteria: 'codex', 'agy:Gemini 3.1 Pro (High)' "
+                         "(closest to DRACO's own Gemini judge), or 'claude:opus'")
+    ap.add_argument("--grade-solos", action="store_true",
+                    help="also grade each solo answer (default: fused only) — multiplies cost")
+    ap.add_argument("--criteria-limit", type=int, default=0,
+                    help="cap criteria per task (SMOKE ONLY; 0 = all ~39 — scores are "
+                         "only meaningful with the full rubric)")
+    ap.add_argument("--grader-concurrency", type=int, default=5,
+                    help="max parallel DRACO grading calls")
+    ap.add_argument("--grader-mode", choices=["one-shot", "per-criterion"], default="one-shot",
+                    help="one-shot = all criteria in ONE call per output (default; ~1/N the tokens, "
+                         "fits a subscription quota); per-criterion = one call each (marginally more "
+                         "accurate but token-heavy — exhausts subscription quotas on big rubrics)")
+    ap.add_argument("--no-resume", action="store_true",
+                    help="DRACO: ignore any existing checkpoint and start fresh")
+    args = ap.parse_args()
+
+    scry_path = Path(args.scry).resolve()
+    if not scry_path.exists():
+        ap.error(f"scry not found at {scry_path}")
+    mod = load_scry_module(scry_path)
+    cfg = mod.load_config(None)
+    model_names = [m.get("label", m["provider"]) for m in cfg.get("panel", [])]
+    extra_args = ["--no-web"] if args.no_web else []
+
+    print(f"scry-eval: panel = {', '.join(model_names)}   "
+          f"aggregator = {cfg['aggregator']['provider']}:{cfg['aggregator'].get('model','')}",
+          file=sys.stderr)
+
+    # ---- DRACO regime ----
+    if args.draco:
+        draco_path = Path(args.draco_dataset)
+        if not draco_path.exists():
+            ap.error(f"DRACO dataset not found at {draco_path} — download test.jsonl from "
+                     f"huggingface.co/datasets/perplexity-ai/draco")
+        grader = parse_grader(args.grader)
+        items = load_draco(str(draco_path), args.draco_tasks, args.draco_stratified,
+                           args.criteria_limit)
+        out_path = args.out
+        if Path(out_path).name == "results.json":          # don't clobber obj/subj results
+            out_path = str(HERE / "eval" / "draco-results.json")
+
+        # Resume from a prior (possibly rate-limited) run: keep completed tasks,
+        # re-run only the rest. --no-resume forces a clean run.
+        prior, done = [], set()
+        if not args.no_resume and Path(out_path).exists():
+            try:
+                prev = json.loads(Path(out_path).read_text())
+                if prev.get("grade_solos") == args.grade_solos:
+                    prior = prev.get("results", [])
+                    done = {r["id"] for r in prior if task_complete(r)}
+            except (OSError, ValueError):
+                pass
+        todo = [it for it in items if it["id"] not in done]
+        if done:
+            print(f"resume: {len(done)} task(s) already complete, {len(todo)} to run",
+                  file=sys.stderr)
+
+        def save_cb(results, grade_calls, partial=True):
+            payload = {"regime": "draco", "panel": model_names,
+                       "aggregator": cfg["aggregator"], "grader": grader,
+                       "grade_solos": args.grade_solos, "partial": partial,
+                       "results": results, "grading_calls": grade_calls}
+            tmp = out_path + ".tmp"
+            Path(tmp).write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+            os.replace(tmp, out_path)          # atomic — never leaves a half-written file
+
+        print(f"DRACO: {len(todo)} task(s) to run  grader={grader['provider']}:{grader.get('model','')} "
+              f"({args.grader_mode})  {'fused+solos' if args.grade_solos else 'fused-only'}"
+              + (f"  criteria≤{args.criteria_limit} (SMOKE)" if args.criteria_limit else ""),
+              file=sys.stderr)
+        t0 = time.time()
+        draco_results, grade_calls = asyncio.run(
+            eval_draco(mod, cfg, scry_path, todo, extra_args, grader,
+                       args.grader_concurrency, args.grade_solos,
+                       grader_mode=args.grader_mode, initial_results=prior, save_cb=save_cb))
+        elapsed = time.time() - t0
+        save_cb(draco_results, grade_calls, partial=False)   # final, complete write
+        report_draco(draco_results, args.grade_solos)
+        n_scry = len([r for r in draco_results if r.get("sut_ok")])
+        print(f"\ncost: {n_scry} scry runs (~{n_scry*4}-{n_scry*5} model calls) + "
+              f"{grade_calls} grading calls this run   wall: {elapsed:.0f}s")
+        print(f"wrote {out_path}", file=sys.stderr)
+        return 0
+
+    # ---- objective / subjective regimes ----
+    ds = json.loads(Path(args.dataset).read_text())
+
+    def take(key):
+        items = ds.get(key, [])
+        return items[: args.limit] if args.limit else items
+
+    t0 = time.time()
+    obj_results, subj_results, judge_calls = [], [], 0
+    if args.only in ("objective", "both"):
+        obj_results = eval_objective(scry_path, take("objective"), extra_args)
+    if args.only in ("subjective", "both"):
+        subj_results, judge_calls = asyncio.run(
+            eval_subjective(mod, cfg, scry_path, take("subjective"), extra_args, args.concurrency))
+    elapsed = time.time() - t0
+
+    report(obj_results, subj_results, model_names)
+
+    n_scry = len([r for r in obj_results + subj_results if r.get("sut_ok")])
+    print(f"\ncost: {n_scry} scry runs (~{n_scry * 4}-{n_scry * 5} model calls) + "
+          f"{judge_calls} judge calls   wall: {elapsed:.0f}s")
+    print("NOTE: pilot N — this validates the method and shows direction, "
+          "not a statistically powered result.")
+
+    out = {"panel": model_names, "aggregator": cfg["aggregator"],
+           "objective": obj_results, "subjective": subj_results,
+           "judge_calls": judge_calls, "seconds": round(elapsed, 1)}
+    Path(args.out).write_text(json.dumps(out, ensure_ascii=False, indent=2))
+    print(f"wrote {args.out}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,27 @@
+# --- scry run/eval artifacts ----------------------------------------------
+# The DRACO dataset is fetched on demand (see README) — never commit it (~900 KB).
+eval/draco-test.jsonl
+# Smoke-test outputs are regenerable.
+eval/*-smoke.json
+eval/draco*.json
+# NOTE: eval/dataset.json (curated input) and eval/results.json (committed pilot
+# evidence cited by the README) are intentionally tracked — do not ignore them.
+
+# Throwaway run dirs/files if scry is ever invoked from the repo root.
+scry-run-*/
+scry-msg-*
+scry-draco-*/
+scry-eval-*/
+
+# Local run history (scry writes here under $HOME, but ignore any stray copy).
+.scry/
+
+# --- python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+
+# --- os / editor -----------------------------------------------------------
+.DS_Store
+*.swp
+.idea/
+.vscode/

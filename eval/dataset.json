@@ -1,0 +1,32 @@
+{
+  "_note": "Pilot eval set. OBJECTIVE items have a verifiable answer (scored by code, no LLM judge). They are deliberately items where models often slip or disagree — that's where fusion can earn its cost, and where a weak/web-less panel member (Gemini via agy) might drag the result down. SUBJECTIVE items are open-ended; the fused answer is compared against each solo answer by a blind, order-randomized, family-neutral judge.",
+
+  "objective": [
+    {
+      "id": "count-7s",
+      "prompt": "How many times does the digit 7 appear when you write out all the integers from 1 to 100 inclusive? Show brief reasoning, then end with a line exactly like 'ANSWER: <number>'.",
+      "expected": ["20"]
+    },
+    {
+      "id": "decimal-compare",
+      "prompt": "Which number is larger: 9.11 or 9.9? Briefly explain why, then end with a line exactly like 'ANSWER: <the larger number>'.",
+      "expected": ["9.9"]
+    },
+    {
+      "id": "bat-and-ball",
+      "prompt": "A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How much does the ball cost? Show brief reasoning, then end with a line exactly like 'ANSWER: <amount>'.",
+      "expected": ["0.05", "$0.05", "5 cents", "five cents"]
+    }
+  ],
+
+  "subjective": [
+    {
+      "id": "cap-theorem",
+      "prompt": "Explain the CAP theorem for distributed systems, and identify one widespread misconception about it. Be concise but precise."
+    },
+    {
+      "id": "rate-limiter",
+      "prompt": "Design a rate limiter for a public HTTP API. Recommend a specific algorithm, justify the choice, and describe one important failure mode and how to handle it."
+    }
+  ]
+}

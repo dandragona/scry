@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# scry spends real subscription credit on every live call, so CI NEVER invokes
+# the real model CLIs. It runs the stub-based smoke test (tests/smoke.sh), which
+# exercises --version / --help / --check / --dry-run against fake provider
+# binaries. No secrets, no network, no spend.
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.9', '3.12']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Smoke test (stubbed CLIs, $0)
+        run: sh tests/smoke.sh

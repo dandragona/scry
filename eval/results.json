@@ -1,0 +1,196 @@
+{
+  "panel": [
+    "claude-opus",
+    "codex-gpt",
+    "gemini-pro"
+  ],
+  "aggregator": {
+    "provider": "claude",
+    "model": "opus"
+  },
+  "objective": [
+    {
+      "id": "count-7s",
+      "sut_ok": true,
+      "scry_seconds": 37.8,
+      "expected": [
+        "20"
+      ],
+      "solos": {
+        "claude-opus": {
+          "correct": true,
+          "evidence": "20",
+          "matched": "20"
+        },
+        "codex-gpt": {
+          "correct": true,
+          "evidence": "20",
+          "matched": "20"
+        },
+        "gemini-pro": {
+          "correct": true,
+          "evidence": "20",
+          "matched": "20"
+        }
+      },
+      "fused": {
+        "correct": true,
+        "evidence": "20",
+        "matched": "20"
+      },
+      "any_solo_correct": true
+    },
+    {
+      "id": "decimal-compare",
+      "sut_ok": true,
+      "scry_seconds": 34.3,
+      "expected": [
+        "9.9"
+      ],
+      "solos": {
+        "claude-opus": {
+          "correct": true,
+          "evidence": "9.9",
+          "matched": "9.9"
+        },
+        "codex-gpt": {
+          "correct": true,
+          "evidence": "9.9",
+          "matched": "9.9"
+        },
+        "gemini-pro": {
+          "correct": true,
+          "evidence": "9.9",
+          "matched": "9.9"
+        }
+      },
+      "fused": {
+        "correct": true,
+        "evidence": "9.9",
+        "matched": "9.9"
+      },
+      "any_solo_correct": true
+    },
+    {
+      "id": "bat-and-ball",
+      "sut_ok": true,
+      "scry_seconds": 32.9,
+      "expected": [
+        "0.05",
+        "$0.05",
+        "5 cents",
+        "five cents"
+      ],
+      "solos": {
+        "claude-opus": {
+          "correct": true,
+          "evidence": "$0.05",
+          "matched": "0.05"
+        },
+        "codex-gpt": {
+          "correct": true,
+          "evidence": "$0.05",
+          "matched": "0.05"
+        },
+        "gemini-pro": {
+          "correct": true,
+          "evidence": "$0.05",
+          "matched": "0.05"
+        }
+      },
+      "fused": {
+        "correct": true,
+        "evidence": "$0.05",
+        "matched": "0.05"
+      },
+      "any_solo_correct": true
+    }
+  ],
+  "subjective": [
+    {
+      "id": "cap-theorem",
+      "sut_ok": true,
+      "scry_seconds": 52.3,
+      "matchups": [
+        {
+          "opponent": "claude-opus",
+          "judge_families": [
+            "openai",
+            "google"
+          ],
+          "fused_score": 0.875,
+          "n_votes": 4
+        },
+        {
+          "opponent": "codex-gpt",
+          "judge_families": [
+            "google"
+          ],
+          "fused_score": 0.75,
+          "n_votes": 2
+        },
+        {
+          "opponent": "gemini-pro",
+          "judge_families": [
+            "openai"
+          ],
+          "fused_score": 1.0,
+          "n_votes": 2
+        }
+      ],
+      "fused_winrate_vs_field": 0.875,
+      "vs_toughest": {
+        "opponent": "codex-gpt",
+        "judge_families": [
+          "google"
+        ],
+        "fused_score": 0.75,
+        "n_votes": 2
+      }
+    },
+    {
+      "id": "rate-limiter",
+      "sut_ok": true,
+      "scry_seconds": 82.7,
+      "matchups": [
+        {
+          "opponent": "claude-opus",
+          "judge_families": [
+            "openai",
+            "google"
+          ],
+          "fused_score": 0.875,
+          "n_votes": 4
+        },
+        {
+          "opponent": "codex-gpt",
+          "judge_families": [
+            "google"
+          ],
+          "fused_score": 1.0,
+          "n_votes": 2
+        },
+        {
+          "opponent": "gemini-pro",
+          "judge_families": [
+            "openai"
+          ],
+          "fused_score": 1.0,
+          "n_votes": 2
+        }
+      ],
+      "fused_winrate_vs_field": 0.9583333333333334,
+      "vs_toughest": {
+        "opponent": "claude-opus",
+        "judge_families": [
+          "openai",
+          "google"
+        ],
+        "fused_score": 0.875,
+        "n_votes": 4
+      }
+    }
+  ],
+  "judge_calls": 16,
+  "seconds": 352.9
+}

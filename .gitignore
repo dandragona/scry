@@ -16,6 +16,9 @@ scry-eval-*/
 # Local run history (scry writes here under $HOME, but ignore any stray copy).
 .scry/
 
+# Demo recordings (host on asciinema.org or convert to gif; don't bloat the repo).
+*.cast
+
 # --- python ----------------------------------------------------------------
 __pycache__/
 *.py[cod]

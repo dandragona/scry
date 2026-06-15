@@ -1,7 +1,7 @@
 #!/bin/sh
 # scry installer — fetches the single-file `scry` CLI onto your PATH.
 #
-#   curl -fsSL https://raw.githubusercontent.com/danielmandragona/scry/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/dandragona/scry/main/install.sh | sh
 #
 # scry is one stdlib-only Python file, so there is nothing to build and no
 # dependencies to install. Override the source or destination if you like:
@@ -10,7 +10,7 @@
 #
 set -eu
 
-REPO="${REPO:-danielmandragona/scry}"
+REPO="${REPO:-dandragona/scry}"
 REF="${REF:-main}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 RAW="https://raw.githubusercontent.com/${REPO}/${REF}/scry"

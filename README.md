@@ -1,7 +1,7 @@
 # scry — gaze into every model you pay for, see one answer
 
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![ci](https://github.com/danielmandragona/scry/actions/workflows/ci.yml/badge.svg)](https://github.com/danielmandragona/scry/actions/workflows/ci.yml)
+[![ci](https://github.com/dandragona/scry/actions/workflows/ci.yml/badge.svg)](https://github.com/dandragona/scry/actions/workflows/ci.yml)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue.svg)
 ![deps](https://img.shields.io/badge/dependencies-zero%20(stdlib)-brightgreen.svg)
 ![keys](https://img.shields.io/badge/API%20keys-none-brightgreen.svg)
@@ -69,7 +69,7 @@ Everything else is matched:
 One line (stdlib-only, so there's nothing to build):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/danielmandragona/scry/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/dandragona/scry/main/install.sh | sh
 ```
 
 Or by hand — it's a single file:

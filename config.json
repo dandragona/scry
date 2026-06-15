@@ -82,6 +82,38 @@
         "install": "install Google Antigravity and its 'agy' CLI"
       },
       "caps": {}
+    },
+
+    "kimi": {
+      "_note": "Moonshot via the Kimi CLI (`kimi`). Headless `kimi --quiet` runs print mode (text, final-message-only, auto-approve) and prints the final answer as plain text (capture:text); the prompt is on stdin. No per-call system flag (folded into the prompt) and no argv flag to allow/deny tools or toggle web — so scry hands kimi a generated read-only agent file (--agent-file) that inherits the built-in `default` agent minus the mutating tools, and (when web is off) minus the SearchWeb+FetchURL tools too. That makes kimi read-only like the other panels AND able to honor --no-web (unlike agy). Auth is `kimi login` (Kimi Code OAuth — reuses your membership, no API key); KIMI_API_KEY is unset so a stray key can't divert billing off the subscription.",
+      "cmd": ["kimi", "--quiet"],
+      "model_flag": "--model",
+      "capture": "text",
+      "system_flag": null,
+      "prompt": "stdin",
+      "env_unset": ["KIMI_API_KEY"],
+      "timeout": 420,
+      "check": {
+        "probe": ["kimi", "--version"],
+        "verifies_auth": false,
+        "note": "log in for subscription auth:  kimi login  (Kimi Code OAuth — reuses your membership, no API key)",
+        "install": "install Kimi CLI — curl -LsSf https://code.kimi.com/install.sh | bash  (or: uv tool install --python 3.13 kimi-cli)"
+      },
+      "agent_file": {
+        "flag": "--agent-file",
+        "extend": "default",
+        "exclude_always": [
+          "kimi_cli.tools.shell:Shell",
+          "kimi_cli.tools.file:WriteFile",
+          "kimi_cli.tools.file:StrReplaceFile",
+          "kimi_cli.tools.agent:Agent"
+        ],
+        "exclude_web_off": [
+          "kimi_cli.tools.web:SearchWeb",
+          "kimi_cli.tools.web:FetchURL"
+        ]
+      },
+      "caps": {}
     }
   },
 

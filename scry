@@ -838,14 +838,18 @@ def do_dry_run(cfg: dict, mode: str, settings: dict) -> None:
 # self-pairing a strong model still improves Fusion's output.
 # --------------------------------------------------------------------------- #
 
-# Suggested (model, label) per provider, used to pre-fill the wizard. The kimi
-# default is Kimi K2.6 — the Moonshot member of OpenRouter's "Budget" Fusion panel
-# (Gemini 3 Flash + Kimi K2.6 + DeepSeek V4 Pro) that landed within ~1% of Fable 5.
+# Suggested (model, label) per provider, used to pre-fill the wizard. An empty
+# model means "let the CLI use its own default" — for kimi that's whatever your
+# `kimi login` configured (the Kimi Code membership exposes `kimi-for-coding`).
+# We default kimi to empty rather than a fixed id because a model passed to
+# `kimi --model` must be defined in your ~/.kimi/config.toml, and the membership
+# only defines its own; pin one (e.g. `kimi:kimi-k2.6`, OpenRouter's near-Fable
+# Budget-panel member) only if your account actually exposes it.
 INIT_SUGGEST = {
     "claude": ("opus", "claude-opus"),
     "codex":  ("", "codex-gpt"),
     "agy":    ("Gemini 3.1 Pro (High)", "gemini-pro"),
-    "kimi":   ("kimi-k2.6", "kimi-k2.6"),
+    "kimi":   ("", "kimi"),
 }
 
 
@@ -1059,7 +1063,7 @@ def do_init(cfg: dict, out: str | None, force: bool, no_anim: bool = False) -> i
     print()
 
     sel = _ask("Panel members — comma-separated numbers (repeats ok; add a model "
-               "with ':', e.g. '1,2,4' or '1:opus,4:kimi-k2.6')")
+               "with ':', e.g. '1,2,4' or '1:opus,2:gpt-5.5')")
     panel: list = []
     used_labels: set = set()
     for tok in sel.split(","):
@@ -1505,7 +1509,7 @@ def main() -> int:
     ap.add_argument("--force", action="store_true",
                     help="(with `init`) overwrite an existing config without prompting")
     ap.add_argument("--panel",
-                    help="override panel, e.g. 'claude:opus,codex,kimi:kimi-k2.6'")
+                    help="override panel, e.g. 'claude:opus,codex,kimi'")
     ap.add_argument("--aggregator", help="override aggregator, e.g. 'claude:opus'")
     ap.add_argument("--judge", help="override judge, e.g. 'claude:opus'")
     ap.add_argument("--quiet", action="store_true", help="suppress progress on stderr")

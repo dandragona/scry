@@ -77,10 +77,14 @@ echo "$OUT" | grep -q -- "--output-format json" || fail "dry-run missing claude 
 pass "--dry-run builds panel + judge + aggregator argv"
 
 # --- dry-run renders the kimi provider (quiet + generated agent file) ---------
-KOUT="$(PATH="$STUB:$PATH" "$SCRY" --dry-run --panel "claude:opus,kimi:kimi-k2.6" "x")"
+# Default (no model): kimi uses the account default, so no --model is emitted.
+KOUT="$(PATH="$STUB:$PATH" "$SCRY" --dry-run --panel "claude:opus,kimi" "x")"
 echo "$KOUT" | grep -q "kimi --quiet"  || fail "dry-run missing 'kimi --quiet'"
 echo "$KOUT" | grep -q -- "--agent-file" || fail "dry-run missing kimi '--agent-file'"
-pass "--dry-run renders kimi (quiet + read-only agent file)"
+# An explicit model is rendered as --model.
+PATH="$STUB:$PATH" "$SCRY" --dry-run --panel "kimi:kimi-for-coding" "x" \
+  | grep -q -- "--model kimi-for-coding" || fail "dry-run missing explicit kimi --model"
+pass "--dry-run renders kimi (default = no --model; explicit model = --model)"
 
 # --- synthesize mode skips the judge -----------------------------------------
 PATH="$STUB:$PATH" "$SCRY" --mode synthesize --dry-run "x" | grep -q "^JUDGE" \
@@ -111,17 +115,19 @@ PY
 pass "stream_call streams deltas + reconstructs the final answer"
 
 # --- `scry init` composes a panel + writes a valid config (no prompts left) ---
-# Piped answers: panel "1,4:kimi-k2.6" (claude + kimi), <enter> judge, <enter>
-# aggregator, "y" web. --out skips the path prompt.
+# Piped answers: panel "1,4:kimi-for-coding" (claude default model + kimi with an
+# explicit model), <enter> judge, <enter> aggregator, "y" web. --out skips the path
+# prompt. Member 1 (claude) takes its suggested model; member 4 pins an explicit one.
 INITCFG="$STUB/init-config.json"
-printf '1,4:kimi-k2.6\n\n\ny\n' | PATH="$STUB:$PATH" "$SCRY" init --out "$INITCFG" >/dev/null 2>&1 \
+printf '1,4:kimi-for-coding\n\n\ny\n' | PATH="$STUB:$PATH" "$SCRY" init --out "$INITCFG" >/dev/null 2>&1 \
   || fail "scry init exited non-zero"
 python3 - "$INITCFG" <<'PY' || fail "scry init wrote an invalid/unexpected config"
 import json, sys
 cfg = json.load(open(sys.argv[1]))
 provs = [m["provider"] for m in cfg["panel"]]
 assert provs == ["claude", "kimi"], provs
-assert cfg["panel"][1]["model"] == "kimi-k2.6", cfg["panel"]
+assert cfg["panel"][0]["model"] == "opus", cfg["panel"]          # suggested default
+assert cfg["panel"][1]["model"] == "kimi-for-coding", cfg["panel"]  # explicit :model
 assert len({m["label"] for m in cfg["panel"]}) == len(cfg["panel"]), "labels not unique"
 assert cfg["judge"]["provider"] == "claude" and cfg["aggregator"]["provider"] == "claude"
 assert cfg["settings"]["web_tools"] is True
@@ -156,6 +162,8 @@ for f in range(RC.BUILD + 30):
     assert [strip.sub("", ln) for ln in colored] == plain, f
 # the eye is open on the settled/static frame
 assert "◉" in "".join(c.render(RC.BUILD, color=False))
+# kimi defaults to the account model (empty), since a fixed id may not be defined
+assert m.INIT_SUGGEST["kimi"] == ("", "kimi"), m.INIT_SUGGEST["kimi"]
 # static welcome composes (no stdin touched) — smoke runs are non-TTY anyway
 m.show_init_welcome(no_anim=True)
 PY

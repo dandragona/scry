@@ -70,8 +70,8 @@ Everything else is matched:
     default (`Gemini 3.1 Pro (High)`). See "Adding Google" to change the model. **Live web search works**
     via Gemini grounding (on by default — verified).
   - **Moonshot Kimi** (`kimi`) — `kimi login` (Kimi Code OAuth — reuses your membership, **no API key**).
-    Headless via `kimi --quiet`. Suggested model `kimi-k2.6` (the Kimi member of OpenRouter's near-Fable
-    "Budget" Fusion panel). Web via `SearchWeb`/`FetchURL`. See "Adding Moonshot" below.
+    Headless via `kimi --quiet`. Uses your account's default model (the Kimi Code membership exposes
+    `kimi-for-coding`). Web via `SearchWeb`/`FetchURL`. See "Adding Moonshot" below.
 
 > New? Run **`scry init`** — an interactive setup wizard (like `openspec init`) that detects which of
 > these CLIs you have and writes your default panel to a `config.json`.
@@ -126,7 +126,7 @@ scry --no-anim "..."                        # plain progress (reduced motion); h
 | `--effort low\|medium\|high\|xhigh\|max` | reasoning effort, every stage (where supported) |
 | `--max-tool-calls N` | cap web tool iterations (Fusion default 8; claude only) |
 | `--max-output-tokens N` | cap output tokens (claude only) |
-| `--panel`, `--judge`, `--aggregator` | override models, e.g. `--panel "claude:opus,codex,agy:Gemini 3.1 Pro (High),kimi:kimi-k2.6"` |
+| `--panel`, `--judge`, `--aggregator` | override models, e.g. `--panel "claude:opus,codex,agy:Gemini 3.1 Pro (High),kimi"` |
 | `--check` | verify each provider CLI is installed + logged in, then exit (no paid calls) |
 | `--no-anim` | disable the scrying-orb animation (reduced motion); also auto-off under `NO_COLOR`/`TERM=dumb` |
 | `--json`, `--show-proposers`, `--dry-run`, `--quiet` | output / debugging |
@@ -156,7 +156,7 @@ at `~/.config/scry/config.json` (or pass `--config path`). See the bundled [`con
 animated **rune-circle** splash — a violet sigil that inscribes itself stroke-by-stroke, lights the
 four "seer" runes, and opens a central eye (distinct from the run-time scrying orb; press Enter to
 continue) — then lists the known provider CLIs with their install status, lets you pick panel members
-— **repeats allowed**, with an optional `:model` (e.g. `1:opus,4:kimi-k2.6`) — then asks for a judge,
+— **repeats allowed**, with an optional `:model` (e.g. `1:opus`) — then asks for a judge,
 an aggregator, and whether to enable web search, and writes a minimal `config.json` (it references the
 built-in provider records, so the file stays small). Flags: `--out PATH` to choose where to write,
 `--force` to overwrite without a prompt. The splash honors `--no-anim` / `NO_COLOR` / non-TTY (static
@@ -187,10 +187,14 @@ it reuses your Kimi membership, **no API key**; we unset `KIMI_API_KEY` so a str
 billing off the subscription). Install it with `curl -LsSf https://code.kimi.com/install.sh | bash`
 (or `uv tool install --python 3.13 kimi-cli`).
 
-- **Default model:** `kimi-k2.6` — the Kimi member of OpenRouter's **Budget** Fusion panel
-  (Gemini 3 Flash + Kimi K2.6 + DeepSeek V4 Pro), which landed within ~1% of Fable 5 at ~half the cost.
-  Pin a different one per-run: `scry --panel "claude:opus,codex,kimi:kimi-k2-thinking-turbo" "..."`,
-  or via `scry init`.
+- **Default model:** none — scry passes no `--model`, so kimi uses your account's `default_model`.
+  The Kimi Code membership configures `kimi-for-coding` at `kimi login`. A model id passed to
+  `kimi --model` **must be defined in your `~/.kimi/config.toml`** (run `kimi info` / check that file to
+  see what your account exposes), so pin one only if it's there — e.g.
+  `scry --panel "claude:opus,codex,kimi:kimi-k2.6" "..."`, where `kimi-k2.6` is the Kimi member of
+  OpenRouter's **Budget** Fusion panel (Gemini 3 Flash + Kimi K2.6 + DeepSeek V4 Pro, within ~1% of
+  Fable 5) — but it'll error with `LLM not set` if your membership doesn't define it. Leaving the model
+  blank (the default) always works.
 - **How it's driven:** `kimi --quiet` runs print mode (`--print --output-format text
   --final-message-only`), which prints **only the final answer as plain text** (`"capture": "text"`) and
   auto-approves tool calls (`--afk`); the prompt arrives on **stdin**. There's no per-call

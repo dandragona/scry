@@ -62,7 +62,7 @@ FAMILY_JUDGE = {
     "anthropic": {"provider": "claude", "model": "opus"},
     "openai":    {"provider": "codex",  "model": ""},
     "google":    {"provider": "agy",    "model": "Gemini 3.1 Pro (High)"},
-    "moonshot":  {"provider": "kimi",   "model": "kimi-k2.6"},
+    "moonshot":  {"provider": "kimi",   "model": ""},
 }
 
 JUDGE_SYSTEM = (

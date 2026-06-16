@@ -115,11 +115,12 @@ PY
 pass "stream_call streams deltas + reconstructs the final answer"
 
 # --- `scry init` composes a panel + writes a valid config (no prompts left) ---
-# Piped answers: panel "1,4:kimi-for-coding" (claude default model + kimi with an
+# Piped answers: panel "1,5:kimi-for-coding" (claude default model + kimi with an
 # explicit model), <enter> judge, <enter> aggregator, "y" web. --out skips the path
-# prompt. Member 1 (claude) takes its suggested model; member 4 pins an explicit one.
+# prompt. Member 1 (claude) takes its suggested model; member 5 (kimi) pins an
+# explicit one. (Provider order: 1 claude, 2 codex, 3 agy, 4 deepseek, 5 kimi.)
 INITCFG="$STUB/init-config.json"
-printf '1,4:kimi-for-coding\n\n\ny\n' | PATH="$STUB:$PATH" "$SCRY" init --out "$INITCFG" >/dev/null 2>&1 \
+printf '1,5:kimi-for-coding\n\n\ny\n' | PATH="$STUB:$PATH" "$SCRY" init --out "$INITCFG" >/dev/null 2>&1 \
   || fail "scry init exited non-zero"
 python3 - "$INITCFG" <<'PY' || fail "scry init wrote an invalid/unexpected config"
 import json, sys

@@ -6,11 +6,11 @@ on:
   pull_request:
 
 # scry spends real subscription credit on every live call, so CI NEVER invokes
-# the real model CLIs. It runs the stub-based smoke test (tests/smoke.sh), which
-# exercises --version / --help / --check / --dry-run against fake provider
-# binaries. No secrets, no network, no spend.
+# the real model CLIs. Both jobs below run only against STUB provider binaries /
+# monkeypatched fakes — no secrets, no network, no spend. Stdlib only, so there is
+# nothing to `pip install`.
 jobs:
-  smoke:
+  test:
     strategy:
       fail-fast: false
       matrix:
@@ -24,3 +24,5 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Smoke test (stubbed CLIs, $0)
         run: sh tests/smoke.sh
+      - name: Unit + integration suite (stubbed CLIs, $0)
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v

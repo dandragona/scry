@@ -53,7 +53,7 @@ class ScryRunTest(unittest.IsolatedAsyncioTestCase):
 
     def _assert_result_shape(self, result):
         for key in ("status", "prompt", "mode", "responses", "analysis",
-                    "final", "streamed"):
+                    "final", "streamed", "cost"):
             self.assertIn(key, result, f"missing key {key!r} in result")
 
     # ------------------------------------------------------------------ #
@@ -63,7 +63,7 @@ class ScryRunTest(unittest.IsolatedAsyncioTestCase):
         scry = self.scry
 
         async def fake_call_cli(cfg, provider, model, system, user, cwd,
-                                depth, web, settings):
+                                depth, web, settings, meta=None):
             if system is None:
                 return f"PROP[{provider}]"
             if system == scry.JUDGE_SYSTEM:
@@ -98,7 +98,7 @@ class ScryRunTest(unittest.IsolatedAsyncioTestCase):
         judge_calls = []
 
         async def fake_call_cli(cfg, provider, model, system, user, cwd,
-                                depth, web, settings):
+                                depth, web, settings, meta=None):
             if system is None:
                 return f"PROP[{provider}]"
             if system == scry.JUDGE_SYSTEM:
@@ -128,7 +128,7 @@ class ScryRunTest(unittest.IsolatedAsyncioTestCase):
         scry = self.scry
 
         async def fake_call_cli(cfg, provider, model, system, user, cwd,
-                                depth, web, settings):
+                                depth, web, settings, meta=None):
             if system is None:
                 if provider == "agy":
                     raise scry.ProviderError("agy exploded")
@@ -172,7 +172,7 @@ class ScryRunTest(unittest.IsolatedAsyncioTestCase):
         scry = self.scry
 
         async def fake_call_cli(cfg, provider, model, system, user, cwd,
-                                depth, web, settings):
+                                depth, web, settings, meta=None):
             if system is None:
                 raise scry.ProviderError(error_message)
             raise AssertionError("judge/synthesis must not run when all panels fail")
@@ -206,7 +206,7 @@ class ScryRunTest(unittest.IsolatedAsyncioTestCase):
         scry = self.scry
 
         async def fake_call_cli(cfg, provider, model, system, user, cwd,
-                                depth, web, settings):
+                                depth, web, settings, meta=None):
             if system is None:
                 return f"PROP[{provider}]"
             if system == scry.JUDGE_SYSTEM:
@@ -231,7 +231,7 @@ class ScryRunTest(unittest.IsolatedAsyncioTestCase):
         scry = self.scry
 
         async def fake_call_cli(cfg, provider, model, system, user, cwd,
-                                depth, web, settings):
+                                depth, web, settings, meta=None):
             if system is None:
                 return f"PROP[{provider}]"
             if system == scry.JUDGE_SYSTEM:
@@ -256,7 +256,7 @@ class ScryRunTest(unittest.IsolatedAsyncioTestCase):
         scry = self.scry
 
         async def fake_call_cli(cfg, provider, model, system, user, cwd,
-                                depth, web, settings):
+                                depth, web, settings, meta=None):
             if system is None:
                 return f"PROP[{provider}]"
             if system == scry.JUDGE_SYSTEM:
@@ -270,7 +270,7 @@ class ScryRunTest(unittest.IsolatedAsyncioTestCase):
             # Emit some deltas to the sink, then report the full streamed text.
             sink("STR")
             sink("EAMED")
-            return {"text": "STREAMED", "streamed": True}
+            return {"text": "STREAMED", "streamed": True, "meta": {}}
 
         self._patch_call_cli(fake_call_cli)
         self._patch_stream_call(fake_stream_call)

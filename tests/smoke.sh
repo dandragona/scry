@@ -170,4 +170,40 @@ m.show_init_welcome(no_anim=True)
 PY
 pass "init RuneCircle animation renders (build+idle, well-formed ANSI, eye opens)"
 
+# --- cost meter + run history (metered stub claude, isolated SCRY_HOME) --------
+HOME2="$(mktemp -d)"
+CLI2="$(mktemp -d)"
+trap 'rm -rf "$STUB" "$HOME2" "$CLI2"' EXIT
+cat > "$CLI2/claude" <<'EOF'
+#!/usr/bin/env python3
+import sys, json
+sys.stdin.read()
+u = {"input_tokens": 8, "cache_read_input_tokens": 2000, "output_tokens": 400,
+     "server_tool_use": {"web_search_requests": 1}}
+print(json.dumps({"type": "result", "is_error": False, "result": "Fused.",
+                  "total_cost_usd": 0.05, "usage": u}))
+EOF
+chmod +x "$CLI2/claude"
+
+# panel=claude only -> 3 claude calls (panel+judge+synth), all metered.
+COST_JSON="$(PATH="$CLI2:$PATH" SCRY_HOME="$HOME2" "$SCRY" --panel claude:opus --json "q1" 2>/dev/null)"
+echo "$COST_JSON" | python3 -c '
+import json, sys
+c = json.load(sys.stdin)["cost"]
+assert c["total_usd"] == 0.15, c
+assert c["calls"] == 3 and c["metered_calls"] == 3, c
+assert c["web_searches"] == 3 and c["output_tokens"] == 1200, c
+' || fail "cost block not threaded through --json"
+pass "cost meter: \$/tokens/web roll up into the --json cost block"
+
+# the run above was recorded; log lists it, last reprints its answer to stdout
+PATH="$CLI2:$PATH" SCRY_HOME="$HOME2" "$SCRY" log | grep -q "q1" \
+  || fail "scry log missing the saved run"
+PATH="$CLI2:$PATH" SCRY_HOME="$HOME2" "$SCRY" last 2>/dev/null | grep -q "Fused." \
+  || fail "scry last didn't reprint the saved answer"
+ROWS_BEFORE="$(wc -l < "$HOME2/history.jsonl")"
+PATH="$CLI2:$PATH" SCRY_HOME="$HOME2" "$SCRY" --panel claude:opus --no-save "q2" >/dev/null 2>&1
+[ "$ROWS_BEFORE" = "$(wc -l < "$HOME2/history.jsonl")" ] || fail "--no-save still wrote a history row"
+pass "run history: scry log / scry last / --no-save"
+
 printf '\n\033[32mAll smoke checks passed.\033[0m\n'

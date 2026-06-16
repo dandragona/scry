@@ -4,11 +4,12 @@
   "mode": "fusion",
 
   "settings": {
-    "_note": "Fusion knobs. web_tools enables web_search+web_fetch on the panel + judge (not synthesis), mirroring OpenRouter Fusion. effort/max_output_tokens/max_tool_calls applied only where a CLI supports them. temperature has no CLI equivalent and is intentionally absent.",
+    "_note": "Fusion knobs. web_tools enables web_search+web_fetch on the panel + judge (not synthesis), mirroring OpenRouter Fusion. effort/max_output_tokens/max_tool_calls applied only where a CLI supports them. save_history writes each run to ~/.scry for `scry last`/`scry log` (override per-run with --no-save). temperature has no CLI equivalent and is intentionally absent.",
     "web_tools": true,
     "max_tool_calls": 8,
     "effort": null,
-    "max_output_tokens": null
+    "max_output_tokens": null,
+    "save_history": true
   },
 
   "providers": {
@@ -34,6 +35,15 @@
         "_note": "Realtime output for the final synthesis only (token-by-token reveal). Used when stdout is a TTY and not --json/--quiet; falls back to buffered if unavailable.",
         "format": "claude",
         "args": ["--output-format", "stream-json", "--include-partial-messages", "--verbose"]
+      },
+      "usage": {
+        "_note": "Real cost/token accounting. claude reports these in --output-format json and the stream-json 'result' event; dotted paths read the parsed object. Providers without a 'usage' block report nothing (not metered per call).",
+        "cost_usd": "total_cost_usd",
+        "input_tokens": "usage.input_tokens",
+        "cache_creation_tokens": "usage.cache_creation_input_tokens",
+        "cache_read_tokens": "usage.cache_read_input_tokens",
+        "output_tokens": "usage.output_tokens",
+        "web_searches": "usage.server_tool_use.web_search_requests"
       },
       "caps": {
         "web_on": ["--allowedTools", "WebSearch,WebFetch,Read,Grep,Glob"],

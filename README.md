@@ -130,6 +130,10 @@ scry --json "..." > out.json                # {status, responses, analysis, fina
 scry --show-proposers "..."                 # also print each model's raw answer (stderr)
 scry --dry-run "..."                        # print the exact commands, run nothing
 scry --no-anim "..."                        # plain progress (reduced motion); honors NO_COLOR too
+
+scry last                                   # re-print the most recent answer (pipeable on stdout)
+scry log                                    # list recent runs with cost + pass/fail
+scry log 50                                 # ...the last 50
 ```
 
 ### Flags
@@ -144,6 +148,7 @@ scry --no-anim "..."                        # plain progress (reduced motion); h
 | `--panel`, `--judge`, `--aggregator` | override models, e.g. `--panel "claude:opus,codex,agy:Gemini 3.1 Pro (High),kimi"` |
 | `--check` | verify each provider CLI is installed + logged in, then exit (no paid calls) |
 | `--no-anim` | disable the scrying-orb animation (reduced motion); also auto-off under `NO_COLOR`/`TERM=dumb` |
+| `--no-save` | don't record this run to `~/.scry` (see [Cost & run history](#cost--run-history)) |
 | `--json`, `--show-proposers`, `--dry-run`, `--quiet` | output / debugging |
 
 A panel member is `provider[:model]`. Same-model "self-pairing" still improves results — most of
@@ -272,6 +277,32 @@ scry --check --panel "...,deepseek:deepseek-chat"    # shows: ✓ deepseek insta
   it, `--no-map` hides it.
 - **Accessible** — honors `NO_COLOR` / `FORCE_COLOR` / `TERM=dumb`; `--no-anim` (or `SCRY_NO_ANIM`)
   swaps the scrying-orb animation (and the `scry init` rune-circle splash) for a plain static fallback.
+
+## Cost & run history
+
+Fusion fans one prompt across N+2 model calls, so **knowing what a run cost matters.** Every
+run ends with a one-line tally on stderr:
+
+```
+✦ 5 calls · $0.34 · 47k→6k tok · 3 web · 72s
+```
+
+and `--json` carries a structured `cost` block (per-stage `total_usd`, input/output tokens, and
+web-search count). The numbers come straight from each provider's own output via a config-driven
+`usage` path map (claude reports `total_cost_usd` + `usage`). **Honesty over false precision:**
+subscription CLIs that don't meter per call aren't reported as `$0` — the tally says so
+explicitly, and the `$` total covers only the calls that actually reported a cost.
+
+Each run is also saved under `~/.scry/` (a full transcript per run, plus a `history.jsonl` index):
+
+```sh
+scry last        # re-print the most recent fused answer (clean on stdout — pipe it)
+scry log         # table of recent runs: when · cost · ok/total · prompt
+scry log 50      # the last 50
+```
+
+Saving is on by default (`settings.save_history`); pass `--no-save` to skip a single run, or set
+`"save_history": false` in config to disable it entirely.
 
 ## Evals — does fusion actually beat the best single model?
 

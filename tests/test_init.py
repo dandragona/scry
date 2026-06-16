@@ -62,9 +62,10 @@ class InitWizardSubprocessTest(unittest.TestCase):
 
     # ----- happy path: a valid panel ---------------------------------------- #
     def test_valid_panel_claude_kimi(self):
-        # panel "1,4:kimi-k2.6" (claude + kimi@kimi-k2.6), default judge,
-        # default aggregator, web "y".
-        cp = self._run("1,4:kimi-k2.6\n\n\ny\n")
+        # panel "1,5:kimi-k2.6" (claude + kimi@kimi-k2.6), default judge,
+        # default aggregator, web "y". Provider order: 1 claude, 2 codex, 3 agy,
+        # 4 deepseek, 5 kimi.
+        cp = self._run("1,5:kimi-k2.6\n\n\ny\n")
         self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
         cfg = self._load_out()
 
@@ -130,7 +131,7 @@ class InitWizardSubprocessTest(unittest.TestCase):
 
     def test_out_of_range_selection_writes_nothing(self):
         bad = os.path.join(self.tmp, "oor.json")
-        # "9" is out of range (only 1-4 exist) -> skipped -> empty panel.
+        # "9" is out of range (only 1-5 exist) -> skipped -> empty panel.
         cp = self._run("9\n", out=bad)
         self.assertNotEqual(cp.returncode, 0)
         self.assertFalse(os.path.exists(bad))

@@ -52,8 +52,29 @@ All notable changes to this project are documented here. The format follows
   color is disabled), falling back to plain progress lines.
 - `LICENSE` (MIT), `.gitignore`, `CONTRIBUTING.md`, `SECURITY.md`, and a one-line
   `install.sh`.
+- **Test suite** — a stdlib-`unittest` suite (430+ tests, zero dependencies) covering
+  `scry` and `scry-eval`: config/argv/JSON/agent-file/stream parsing, the `call_cli` /
+  `stream_call` / `scry_run` pipeline, `--dry-run` / `--check` / `init` / `update` /
+  the CLI surface, and the eval grading + DRACO logic. Every test runs against **stub**
+  model CLIs or monkeypatched fakes, so it **never spends subscription credit**. Shared
+  helpers live in `tests/_harness.py`; CI runs it alongside the existing `tests/smoke.sh`
+  on ubuntu/macos × Python 3.9/3.12. See `tests/README.md`.
 
 ### Fixed
+- **`scry update` crashed on a truncated download** — a dropped connection / CDN short
+  read (server advertising more bytes than it sends) made `urllib`'s `read()` raise
+  `http.client.IncompleteRead`, which slipped past the `(URLError, OSError)` handler and
+  surfaced as an uncaught traceback (leaving the friendly "incomplete download" guard as
+  dead code). It's now caught and reported cleanly, with the installed binary left
+  untouched.
+- **`scry-eval` dropped naturally-phrased judge verdicts** — `parse_verdict` only matched
+  the choice when it was directly adjacent to the word "verdict", so a judge that wrote
+  `My verdict is TIE` or `verdict: it's a tie` parsed as *no verdict* and was silently
+  excluded from scoring. It now tolerates common connector words/punctuation while staying
+  anchored to the keyword (no false positives on unrelated prose).
+- **`scry init` produced odd labels for unnamed repeated members** — `_uniq_label` applied
+  its `"member"` fallback only to the first label, so a second empty-base member became
+  `-2` instead of `member-2`. The default now carries through to the suffixed labels.
 - **`install.sh` on a fresh machine** — the installer defaulted to `/usr/local/bin`
   but never created it, so on a clean macOS (where that directory doesn't exist) the
   `sudo mv` failed with "No such file or directory". It now creates the destination

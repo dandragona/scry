@@ -22,18 +22,25 @@ hard constraints keep it that way — please read these before opening a PR.
 ## Before you open a PR
 
 - `python3 -m py_compile scry scry-eval` — must pass.
+- `python3 -m unittest discover -s tests -p 'test_*.py'` — the full suite must pass
+  (stdlib only, runs against stub CLIs — $0). See `tests/README.md`.
+- `sh tests/smoke.sh` — the end-to-end CLI smoke test must pass.
 - `./scry --dry-run "test"` — eyeball that command construction is unchanged.
 - `./scry --check` — should still pass on your machine.
 - If you touched provider flag wiring (`render_call` / the `caps` blocks), include
-  the relevant `--dry-run` output in the PR so reviewers can see the argv diff.
+  the relevant `--dry-run` output in the PR so reviewers can see the argv diff, and
+  extend `tests/test_render_call.py` / `tests/test_dry_run.py` to cover it.
 - Keep the README's flag table and `config.json` in sync with any new flag.
 
 ## Testing without spending
 
-CI runs against **stub** `claude` / `codex` / `agy` binaries on `PATH` that echo
-canned output, so `--dry-run` and `--check` can be exercised end-to-end for $0.
-Real evals (`scry-eval`) cost money and need live subscriptions — run those
-locally and paste the `results.json` summary if your change affects scoring.
+CI runs against **stub** `claude` / `codex` / `agy` / `kimi` binaries on `PATH` that
+echo canned output (and monkeypatched fakes for async internals), so the whole CLI —
+`--dry-run`, `--check`, `init`, `update`, `call_cli`, the `scry_run` pipeline — is
+exercised end-to-end for $0. The stub helpers live in `tests/_harness.py`; **never**
+add a test that calls a real model CLI. Real evals (`scry-eval`) cost money and need
+live subscriptions — run those locally and paste the `results.json` summary if your
+change affects scoring.
 
 ## Scope
 

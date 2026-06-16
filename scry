@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+import http.client
 import json
 import math
 import os
@@ -867,7 +868,8 @@ def _ask(msg: str, default: str = "") -> str:
 
 def _uniq_label(base: str, used: set) -> str:
     """A label not already in `used` (repeated members get -2/-3 suffixes)."""
-    label, n = (base or "member"), 2
+    base = base or "member"
+    label, n = base, 2
     while label in used:
         label, n = f"{base}-{n}", n + 1
     used.add(label)
@@ -1308,6 +1310,13 @@ def do_update(force: bool = False) -> int:
             declared = resp.headers.get("Content-Length")
     except urllib.error.HTTPError as e:
         print(c(f"error: download failed ({e.code} {e.reason}) from {url}", "31"))
+        return 1
+    except http.client.IncompleteRead as e:
+        # Server advertised more bytes than it sent (dropped connection / CDN short
+        # read): read() raises instead of returning short, so the declared-length
+        # guard below never sees it. Fail cleanly rather than with a traceback.
+        print(c(f"error: incomplete download ({len(e.partial)} bytes, connection "
+                "dropped) — not updating.", "31"))
         return 1
     except (urllib.error.URLError, OSError) as e:
         print(c(f"error: could not reach {url}: {getattr(e, 'reason', e)}", "31"))

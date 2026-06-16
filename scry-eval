@@ -149,7 +149,16 @@ def grade_objective(text: str, expected):
 def parse_verdict(text: str):
     if not text:
         return None
-    hits = re.findall(r"(?i)verdict\s*[:\-]?\s*(a|b|tie)\b", text)
+    # The judge is told to answer exactly "VERDICT: A|B|TIE", but tolerate a few
+    # connector words/punctuation a model may slip in ("my verdict is a tie",
+    # "verdict - B", "verdict: it's a tie") so a clear decision isn't silently
+    # dropped. Still anchored to the 'verdict' keyword to avoid false positives.
+    hits = re.findall(
+        r"(?i)verdict\b[\s:=\-–—.'\"]*"
+        r"(?:(?:is|it'?s|it\s+is)\b[\s:=\-–—.'\"]*)?"
+        r"(?:a\b\s+(?=tie\b))?"
+        r"(a|b|tie)\b",
+        text)
     return hits[-1].upper() if hits else None
 
 

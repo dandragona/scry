@@ -30,6 +30,45 @@ assert k.get("agent_file", {}).get("exclude_always"), "kimi provider missing age
 PY
 pass "config.json valid + every referenced provider defined (incl. kimi)"
 
+# --- config resolution: global by default, scry.config.json as opt-in override -
+# scry's config lives once per computer at ~/.config/scry/config.json; a project
+# may override with ./scry.config.json. A generic ./config.json must NOT be read
+# (it belongs to other tools — reading it was a filename-collision footgun).
+python3 - "$ROOT" <<'PY' || fail "config resolution precedence"
+import json, os, sys, tempfile
+from importlib.machinery import SourceFileLoader
+root = sys.argv[1]
+home, proj = tempfile.mkdtemp(), tempfile.mkdtemp()
+os.environ["HOME"] = home        # global_config_path() honors $HOME
+os.chdir(proj)
+m = SourceFileLoader("scry_sut", os.path.join(root, "scry")).load_module()
+
+assert m.LOCAL_CONFIG_NAME == "scry.config.json", m.LOCAL_CONFIG_NAME
+assert str(m.global_config_path()) == os.path.join(home, ".config", "scry", "config.json")
+
+# (a) the global config is read when nothing else is present
+os.makedirs(os.path.dirname(str(m.global_config_path())))
+open(str(m.global_config_path()), "w").write(json.dumps({"mode": "synthesize"}))
+assert m.load_config(None)["mode"] == "synthesize", "global config not read"
+
+# (b) a generic ./config.json in cwd is IGNORED (no collision with other tools' files)
+open(os.path.join(proj, "config.json"), "w").write(json.dumps({"mode": "GENERIC-IGNORE-ME"}))
+assert m.load_config(None)["mode"] == "synthesize", "a stray ./config.json must NOT be loaded"
+
+# (c) a project-local ./scry.config.json overrides the global config
+open(os.path.join(proj, m.LOCAL_CONFIG_NAME), "w").write(
+    json.dumps({"mode": "fusion", "judge": {"provider": "codex", "model": ""}}))
+cfg = m.load_config(None)
+assert cfg["mode"] == "fusion" and cfg["judge"]["provider"] == "codex", cfg
+assert "claude" in cfg.get("providers", {}), "providers lost on partial override"
+
+# (d) an explicit --config path still wins over both
+explicit = os.path.join(proj, "explicit.json")
+open(explicit, "w").write(json.dumps({"mode": "synthesize"}))
+assert m.load_config(explicit)["mode"] == "synthesize", "--config must win"
+PY
+pass "config resolution: global default, scry.config.json override, generic config.json ignored"
+
 # --- --version / --help ------------------------------------------------------
 "$SCRY" --version | grep -q "^scry " || fail "--version"
 "$SCRY" --help >/dev/null 2>&1 || fail "--help exit code"
@@ -144,6 +183,25 @@ if printf '1\nnope\n\n' | PATH="$STUB:$PATH" "$SCRY" init --out "$BADCFG" >/dev/
 fi
 [ ! -f "$BADCFG" ] || fail "scry init should not write a config when validation fails"
 pass "scry init rejects an unknown judge/aggregator provider (writes nothing)"
+
+# --- `scry init` writes the GLOBAL config by default (works from any dir) ------
+# No --out: the wizard's last prompt defaults to ~/.config/scry/config.json. HOME
+# is sandboxed to a temp dir so we never touch the real one. Piped answers: panel
+# "1", <enter> judge, <enter> aggregator, "y" web, <enter> to accept the default path.
+GHOME="$(mktemp -d)"
+printf '1\n\n\ny\n\n' | HOME="$GHOME" PATH="$STUB:$PATH" "$SCRY" init >/dev/null 2>&1 \
+  || fail "scry init (global default) exited non-zero"
+[ -f "$GHOME/.config/scry/config.json" ] \
+  || fail "scry init should write the global ~/.config/scry/config.json by default"
+pass "scry init writes the global ~/.config/scry/config.json by default"
+
+# --- `scry init --local` writes ./scry.config.json in the cwd -----------------
+LHOME="$(mktemp -d)"; LPROJ="$(mktemp -d)"
+( cd "$LPROJ" && printf '1\n\n\ny\n\n' | HOME="$LHOME" PATH="$STUB:$PATH" "$SCRY" init --local \
+    >/dev/null 2>&1 ) || fail "scry init --local exited non-zero"
+[ -f "$LPROJ/scry.config.json" ] || fail "scry init --local should write ./scry.config.json"
+[ ! -f "$LHOME/.config/scry/config.json" ] || fail "scry init --local must not touch the global config"
+pass "scry init --local writes ./scry.config.json (not the global config)"
 
 # --- init welcome animation (RuneCircle) renders without error ----------------
 python3 - "$ROOT" <<'PY' || fail "RuneCircle render"

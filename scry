@@ -86,7 +86,8 @@ JUDGE_SYSTEM = (
 # Default configuration. A provider record describes how to drive one CLI for a
 # single headless text generation; `caps` describes how to render Fusion knobs
 # (web tools, reasoning effort, tool-call cap, max output tokens) into that CLI.
-# Overridable via ./config.json, ~/.config/scry/config.json, or --config.
+# Overridable via the global ~/.config/scry/config.json, a project-local
+# ./scry.config.json, or --config (see load_config for precedence).
 # --------------------------------------------------------------------------- #
 
 DEFAULT_SETTINGS = {
@@ -272,11 +273,28 @@ DEFAULT_CONFIG = {
 # Config + small parsers
 # --------------------------------------------------------------------------- #
 
+# scry's config describes which subscription CLIs you have and how you like to
+# fuse them — a property of your machine + accounts, not of any repo (scry even
+# fans out in a scrubbed temp cwd, so it never reads project context). So the
+# canonical config lives once per computer at global_config_path(). A project that
+# genuinely needs a different panel can drop a LOCAL_CONFIG_NAME beside its code;
+# that file is deliberately NOT named the generic "config.json", so a stray
+# config.json belonging to some other tool can never be mistaken for scry's.
+LOCAL_CONFIG_NAME = "scry.config.json"
+
+
+def global_config_path() -> Path:
+    """The once-per-computer config location. Resolved live (honors $HOME)."""
+    return Path.home() / ".config" / "scry" / "config.json"
+
+
 def load_config(path: str | None) -> dict:
     cfg = copy.deepcopy(DEFAULT_CONFIG)
+    # Precedence (first hit wins): explicit --config, else a project-local
+    # ./scry.config.json (opt-in override), else the global config.
     candidates = [Path(path)] if path else [
-        Path.cwd() / "config.json",
-        Path.home() / ".config" / "scry" / "config.json",
+        Path.cwd() / LOCAL_CONFIG_NAME,
+        global_config_path(),
     ]
     for c in candidates:
         try:
@@ -963,10 +981,11 @@ def do_dry_run(cfg: dict, mode: str, settings: dict) -> None:
 
 # --------------------------------------------------------------------------- #
 # Setup wizard (`scry init`) — compose a default panel from the subscription CLIs
-# you actually have, and write it to a config.json. Like `openspec init`. The
-# *best* panel is an empirical question (settle it with scry-eval / DRACO); this
-# just makes the one you want easy to set up. Repeats are allowed on purpose —
-# self-pairing a strong model still improves Fusion's output.
+# you actually have, and write it (by default) to the global config so scry works
+# from any directory; `scry init --local` writes a project-local override instead.
+# The *best* panel is an empirical question (settle it with scry-eval / DRACO);
+# this just makes the one you want easy to set up. Repeats are allowed on purpose
+# — self-pairing a strong model still improves Fusion's output.
 # --------------------------------------------------------------------------- #
 
 # Suggested (model, label) per provider, used to pre-fill the wizard. An empty
@@ -1172,7 +1191,8 @@ def show_init_welcome(no_anim: bool) -> None:
         s.flush()
 
 
-def do_init(cfg: dict, out: str | None, force: bool, no_anim: bool = False) -> int:
+def do_init(cfg: dict, out: str | None, force: bool, no_anim: bool = False,
+            local: bool = False) -> int:
     on = color_enabled(sys.stderr)
 
     def c(s: str, code: str) -> str:
@@ -1248,7 +1268,15 @@ def do_init(cfg: dict, out: str | None, force: bool, no_anim: bool = False) -> i
         "aggregator": parse_member(aggr),
     }
 
-    default_out = out or str(Path.cwd() / "config.json")
+    # Default destination: the global config (once per computer). `--local` opts
+    # into a project-local ./scry.config.json that overrides the global one when
+    # scry runs from this directory. An explicit --out beats both.
+    if out:
+        default_out = out
+    elif local:
+        default_out = str(Path.cwd() / LOCAL_CONFIG_NAME)
+    else:
+        default_out = str(global_config_path())
     dest = Path(out) if out else Path(_ask("Write config to", default_out))
     if dest.exists() and not force:
         if not _ask(f"{dest} exists — overwrite? (y/n)", "n").lower().startswith("y"):
@@ -1261,8 +1289,18 @@ def do_init(cfg: dict, out: str | None, force: bool, no_anim: bool = False) -> i
         print(c(f"error: could not write {dest}: {e}", "31"))
         return 1
 
+    # Scope hint: global (works from any directory) vs a project-local file
+    # (applies only when scry runs from here).
+    gpath = global_config_path()
+    try:
+        is_global = dest.resolve() == gpath.resolve()
+    except OSError:
+        is_global = dest == gpath
+    scope = ("global — scry will use this from any directory" if is_global
+             else f"project-local — overrides the global config when run from {dest.parent}")
+
     print()
-    print(c("✓ wrote ", "32") + str(dest))
+    print(c("✓ wrote ", "32") + str(dest) + c(f"  ({scope})", "2"))
     print(f"  panel: {', '.join(m['label'] for m in panel)}")
     print(f"  judge: {judge}    aggregator: {aggr}    web: {'on' if web else 'off'}")
     print("\nNext:  " + c("scry --check", "1")
@@ -1876,7 +1914,11 @@ def main() -> int:
     ap.add_argument("--no-map", action="store_true",
                     help="never print the consensus map")
     ap.add_argument("--config", help="path to a config.json")
-    ap.add_argument("--out", help="(with `init`) path to write the generated config.json")
+    ap.add_argument("--out", help="(with `init`) path to write the generated config "
+                    "(default: the global ~/.config/scry/config.json, or ./scry.config.json with --local)")
+    ap.add_argument("--local", action="store_true",
+                    help="(with `init`) write a project-local ./scry.config.json in the current "
+                         "directory instead of the global ~/.config/scry/config.json")
     ap.add_argument("--force", action="store_true",
                     help="(with `init`) overwrite an existing config without prompting; "
                          "(with `update`) install even if the remote build is older")
@@ -1894,7 +1936,7 @@ def main() -> int:
 
     # `scry init` — interactive setup wizard; ignores the run-time overrides below.
     if args.prompt[:1] == ["init"]:
-        return do_init(cfg, args.out, args.force, args.no_anim)
+        return do_init(cfg, args.out, args.force, args.no_anim, args.local)
 
     # `scry update` — fetch the latest single-file build and swap it in place.
     if args.prompt[:1] == ["update"]:

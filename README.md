@@ -73,8 +73,10 @@ Everything else is matched:
     Headless via `kimi --quiet`. Uses your account's default model (the Kimi Code membership exposes
     `kimi-for-coding`). Web via `SearchWeb`/`FetchURL`. See "Adding Moonshot" below.
 
-> New? Run **`scry init`** — an interactive setup wizard (like `openspec init`) that detects which of
-> these CLIs you have and writes your default panel to a `config.json`.
+> New? Run **`scry init`** — an interactive setup wizard that detects which of these CLIs you have and
+> writes your default panel to the global `~/.config/scry/config.json`, so `scry` works from any
+> directory. (Need a different panel for one project? `scry init --local` writes a `./scry.config.json`
+> that overrides the global config when you run `scry` from there.)
 
 ## Install
 
@@ -156,8 +158,14 @@ Fusion's lift comes from the synthesis step, not model diversity.
 
 ## Configuration
 
-`scry` runs with built-in defaults. To customize, drop a `config.json` in the working directory or
-at `~/.config/scry/config.json` (or pass `--config path`). See the bundled [`config.json`](config.json).
+`scry` runs with built-in defaults. The config is about which subscription CLIs you have and how you
+like to fuse them — a property of your machine, not any repo — so it lives **once per computer** at
+`~/.config/scry/config.json` (run `scry init` to generate it). A project that genuinely needs a
+different panel can drop a **`scry.config.json`** beside its code (run `scry init --local`); that file
+overrides the global config whenever `scry` runs from that directory. Precedence (first wins):
+`--config path` → `./scry.config.json` → `~/.config/scry/config.json` → built-in defaults. See the
+bundled [`config.json`](config.json) for a fully-worked example (it is a reference, **not**
+auto-loaded by name — pass it with `--config ./config.json` to use it directly).
 
 - **`settings`** — the Fusion knobs (`web_tools`, `max_tool_calls`, `effort`, `max_output_tokens`).
 - **`providers`** — how to drive each CLI: base `cmd`, `model_flag`, capture (`json`+`result_path`,
@@ -172,16 +180,17 @@ at `~/.config/scry/config.json` (or pass `--config path`). See the bundled [`con
 
 ### Setup wizard (`scry init`)
 
-`scry init` is a small interactive wizard (in the spirit of `openspec init`). It opens with an
+`scry init` is a small interactive wizard. It opens with an
 animated **rune-circle** splash — a violet sigil that inscribes itself stroke-by-stroke, lights the
 four "seer" runes, and opens a central eye (distinct from the run-time scrying orb; press Enter to
 continue) — then lists the known provider CLIs with their install status, lets you pick panel members
 — **repeats allowed**, with an optional `:model` (e.g. `1:opus`) — then asks for a judge,
-an aggregator, and whether to enable web search, and writes a minimal `config.json` (it references the
-built-in provider records, so the file stays small). Flags: `--out PATH` to choose where to write,
-`--force` to overwrite without a prompt. The splash honors `--no-anim` / `NO_COLOR` / non-TTY (static
-frame, no keypress needed), so scripted `scry init --out …` stays non-interactive. Re-run it any time
-to recompose your panel.
+an aggregator, and whether to enable web search, and writes a minimal config (it references the
+built-in provider records, so the file stays small). By default it writes the global
+`~/.config/scry/config.json`; **`--local`** writes a project-local `./scry.config.json` instead. Flags:
+`--out PATH` to choose an exact path (overrides `--local`), `--force` to overwrite without a prompt.
+The splash honors `--no-anim` / `NO_COLOR` / non-TTY (static frame, no keypress needed), so scripted
+`scry init --out …` stays non-interactive. Re-run it any time to recompose your panel.
 
 ### Google (Antigravity / `agy`)
 

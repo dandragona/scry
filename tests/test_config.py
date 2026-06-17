@@ -1,7 +1,9 @@
 """Tests for scry.load_config / scry.parse_member / scry.parse_panel.
 
 Covers config loading (defaults, explicit-path merge, settings backfill, bad-JSON
-tolerance, cwd discovery) and the panel/member spec parsers. Stdlib-only; never
+tolerance) and resolution precedence (--config > project-local ./scry.config.json >
+global ~/.config/scry/config.json > built-in defaults, with a stray ./config.json
+deliberately ignored), plus the panel/member spec parsers. Stdlib-only; never
 invokes a real model CLI (config parsing touches no subprocesses)."""
 import contextlib
 import io
@@ -135,45 +137,96 @@ class TestLoadConfigExplicitPath(unittest.TestCase):
         self.assertEqual(cfg["settings"], dict(scry.DEFAULT_SETTINGS))
 
 
-class TestLoadConfigCwdDiscovery(unittest.TestCase):
-    def test_picks_up_cwd_config_json(self):
-        scry = h.load_scry()
-        cwd_dir = tempfile.mkdtemp(prefix="scry-cwd-")
-        self.addCleanup(_rmtree, cwd_dir)
-        home_dir = tempfile.mkdtemp(prefix="scry-home-")
-        self.addCleanup(_rmtree, home_dir)
-        # Sentinel config in the cwd directory.
-        with open(os.path.join(cwd_dir, "config.json"), "w") as f:
-            f.write(json.dumps({"mode": "SENTINEL_CWD_MODE"}))
+class TestLoadConfigResolution(unittest.TestCase):
+    """Precedence: --config > ./scry.config.json > ~/.config/scry/config.json >
+    defaults. A stray ./config.json (a very common filename) is deliberately NOT
+    read — it would otherwise be silently merged into scry's config."""
 
+    def setUp(self):
+        self.scry = h.load_scry()
+        self.cwd = tempfile.mkdtemp(prefix="scry-cwd-")
+        self.addCleanup(_rmtree, self.cwd)
+        self.home = tempfile.mkdtemp(prefix="scry-home-")
+        self.addCleanup(_rmtree, self.home)
+        self.global_path = os.path.join(self.home, ".config", "scry", "config.json")
+
+    def _write_local(self, obj):
+        with open(os.path.join(self.cwd, self.scry.LOCAL_CONFIG_NAME), "w") as f:
+            f.write(json.dumps(obj))
+
+    def _write_generic(self, obj):
+        with open(os.path.join(self.cwd, "config.json"), "w") as f:
+            f.write(json.dumps(obj))
+
+    def _write_global(self, obj):
+        os.makedirs(os.path.dirname(self.global_path), exist_ok=True)
+        with open(self.global_path, "w") as f:
+            f.write(json.dumps(obj))
+
+    def _load(self, path=None):
+        """Load with cwd=self.cwd and HOME=self.home active."""
         saved_cwd = os.getcwd()
-        # HOME empty so the ~/.config/scry/config.json candidate doesn't exist.
-        with h.env_vars(HOME=home_dir):
+        with h.env_vars(HOME=self.home):
             try:
-                os.chdir(cwd_dir)
-                cfg = scry.load_config(None)
+                os.chdir(self.cwd)
+                return self.scry.load_config(path)
             finally:
                 os.chdir(saved_cwd)
-        self.assertEqual(cfg["mode"], "SENTINEL_CWD_MODE")
+
+    def test_global_config_path_honors_home(self):
+        with h.env_vars(HOME=self.home):
+            self.assertEqual(str(self.scry.global_config_path()), self.global_path)
+        self.assertEqual(self.scry.LOCAL_CONFIG_NAME, "scry.config.json")
+
+    def test_reads_global_config_when_no_local(self):
+        self._write_global({"mode": "GLOBAL_MODE"})
+        cfg = self._load()
+        self.assertEqual(cfg["mode"], "GLOBAL_MODE")
         # Settings still fully backfilled.
-        for k in scry.DEFAULT_SETTINGS:
+        for k in self.scry.DEFAULT_SETTINGS:
             self.assertIn(k, cfg["settings"])
 
-    def test_no_cwd_or_home_config_yields_defaults(self):
-        scry = h.load_scry()
-        empty_cwd = tempfile.mkdtemp(prefix="scry-cwd-empty-")
-        self.addCleanup(_rmtree, empty_cwd)
-        home_dir = tempfile.mkdtemp(prefix="scry-home-empty-")
-        self.addCleanup(_rmtree, home_dir)
+    def test_ignores_generic_cwd_config_json(self):
+        # A generic ./config.json belongs to some OTHER tool — must NOT be loaded.
+        self._write_generic({"mode": "GENERIC_SHOULD_BE_IGNORED"})
+        self._write_global({"mode": "GLOBAL_MODE"})
+        cfg = self._load()
+        self.assertEqual(cfg["mode"], "GLOBAL_MODE",
+                         "a stray ./config.json must not shadow the global config")
 
-        saved_cwd = os.getcwd()
-        with h.env_vars(HOME=home_dir):
-            try:
-                os.chdir(empty_cwd)
-                cfg = scry.load_config(None)
-            finally:
-                os.chdir(saved_cwd)
-        self.assertEqual(cfg["mode"], scry.DEFAULT_CONFIG["mode"])
+    def test_local_scry_config_is_read(self):
+        self._write_local({"mode": "LOCAL_MODE"})
+        cfg = self._load()
+        self.assertEqual(cfg["mode"], "LOCAL_MODE")
+
+    def test_local_overrides_global(self):
+        self._write_global({"mode": "GLOBAL_MODE", "settings": {"effort": "low"}})
+        self._write_local({"mode": "LOCAL_MODE"})
+        cfg = self._load()
+        self.assertEqual(cfg["mode"], "LOCAL_MODE")
+        # First hit wins entirely — the global file is not consulted at all, so its
+        # settings.effort does not leak in (only DEFAULT_SETTINGS backfills).
+        self.assertEqual(cfg["settings"]["effort"], self.scry.DEFAULT_SETTINGS["effort"])
+
+    def test_partial_local_override_keeps_default_providers(self):
+        self._write_local({"mode": "fusion", "judge": {"provider": "codex", "model": ""}})
+        cfg = self._load()
+        self.assertEqual(cfg["judge"]["provider"], "codex")
+        self.assertIn("claude", cfg["providers"])  # providers survive a partial override
+
+    def test_explicit_config_beats_local_and_global(self):
+        self._write_global({"mode": "GLOBAL_MODE"})
+        self._write_local({"mode": "LOCAL_MODE"})
+        explicit = os.path.join(self.cwd, "explicit.json")
+        with open(explicit, "w") as f:
+            f.write(json.dumps({"mode": "EXPLICIT_MODE"}))
+        cfg = self._load(explicit)
+        self.assertEqual(cfg["mode"], "EXPLICIT_MODE")
+
+    def test_no_config_anywhere_yields_defaults(self):
+        cfg = self._load()
+        self.assertEqual(cfg["mode"], self.scry.DEFAULT_CONFIG["mode"])
+        self.assertEqual(cfg["settings"], dict(self.scry.DEFAULT_SETTINGS))
 
 
 class TestParseMember(unittest.TestCase):

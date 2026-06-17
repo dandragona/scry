@@ -1,5 +1,5 @@
 {
-  "_note": "Optional. scry works with zero config (built-in defaults). When this file exists in the cwd or ~/.config/scry/config.json it overrides defaults at the top level. CLI flags (--mode/--panel/--judge/--aggregator/--no-web/--effort/--max-tool-calls) override this file.",
+  "_note": "Optional. scry works with zero config (built-in defaults). The canonical config lives once per computer at ~/.config/scry/config.json (run `scry init` to generate it); a project that needs a different panel can drop a ./scry.config.json beside its code (run `scry init --local`), which overrides the global config when scry runs from that directory. This repo's config.json is a reference/example — it is NOT auto-loaded by name; pass it with `--config ./config.json` to use it. CLI flags (--mode/--panel/--judge/--aggregator/--no-web/--effort/--max-tool-calls) override the config.",
 
   "mode": "fusion",
 

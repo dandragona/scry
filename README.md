@@ -17,7 +17,7 @@ better answer. One stdlib-only Python file; nothing to `pip install`.
   <img src="docs/demo.gif" alt="scry in action: a panel of models race, a judge compares them, the fused answer streams in, then a consensus map of where they agreed and clashed" width="720">
 </p>
 
-<sub>A real run (`--no-web`, sonnet panel): the orb gazes while the panel races, the answer streams in token-by-token, then the consensus map shows where the models agreed, contradicted, and what they all missed.</sub>
+<sub>A real run — a 5-model panel (claude · codex · gemini · kimi · deepseek): the orb gazes while the panel races, the fused answer streams in token-by-token, then a consensus map shows where the models agreed, contradicted, and what they all missed — capped by a live cost tally.</sub>
 
 ```
                  ┌──────────► claude  (opus)  + web ─┐

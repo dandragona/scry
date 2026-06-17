@@ -117,6 +117,22 @@ overrides as the installer.
 `scry init` is optional — `scry` runs with built-in defaults — but it's the fastest way to
 compose a panel from the subscriptions you actually have (Kimi included).
 
+### Claude Code skill (`/scry`)
+
+scry ships a **[Claude Code](https://claude.com/claude-code) skill**, so you can consult the
+panel without leaving your editor:
+
+```
+/scry why is my Postgres query slow, and how do I fix it?
+```
+
+The installer drops it into `~/.claude/skills/scry/` (honors `CLAUDE_CONFIG_DIR`), so the
+`/scry` command is available the next time Claude Code starts. The skill runs scry headlessly
+with **`--no-anim --quiet`** — the scrying orb is for humans; an animation captured into an
+agent's tool output is just hundreds of lines of escape codes burning tokens, so the skill
+turns it off and returns only the fused answer. Ask for "where do they disagree?" and it adds
+the consensus map. (Source: [`.claude/skills/scry/SKILL.md`](.claude/skills/scry/SKILL.md).)
+
 ## Usage
 
 ```sh

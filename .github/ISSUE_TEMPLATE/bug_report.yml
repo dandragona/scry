@@ -1,0 +1,69 @@
+name: Bug report
+description: Something in scry isn't working as expected.
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug! Please don't paste prompts or answers that
+        contain secrets or private data. For a **security vulnerability**, do not
+        open an issue — see the [security policy](https://github.com/dandragona/scry/security/policy).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+      placeholder: "scry \"...\" → expected X, got Y"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact command(s) you ran.
+      placeholder: |
+        1. scry "..."
+        2. ...
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: scry version
+      description: Output of `scry --version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: providers
+    attributes:
+      label: Which providers/CLIs were involved?
+      multiple: true
+      options:
+        - claude (Claude Code)
+        - codex
+        - gemini / agy (Antigravity)
+        - deepseek
+        - kimi
+        - other / not sure
+    validations:
+      required: false
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: OS + version, and Python version (`python3 --version`).
+      placeholder: |
+        OS: macOS 15.4
+        Python: 3.12.2
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output / logs
+      description: Paste any error output. `--check` or `--dry-run` output is often helpful. Redact secrets.
+      render: shell
+    validations:
+      required: false

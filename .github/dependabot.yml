@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # scry is stdlib-only (no requirements.txt / pyproject), so there is no pip
+  # ecosystem to track. We only keep the GitHub Actions used by CI/CodeQL current.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies

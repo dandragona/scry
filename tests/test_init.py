@@ -171,6 +171,68 @@ class InitWizardSubprocessTest(unittest.TestCase):
         self.assertNotIn("sentinel", cfg)
 
 
+class InitDestinationTest(unittest.TestCase):
+    """Where `scry init` writes when --out is NOT given: the global
+    ~/.config/scry/config.json by default, or ./scry.config.json with --local.
+    HOME + cwd are sandboxed to temp dirs so the real ones are never touched."""
+
+    def setUp(self):
+        import tempfile
+        self.home = tempfile.mkdtemp(prefix="scry-init-home-")
+        self.proj = tempfile.mkdtemp(prefix="scry-init-proj-")
+        self._stubs = _stub_env()
+        self.env = self._stubs.env
+        self.env["HOME"] = self.home
+        self.global_cfg = os.path.join(self.home, ".config", "scry", "config.json")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._stubs.dir, ignore_errors=True)
+        shutil.rmtree(self.home, ignore_errors=True)
+        shutil.rmtree(self.proj, ignore_errors=True)
+
+    # panel "1" (claude), <enter> judge, <enter> aggregator, "y" web, <enter> to
+    # accept the default "Write config to" path (only prompted when --out is absent).
+    _ANSWERS = "1\n\n\ny\n\n"
+
+    def test_default_writes_global_config(self):
+        cp = h.run_scry(["init", "--no-anim"], input=self._ANSWERS,
+                        env=self.env, cwd=self.proj, timeout=60)
+        self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
+        self.assertTrue(os.path.exists(self.global_cfg),
+                        "init with no --out must write the global ~/.config/scry/config.json")
+        with open(self.global_cfg) as f:
+            cfg = json.load(f)
+        self.assertEqual([m["provider"] for m in cfg["panel"]], ["claude"])
+        # Nothing was dropped into the working directory.
+        self.assertFalse(os.path.exists(os.path.join(self.proj, "scry.config.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.proj, "config.json")))
+
+    def test_local_writes_project_config_not_global(self):
+        cp = h.run_scry(["init", "--no-anim", "--local"], input=self._ANSWERS,
+                        env=self.env, cwd=self.proj, timeout=60)
+        self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
+        local_cfg = os.path.join(self.proj, "scry.config.json")
+        self.assertTrue(os.path.exists(local_cfg),
+                        "init --local must write ./scry.config.json in the cwd")
+        with open(local_cfg) as f:
+            cfg = json.load(f)
+        self.assertEqual([m["provider"] for m in cfg["panel"]], ["claude"])
+        # The global config must be left untouched.
+        self.assertFalse(os.path.exists(self.global_cfg),
+                         "init --local must not write the global config")
+
+    def test_out_overrides_local_flag(self):
+        # An explicit --out wins even when --local is also passed (no path prompt).
+        explicit = os.path.join(self.proj, "sub", "picked.json")
+        cp = h.run_scry(["init", "--no-anim", "--local", "--out", explicit],
+                        input="1\n\n\ny\n", env=self.env, cwd=self.proj, timeout=60)
+        self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
+        self.assertTrue(os.path.exists(explicit))
+        self.assertFalse(os.path.exists(os.path.join(self.proj, "scry.config.json")))
+        self.assertFalse(os.path.exists(self.global_cfg))
+
+
 class AskUnitTest(unittest.TestCase):
     """Direct unit test of scry._ask (prompt helper)."""
 

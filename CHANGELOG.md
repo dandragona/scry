@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
+- **Config is global-first.** The canonical config lives once per computer at
+  `~/.config/scry/config.json`; a project that needs a different panel opts in with a
+  `./scry.config.json` (which overrides the global config when `scry` runs from that
+  directory). scry no longer auto-loads a generic `./config.json` from the working
+  directory — that filename is too common, so a `config.json` belonging to another tool
+  could be silently merged into scry's config. Precedence: `--config` → `./scry.config.json`
+  → `~/.config/scry/config.json` → built-in defaults. (`scry init` now writes the global
+  config by default; `scry init --local` writes the project-local file.)
 - **Renamed the project to `scry`** (was `fuse`). The command, config path
   (`~/.config/scry/`), recursion-guard env (`SCRY_DEPTH`), and the eval harness
   (`scry-eval`) all moved. The `ScryingOrb` progress animation gives the project
@@ -29,10 +37,13 @@ All notable changes to this project are documented here. The format follows
   preserving the exec bit. No `sudo` unless installed to a system dir (it prints the
   exact elevated command, preserving any overrides). Honors `SCRY_REPO` / `SCRY_REF` /
   `SCRY_UPDATE_URL`, mirroring `install.sh`.
-- **`scry init`** — an interactive setup wizard (in the spirit of `openspec init`) that
-  lists your installed provider CLIs, lets you compose a panel (**repeats allowed**, with
-  optional `:model`), pick a judge + aggregator, toggle web search, and writes a minimal
-  `config.json`. Flags: `--out PATH`, `--force`. It opens with an animated **rune-circle**
+- **`scry init`** — an interactive setup wizard that lists your installed provider CLIs,
+  lets you compose a panel (**repeats allowed**, with optional `:model`), pick a judge +
+  aggregator, toggle web search, and writes a minimal config. By default it writes the
+  **global** `~/.config/scry/config.json` (config describes your machine's subscriptions,
+  not a repo — so `scry` then works from any directory); `--local` writes a project-local
+  `./scry.config.json` that overrides the global config when `scry` runs from that directory.
+  Flags: `--out PATH`, `--local`, `--force`. It opens with an animated **rune-circle**
   welcome splash (a self-inscribing violet sigil — distinct from the run-time scrying orb)
   that degrades to a static frame under `--no-anim` / `NO_COLOR` / non-TTY.
 - **Cost & token meter** — every run now reports what it actually spent: a one-line

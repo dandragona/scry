@@ -250,8 +250,9 @@ def run_scry(args, input: str | None = None, env: dict | None = None,
 
     `env` defaults to the current environment; pass StubBins(...).env to inject
     stub provider binaries. `cwd` defaults to a throwaway temp dir so a stray
-    ./config.json in the repo can't leak into the test (pass REPO_ROOT to use the
-    shipped config.json on purpose)."""
+    project-local ./scry.config.json can't leak into the test. (scry does not
+    auto-load a generic ./config.json; an explicit --config path is unaffected
+    by cwd.)"""
     argv = [str(SCRY), *[str(a) for a in args]]
     own_cwd = cwd is None
     cwd = cwd or tempfile.mkdtemp(prefix="scry-test-cwd-")

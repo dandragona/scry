@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# Least-privilege default token for every job: read repo contents, nothing else.
+permissions:
+  contents: read
+
 # scry spends real subscription credit on every live call, so CI NEVER invokes
 # the real model CLIs. Both jobs below run only against STUB provider binaries /
 # monkeypatched fakes — no secrets, no network, no spend. Stdlib only, so there is
@@ -26,3 +30,20 @@ jobs:
         run: sh tests/smoke.sh
       - name: Unit + integration suite (stubbed CLIs, $0)
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+  # Single stable status check for branch protection. The `main` ruleset requires
+  # `ci-pass`, which is green only when every matrix leg of `test` succeeded. This
+  # lets the matrix grow/shrink (OS or Python versions) without editing the
+  # repo's required-checks list.
+  ci-pass:
+    if: always()
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all matrix legs passed
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "test job did not succeed: ${{ needs.test.result }}"
+            exit 1
+          fi
+          echo "All CI matrix legs passed."

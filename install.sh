@@ -48,12 +48,35 @@ install_file() {
   printf '  -> %s\n' "$dest"
 }
 
+# scry also ships a Claude Code skill so you can run the panel as `/scry` from
+# inside Claude Code. Drop it into the user's personal skills dir (under $HOME,
+# so never needs sudo; honors CLAUDE_CONFIG_DIR). Best-effort: a failure here is
+# only a note, never an aborted install — the CLI is the thing that matters.
+install_skill() {
+  skill_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/scry"
+  tmp="$(mktemp)"
+  if ! curl -fsSL "$RAW_BASE/.claude/skills/scry/SKILL.md" -o "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    printf '\033[33mnote:\033[0m could not fetch the /scry Claude skill — skipped.\n'
+    return 0
+  fi
+  if mkdir -p "$skill_dir" 2>/dev/null && mv "$tmp" "$skill_dir/SKILL.md" 2>/dev/null; then
+    printf '  -> %s\n' "$skill_dir/SKILL.md"
+  else
+    rm -f "$tmp"
+    printf '\033[33mnote:\033[0m could not write the /scry Claude skill to %s — skipped.\n' "$skill_dir"
+  fi
+}
+
 printf 'Installing scry from %s\n' "$REPO@$REF"
 install_file scry
 # The DeepSeek provider has no subscription CLI; scry shells out to this API-key
 # adapter, which it resolves *next to the scry binary*. Install it alongside or
 # DeepSeek shows up as "not found" even with DEEPSEEK_API_KEY set.
 install_file scry-deepseek
+
+printf '\nInstalling the /scry Claude Code skill\n'
+install_skill
 
 printf '\n\033[32m✓ installed\033[0m %s\n' "$("${INSTALL_DIR%/}/scry" --version 2>/dev/null || echo scry)"
 case ":$PATH:" in
@@ -62,3 +85,4 @@ case ":$PATH:" in
 esac
 printf '\nNext: run \033[1mscry --check\033[0m to verify your model CLIs are logged in.\n'
 printf 'For DeepSeek, also set \033[1mDEEPSEEK_API_KEY\033[0m (see .env.example).\n'
+printf 'In Claude Code, run \033[1m/scry <prompt>\033[0m to consult the panel from your editor.\n'

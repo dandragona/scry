@@ -1208,7 +1208,7 @@ def do_init(cfg: dict, out: str | None, force: bool, no_anim: bool = False,
     print(c("Choose your panel", "1") + " — the models scry fans each prompt out to."
           " Repeats are fine (self-pairing still helps).\n")
     for i, name in enumerate(names, 1):
-        installed = shutil.which(providers[name]["cmd"][0]) is not None
+        installed = resolve_command(providers[name]["cmd"][0]) is not None
         mark = c("✓ installed", "32") if installed else c("· not found", "33")
         sug = INIT_SUGGEST.get(name, ("", name))[0]
         print(f"  {i}. {name:<7} {mark}" + (f"   suggested model: {sug}" if sug else ""))
@@ -1231,7 +1231,7 @@ def do_init(cfg: dict, out: str | None, force: bool, no_anim: bool = False,
             print(c(f"  ! skipping '{tok}' (model can't contain ':')", "33"))
             continue
         name = names[int(idx) - 1]
-        if shutil.which(providers[name]["cmd"][0]) is None:
+        if resolve_command(providers[name]["cmd"][0]) is None:
             print(c(f"  · note: '{name}' isn't installed yet — added anyway; run "
                     f"scry --check after installing it", "33"))
         sug_model, sug_label = INIT_SUGGEST.get(name, ("", name))

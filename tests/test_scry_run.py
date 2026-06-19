@@ -291,6 +291,110 @@ class ScryRunTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["streamed"])
         on_start.assert_called_once()
 
+    # ------------------------------------------------------------------ #
+    # aggregator_system: default is MOA; an override is forwarded to synthesis
+    # ------------------------------------------------------------------ #
+    async def _run_capturing_synth_system(self, **kwargs):
+        scry = self.scry
+        seen = {}
+
+        async def fake_call_cli(cfg, provider, model, system, user, cwd,
+                                depth, web, settings, meta=None):
+            if system is None:
+                return f"PROP[{provider}]"
+            if system == scry.JUDGE_SYSTEM:
+                return json.dumps(ANALYSIS)
+            seen["synth"] = system          # the only remaining call is synthesis
+            return "FUSED"
+
+        self._patch_call_cli(fake_call_cli)
+        await scry.scry_run(self.cfg, "p", "fusion", self.cfg["settings"],
+                            self.log, **kwargs)
+        return seen["synth"]
+
+    async def test_aggregator_system_defaults_to_moa(self):
+        synth_system = await self._run_capturing_synth_system()
+        self.assertEqual(synth_system, self.scry.MOA_AGGREGATOR_SYSTEM)
+
+    async def test_aggregator_system_override_forwarded(self):
+        synth_system = await self._run_capturing_synth_system(
+            aggregator_system="CUSTOM-AGG-PROMPT")
+        self.assertEqual(synth_system, "CUSTOM-AGG-PROMPT")
+
+
+class ScryRunCwdTest(unittest.IsolatedAsyncioTestCase):
+    """scry_run's optional cwd override (used by `scry plan` for repo-aware drafting).
+    SAFETY-CRITICAL: a caller-provided cwd (the user's repo) must NEVER be deleted."""
+
+    def setUp(self):
+        self.scry = h.load_scry()
+        self.cfg = self.scry.load_config(str(h.CONFIG_JSON))
+        self.log = lambda *a, **k: None
+
+    def _fake_capturing(self, seen):
+        scry = self.scry
+
+        async def fake(cfg, provider, model, system, user, cwd, depth, web,
+                       settings, meta=None):
+            seen["cwd"] = cwd
+            if system is None:
+                return f"PROP[{provider}]"
+            if system == scry.JUDGE_SYSTEM:
+                return json.dumps(ANALYSIS)
+            return "FUSED"
+
+        orig = scry.call_cli
+        scry.call_cli = fake
+        self.addCleanup(setattr, scry, "call_cli", orig)
+
+    async def test_provided_cwd_is_not_deleted(self):
+        import os
+        import shutil
+        import tempfile
+        d = tempfile.mkdtemp(prefix="scry-repo-test-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        seen = {}
+        self._fake_capturing(seen)
+        await self.scry.scry_run(self.cfg, "p", "fusion", self.cfg["settings"],
+                                 self.log, cwd=d)
+        self.assertTrue(os.path.isdir(d),
+                        "scry_run must NOT delete a caller-provided cwd")
+        self.assertEqual(seen["cwd"], d)  # provider calls ran in the provided cwd
+
+    async def test_default_cwd_is_temp_and_cleaned(self):
+        import os
+        seen = {}
+        self._fake_capturing(seen)
+        await self.scry.scry_run(self.cfg, "p", "fusion", self.cfg["settings"], self.log)
+        self.assertIn("scry-run-", seen["cwd"])
+        self.assertFalse(os.path.isdir(seen["cwd"]),
+                         "an internally-created temp cwd should be cleaned up")
+
+
+class EffectiveTimeoutTest(unittest.TestCase):
+    """call_cli's per-provider timeout, scaled by settings['timeout_scale'] — plan
+    mode raises the scale for the slow final draft (a ceiling, so fast calls are
+    unaffected) while interviews stay fail-fast."""
+
+    def setUp(self):
+        self.scry = h.load_scry()
+
+    def test_default_scale_is_provider_timeout(self):
+        self.assertEqual(self.scry._effective_timeout({"timeout": 360}, {}), 360.0)
+
+    def test_missing_provider_timeout_defaults_300(self):
+        self.assertEqual(self.scry._effective_timeout({}, {}), 300.0)
+
+    def test_scale_multiplies(self):
+        self.assertEqual(
+            self.scry._effective_timeout({"timeout": 360}, {"timeout_scale": 3}), 1080.0)
+
+    def test_zero_or_none_scale_falls_back_to_one(self):
+        self.assertEqual(
+            self.scry._effective_timeout({"timeout": 100}, {"timeout_scale": 0}), 100.0)
+        self.assertEqual(
+            self.scry._effective_timeout({"timeout": 100}, {"timeout_scale": None}), 100.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -141,6 +141,7 @@ scry update                                 # upgrade scry to the latest build, 
 scry --check                                # pre-flight: are my CLIs installed + logged in?
 scry "Explain why my Postgres query is slow and how to fix it"
 cat prompt.txt | scry                       # prompt from stdin
+scry plan "add rate limiting to my API"     # interactive, panel-driven planning (see below)
 scry --mode synthesize "..."                # lighter 2-stage (skip the judge)
 scry --no-web "..."                         # pure generation, no web tools
 scry --effort high "..."                    # raise reasoning effort on every stage
@@ -171,6 +172,61 @@ scry log 50                                 # ...the last 50
 
 A panel member is `provider[:model]`. Same-model "self-pairing" still improves results — most of
 Fusion's lift comes from the synthesis step, not model diversity.
+
+### Plan mode (`scry plan "<request>"`)
+
+An interactive mode for producing the **best possible implementation plan** — like a "grill-me"
+interrogation, but driven by the whole panel instead of one model. It is deliberately expensive
+(several panel fan-outs); that's the point.
+
+Each round, the **whole panel** proposes clarifying questions; the **judge deduplicates** them
+(merging duplicates and dropping already-answered ones, but surfacing *every* distinct question — no
+ranking); they're asked **one at a time**. Your answers accumulate, and rounds repeat until the
+panel is confident — or you type `done` — then the normal fusion pipeline (panel → judge → synthesis)
+drafts and fuses one structured Markdown plan (`## Context / Approach / Key files / Steps /
+Verification / Risks`).
+
+```sh
+scry plan "add rate limiting to my API"     # interactive: answer questions one at a time
+scry plan "..." --out plan.md               # also write the plan to a file
+scry plan "..." --max-rounds 3              # cap the clarifying rounds (default 6)
+scry plan "..." --json                      # {mode:"plan", transcript, rounds, final, ...}
+scry plan --resume                          # continue the most recent interrupted session
+scry plan --resume=<id>                     # continue a specific session by id
+scry plan --list                            # list unfinished, resumable sessions (free; no models)
+scry plan "..." --no-repo                   # don't let the panel read the current directory
+```
+
+The plan prints to stdout (pipeable) and is saved to history — `scry last` re-prints it. Progress and
+the clarifying questions go to stderr, so a redirected/piped stdout stays clean. The clarifying-question
+rounds run with web tools **off** by default (they're about your intent, not external facts; configurable
+via `plan.interview_web`); the final plan drafting uses web per your normal settings. Tune defaults with
+the top-level `plan` config block (`max_rounds`, `interview_web`, `repo_context`, `final_timeout_scale`).
+
+**Repo-aware by default.** Unlike a normal `scry` run (which fans out in a scrubbed temp cwd), `scry plan`
+gives the panel **read-only** access to the directory you launch it in, so the plan is grounded in your
+actual code. Mutating tools stay disabled; pass `--no-repo` (or set `plan.repo_context: false`) to opt out.
+Note this sends repo contents to your panel models — the same exposure as running `claude`/`codex` in the
+repo directly.
+
+**Patient final draft.** The interview rounds stay fast (web-off, fail-fast), but the final web-researched
+draft gets a longer timeout ceiling (`plan.final_timeout_scale`, default 3×) so it finishes instead of
+timing out. A higher ceiling never slows the fast interview calls.
+
+**Resumable.** Every plan run checkpoints its transcript after each answer; if one is interrupted (Ctrl-C,
+a crash, a failed draft), `scry plan --resume` continues it from where it stopped — replaying your answers,
+skipping completed rounds, and going straight to the pending step. `scry plan --list` shows the unfinished
+sessions waiting to be resumed — each with its id (usable verbatim as `--resume=<id>`), last-updated time,
+the round it reached, how many questions you answered, and the original request. It makes no model calls.
+
+| Flag | Effect (with `plan`) |
+|---|---|
+| `--max-rounds N` | cap interactive clarifying rounds (default 6; the hard backstop on cost) |
+| `--out PATH` | also write the generated Markdown plan to `PATH` |
+| `--resume[=<id>]` | continue the most recent (or a specific) unfinished planning session |
+| `--list` | list unfinished, resumable sessions (free — reads history, runs no models) |
+| `--no-repo` | don't give the panel read-only access to the current directory |
+| `--panel`, `--judge`, `--aggregator`, `--effort`, `--no-web`, `--json`, `--no-save` | as for a normal run |
 
 ## Configuration
 

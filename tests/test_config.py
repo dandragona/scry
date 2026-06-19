@@ -333,6 +333,57 @@ class TestParsePanel(unittest.TestCase):
         )
 
 
+class TestLoadConfigPlanBlock(unittest.TestCase):
+    """`scry plan` reads a top-level `plan` block; load_config backfills it from
+    DEFAULT_CONFIG['plan'] like it does for settings, so old configs still work."""
+
+    def _write(self, obj) -> str:
+        d = tempfile.mkdtemp(prefix="scry-cfg-")
+        self.addCleanup(_rmtree, d)
+        p = os.path.join(d, "config.json")
+        with open(p, "w") as f:
+            f.write(json.dumps(obj))
+        return p
+
+    def test_none_has_plan_defaults(self):
+        scry = h.load_scry()
+        cfg = scry.load_config(None)
+        self.assertEqual(cfg["plan"]["max_rounds"], 6)
+        self.assertIs(cfg["plan"]["interview_web"], False)
+        self.assertIs(cfg["plan"]["repo_context"], True)      # panel reads the repo
+        self.assertEqual(cfg["plan"]["final_timeout_scale"], 3)  # patient final draft
+
+    def test_partial_plan_override_keeps_other_new_keys(self):
+        scry = h.load_scry()
+        p = self._write({"plan": {"repo_context": False}})
+        cfg = scry.load_config(p)
+        self.assertIs(cfg["plan"]["repo_context"], False)        # overridden
+        self.assertEqual(cfg["plan"]["max_rounds"], 6)           # backfilled
+        self.assertEqual(cfg["plan"]["final_timeout_scale"], 3)  # backfilled
+
+    def test_config_without_plan_key_is_backfilled(self):
+        scry = h.load_scry()
+        p = self._write({"mode": "fusion"})  # no "plan" key at all
+        cfg = scry.load_config(p)
+        self.assertEqual(cfg["plan"]["max_rounds"], 6)
+        self.assertIs(cfg["plan"]["interview_web"], False)
+
+    def test_partial_plan_override_backfills_missing_keys(self):
+        scry = h.load_scry()
+        p = self._write({"plan": {"max_rounds": 3}})
+        cfg = scry.load_config(p)
+        self.assertEqual(cfg["plan"]["max_rounds"], 3)        # kept
+        self.assertIs(cfg["plan"]["interview_web"], False)    # backfilled
+
+    def test_plan_block_does_not_leak_into_settings_equality(self):
+        # Adding the plan block must NOT disturb the settings == DEFAULT_SETTINGS
+        # contract other tests rely on (plan lives at top level, not in settings).
+        scry = h.load_scry()
+        p = self._write({"plan": {"max_rounds": 9}})
+        cfg = scry.load_config(p)
+        self.assertEqual(cfg["settings"], dict(scry.DEFAULT_SETTINGS))
+
+
 def _rmtree(path):
     import shutil
     shutil.rmtree(path, ignore_errors=True)

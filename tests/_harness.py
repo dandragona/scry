@@ -131,6 +131,75 @@ def claude_smart(proposer: str = "PROPOSER ANSWER", fused: str = "FUSED ANSWER",
     )
 
 
+def claude_plan(rounds_before_ready: int = 1, questions=None,
+                fused: str = "## Context\nThe plan.\n## Steps\n1. do it",
+                unique_each_round: bool = False, report_cwd: bool = False,
+                fail_synthesis: bool = False) -> str:
+    """A claude stub for `scry plan`: ONE binary that plays every plan role by
+    branching on a substring UNIQUE to each system prompt (the prompts share phrases
+    like 'implementation plan'/'clarifying questions', so we key on disjoint anchors):
+
+      PLAN_QUESTION_JUDGE_SYSTEM  ('deduplicating') -> dedup the proposed questions
+                                  found in stdin (case-insensitive).
+      PLAN_SYNTH_SYSTEM           ('plan drafts')   -> the markdown plan.
+      PLAN_INTERVIEWER_SYSTEM     ('scope a task')  -> emit the questions, or
+                                  {"ready":true,"questions":[]} once the transcript
+                                  shows >= rounds_before_ready answered questions.
+      JUDGE_SYSTEM                ('impartial judge') -> 5-field analysis (final fusion).
+      no system (panel proposer in the final fusion) -> a plan draft.
+
+    With unique_each_round, each round's question text embeds the answered-count so
+    it's always new (exercises the max-rounds cap)."""
+    if questions is None:
+        questions = [{"q": "What is the target platform?", "why": "shapes deps",
+                      "options": ["linux", "macos"]},
+                     {"q": "Any performance budget?", "why": "drives design"}]
+    return _py(
+        "import sys, json, re, os\n"
+        "argv = sys.argv[1:]\n"
+        "sp = ''\n"
+        "for i, a in enumerate(argv):\n"
+        "    if a == '--append-system-prompt' and i + 1 < len(argv):\n"
+        "        sp = argv[i + 1]\n"
+        "data = sys.stdin.read()\n"
+        f"qs = {questions!r}\n"
+        f"need = {int(rounds_before_ready)}\n"
+        f"uniq = {bool(unique_each_round)!r}\n"
+        f"rc = {bool(report_cwd)!r}\n"
+        f"fail_synth = {bool(fail_synthesis)!r}\n"
+        "answered = len(re.findall(r'\\nA\\d+: ', data))\n"
+        "if 'deduplicating' in sp:\n"
+        "    m = re.search(r'\\{.*\\}', data, re.S)\n"
+        "    prop = json.loads(m.group(0)).get('proposed_questions', []) if m else []\n"
+        "    seen = set(); out = []\n"
+        "    for q in prop:\n"
+        "        k = str(q.get('q', '')).strip().lower()\n"
+        "        if k and k not in seen:\n"
+        "            seen.add(k); out.append(q)\n"
+        "    print(json.dumps({'result': json.dumps({'questions': out}), 'is_error': False}))\n"
+        "elif 'plan drafts' in sp:\n"
+        f"    out = {fused!r}\n"
+        "    if rc: out = out + '\\nCWD=' + os.getcwd()\n"
+        "    print(json.dumps({'result': out, 'is_error': False}))\n"
+        "elif 'scope a task' in sp:\n"
+        "    ready = answered >= need\n"
+        "    if rc:\n"
+        "        qlist = [] if ready else [{'q': 'cwd is ' + os.getcwd()}]\n"
+        "    elif uniq:\n"
+        "        qlist = [] if ready else [{'q': 'Detail number %d' % answered}]\n"
+        "    else:\n"
+        "        qlist = [] if ready else qs\n"
+        "    print(json.dumps({'result': json.dumps({'ready': ready, 'questions': qlist}), 'is_error': False}))\n"
+        "elif 'impartial judge' in sp:\n"
+        "    analysis = {'consensus': [], 'contradictions': [], 'partial_coverage': [],\n"
+        "                'unique_insights': [], 'blind_spots': []}\n"
+        "    print(json.dumps({'result': json.dumps(analysis), 'is_error': False}))\n"
+        "else:\n"
+        "    print(json.dumps({'result': ('boom' if fail_synth else 'PLAN DRAFT'),\n"
+        "                       'is_error': fail_synth}))\n"
+    )
+
+
 def codex_outfile(result: str = "CODEX ANSWER") -> str:
     """codex `exec -o <outfile>`: write the answer to the file named after `-o`
     (scry's capture='outfile' contract); falls back to stdout if no -o."""
@@ -252,16 +321,26 @@ def run_scry(args, input: str | None = None, env: dict | None = None,
     stub provider binaries. `cwd` defaults to a throwaway temp dir so a stray
     project-local ./scry.config.json can't leak into the test. (scry does not
     auto-load a generic ./config.json; an explicit --config path is unaffected
-    by cwd.)"""
+    by cwd.)
+
+    SCRY_HOME is isolated to a throwaway dir unless the caller already set one, so
+    a subprocess run never writes history/plan-checkpoints into the real ~/.scry.
+    A test that needs to inspect history sets SCRY_HOME in `env` itself."""
     argv = [str(SCRY), *[str(a) for a in args]]
     own_cwd = cwd is None
     cwd = cwd or tempfile.mkdtemp(prefix="scry-test-cwd-")
+    env = dict(env) if env is not None else os.environ.copy()
+    own_home = "SCRY_HOME" not in env
+    if own_home:
+        env["SCRY_HOME"] = tempfile.mkdtemp(prefix="scry-test-home-")
     try:
         return subprocess.run(argv, input=input, env=env, cwd=str(cwd),
                               capture_output=True, text=True, timeout=timeout)
     finally:
         if own_cwd:
             shutil.rmtree(cwd, ignore_errors=True)
+        if own_home:
+            shutil.rmtree(env["SCRY_HOME"], ignore_errors=True)
 
 
 def make_scry_copy(dest_dir: str | Path, name: str = "scry") -> Path:

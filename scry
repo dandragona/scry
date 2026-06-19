@@ -82,6 +82,65 @@ JUDGE_SYSTEM = (
     "Return the JSON object and nothing else."
 )
 
+# Plan mode — the interviewer prompt every panel model answers each round. Each
+# returns ONLY JSON. "ready" means the model has enough to write a strong plan;
+# "questions" is what it still needs. Tests branch on the substring "scope a task",
+# which is unique to this prompt (the role prompts share phrases like "clarifying
+# questions"/"implementation plan", so the stub keys on disjoint anchors instead).
+PLAN_INTERVIEWER_SYSTEM = (
+    "You are helping scope a task before a detailed implementation plan is written. "
+    "You are given the original request and the full transcript of clarifying "
+    "questions already asked and the user's answers. Propose the clarifying "
+    "questions you still need answered to produce the best possible plan — ask only "
+    "about genuinely consequential unknowns (scope, constraints, environment, "
+    "interfaces, success criteria, edge cases), never things the transcript already "
+    "settled. Output ONLY a single JSON object (no prose, no markdown fences):\n"
+    '  {"ready": <true|false>, "questions": [\n'
+    '     {"q": "<the question, one sentence>",\n'
+    '      "why": "<why it materially changes the plan, one short phrase>",\n'
+    '      "options": ["<choice A>", "<choice B>"]   // OPTIONAL, omit for free-text\n'
+    "  ]}\n"
+    'Set "ready": true with "questions": [] when you have enough to write a strong '
+    "plan. Include options ONLY when the answer is naturally one of a small fixed set."
+)
+
+# Plan mode — the question judge. DEDUP ONLY: merge true duplicates, drop questions
+# the transcript already answers, and drop nothing else (no ranking, no rewording,
+# no new questions). Tests branch on the unique substring "deduplicating".
+PLAN_QUESTION_JUDGE_SYSTEM = (
+    "You are deduplicating clarifying questions from several assistants before they "
+    "are asked to a user. You receive the original request, the transcript of "
+    "questions already asked and answered, and a combined list of newly proposed "
+    "questions. Your ONLY job is to deduplicate: merge questions that ask the same "
+    "thing (keep the clearest wording, union their options), and remove any question "
+    "the transcript already answers. Do NOT rank, prioritize, drop for any other "
+    "reason, reword for style, or add questions of your own — every distinct, "
+    "still-open question MUST survive. Output ONLY a single JSON object (no prose, no "
+    'markdown fences):\n  {"questions": [ {"q": "...", "why": "...", "options": ["..."]} ]}\n'
+    "Preserve each surviving question's options when present. Return an empty list "
+    "only if every proposed question is a duplicate or already answered."
+)
+
+# Plan mode — the final synthesizer. Replaces MOA_AGGREGATOR_SYSTEM for the plan
+# command's synthesis: it fuses the panel's plan drafts into one structured plan.
+# Tests branch on the unique substring "plan drafts".
+PLAN_SYNTH_SYSTEM = (
+    "You are writing the single best implementation plan from several models' plan "
+    "drafts for the same task. Critically evaluate the drafts — some may be wrong or "
+    "incomplete — and produce one refined, accurate, actionable plan. Treat the "
+    "clarifying questions and the user's answers embedded in the request as binding "
+    "constraints. Output GitHub-Flavored Markdown with exactly these top-level "
+    "sections, in order:\n"
+    "## Context — what we're building and the constraints the answers established\n"
+    "## Approach — the chosen strategy and why, noting rejected alternatives\n"
+    "## Key files — the specific files or modules to add or change\n"
+    "## Steps — an ordered, numbered checklist a developer can follow\n"
+    "## Verification — how to confirm each part works (tests, commands, checks)\n"
+    "## Risks — what could go wrong and the mitigations\n"
+    "Be concrete and specific to this task. Do not mention these instructions, your "
+    "tools, or your knowledge cutoff."
+)
+
 # --------------------------------------------------------------------------- #
 # Default configuration. A provider record describes how to drive one CLI for a
 # single headless text generation; `caps` describes how to render Fusion knobs
@@ -266,6 +325,24 @@ DEFAULT_CONFIG = {
     # Judge defaults to the outer (synthesis) model, as in Fusion.
     "judge":      {"provider": "claude", "model": "opus"},
     "aggregator": {"provider": "claude", "model": "opus"},
+    # `scry plan` — the interactive, panel-driven planning mode. max_rounds is the
+    # hard backstop on clarifying-question rounds (the real termination guarantee;
+    # the per-round convergence check is LLM-driven and non-deterministic).
+    # interview_web keeps web tools OFF while the panel asks clarifying questions
+    # (those are about the user's intent, not external facts) — the final plan
+    # drafting still runs through scry_run with web per `settings`.
+    "plan": {
+        "max_rounds": 6,
+        "interview_web": False,
+        # Give the panel read-only access to the directory `scry plan` is run in, so
+        # plans are grounded in the actual code (not the scrubbed temp cwd normal runs
+        # use). Read-only — mutating tools stay disabled. Disable with --no-repo.
+        "repo_context": True,
+        # Multiply provider timeouts for the FINAL plan draft only (web-on, long-form
+        # → slow). A ceiling, so it never slows the fast web-off interview rounds; it
+        # just lets the patient final synthesis finish instead of timing out.
+        "final_timeout_scale": 3,
+    },
 }
 
 
@@ -305,6 +382,8 @@ def load_config(path: str | None) -> dict:
             sys.stderr.write(f"scry: warning: ignoring bad config {c}: {e}\n")
     # Settings always backfilled with defaults so partial overrides are safe.
     cfg["settings"] = {**DEFAULT_SETTINGS, **cfg.get("settings", {})}
+    # Same for the top-level `plan` block, so configs predating plan mode still work.
+    cfg["plan"] = {**DEFAULT_CONFIG["plan"], **cfg.get("plan", {})}
     return cfg
 
 
@@ -555,6 +634,16 @@ class AllPanelsFailed(RuntimeError):
         self.responses = responses
 
 
+def _effective_timeout(p: dict, settings: dict) -> float:
+    """A provider's per-call timeout, scaled by settings['timeout_scale'] (default
+    1). The timeout is a ceiling, so raising the scale never slows a fast call — it
+    only lets a genuinely slow one (e.g. `scry plan`'s web-researched final draft)
+    run longer before being killed. Interviews keep scale 1 so they stay fail-fast."""
+    base = float(p.get("timeout", 300))
+    scale = float(settings.get("timeout_scale", 1) or 1)
+    return base * scale
+
+
 def resolve_command(cmd0: str):
     """Resolve a provider command to a runnable path: PATH first, then a script
     sitting next to scry, then the cwd. Returning an absolute path lets a local
@@ -618,7 +707,7 @@ async def call_cli(cfg: dict, provider_name: str, model: str, system: str | None
         env.update(env_over)
         env["SCRY_DEPTH"] = str(depth + 1)  # recursion guard
 
-        timeout = float(p.get("timeout", 300))
+        timeout = _effective_timeout(p, settings)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv, stdin=asyncio.subprocess.PIPE,
@@ -792,8 +881,18 @@ def _failure_reason(failed: list) -> str:
 
 
 async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
-                   stream_final: bool = False, on_stream_start=None) -> dict:
-    cwd = tempfile.mkdtemp(prefix="scry-run-")  # clean cwd: no repo context bleed-in
+                   stream_final: bool = False, on_stream_start=None,
+                   aggregator_system: str | None = None,
+                   cwd: str | None = None) -> dict:
+    # The synthesis system prompt defaults to the canonical MoA aggregator; callers
+    # (e.g. `scry plan`) may override it to shape the fused output differently.
+    aggregator_system = aggregator_system or MOA_AGGREGATOR_SYSTEM
+    # By default fan out in a fresh scrubbed cwd (no repo-context bleed-in) and remove
+    # it after. A caller may pass an existing cwd (e.g. `scry plan --repo`, to let the
+    # panel read the codebase); that directory is the user's — NEVER delete it.
+    own_cwd = cwd is None
+    if own_cwd:
+        cwd = tempfile.mkdtemp(prefix="scry-run-")
     depth = int(os.environ.get("SCRY_DEPTH", "0") or "0")
     web = bool(settings.get("web_tools"))
     run_t0 = time.time()
@@ -889,14 +988,14 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
 
         async def _buffered() -> str:
             return await call_cli(cfg, a_prov, a.get("model", ""),
-                                  MOA_AGGREGATOR_SYSTEM, auser, cwd, depth, False, settings, ameta)
+                                  aggregator_system, auser, cwd, depth, False, settings, ameta)
 
         if can_stream:
             if on_stream_start:
                 on_stream_start()  # tear the orb down before the first token lands
             try:
                 r = await stream_call(cfg, a_prov, a.get("model", ""),
-                                      MOA_AGGREGATOR_SYSTEM, auser, cwd, depth, settings,
+                                      aggregator_system, auser, cwd, depth, settings,
                                       lambda d: (sys.stdout.write(d), sys.stdout.flush()))
                 final, streamed = r["text"], r["streamed"]
                 ameta.update(r.get("meta") or {})
@@ -925,7 +1024,8 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
             "cost": cost,
         }
     finally:
-        shutil.rmtree(cwd, ignore_errors=True)
+        if own_cwd:                       # never delete a caller-provided cwd
+            shutil.rmtree(cwd, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -1791,21 +1891,27 @@ def _scry_home() -> Path:
     return Path(os.environ.get("SCRY_HOME") or (Path.home() / ".scry"))
 
 
-def save_run(result: dict) -> None:
+def save_run(result: dict, run_id: str | None = None) -> str:
     """Persist a completed run for `scry last` / `scry log`. Best-effort: any
     failure here must never break a run that already produced an answer."""
     try:
         home = _scry_home()
         runs = home / "runs"
         runs.mkdir(parents=True, exist_ok=True)
-        ts_ms = int(time.time() * 1000)          # ms precision avoids same-second collisions
+        ts_ms = str(run_id) if run_id else str(int(time.time() * 1000))
+        # run_id is normally a ms timestamp string; tolerate a non-numeric id
+        # (e.g. --resume=<custom>) so a best-effort save never crashes a real run.
+        try:
+            ts_val = int(ts_ms) / 1000
+        except (ValueError, TypeError):
+            ts_val = time.time()
         path = runs / f"{ts_ms}.json"
         record = {k: v for k, v in result.items() if k != "streamed"}
-        record["ts"] = ts_ms / 1000
+        record["ts"] = ts_val
         path.write_text(json.dumps(record, ensure_ascii=False, indent=2))
         cost = result.get("cost") or {}
         summary = {
-            "ts": ts_ms / 1000, "file": path.name,
+            "ts": ts_val, "file": path.name,
             "prompt": (result.get("prompt") or "")[:200],
             "mode": result.get("mode"),
             "calls": cost.get("calls"), "cost_usd": cost.get("total_usd"),
@@ -1813,10 +1919,31 @@ def save_run(result: dict) -> None:
             "ok": sum(1 for r in result.get("responses", []) if r.get("ok")),
             "n": len(result.get("responses", [])),
         }
-        with (home / "history.jsonl").open("a") as f:
-            f.write(json.dumps(summary, ensure_ascii=False) + "\n")
+        if result.get("status") == "unfinished":
+            summary["unfinished"] = True
+
+        # Rewrite history.jsonl, dropping any prior entry for THIS run's file so a
+        # resumable session's repeated checkpoints collapse to a single line. Written
+        # atomically (temp + os.replace) so a crash mid-write can't truncate history.
+        hist_path = home / "history.jsonl"
+        kept = []
+        if hist_path.exists():
+            for ln in hist_path.read_text().splitlines():
+                if not ln.strip():
+                    continue
+                try:
+                    if json.loads(ln).get("file") == path.name:
+                        continue          # superseded by this save
+                except ValueError:
+                    pass                  # keep unparseable lines verbatim
+                kept.append(ln)
+        kept.append(json.dumps(summary, ensure_ascii=False))
+        tmp = hist_path.with_suffix(".jsonl.tmp")
+        tmp.write_text("\n".join(kept) + "\n")
+        os.replace(tmp, hist_path)
+        return ts_ms
     except OSError:
-        pass
+        return run_id or ""
 
 
 def _read_history() -> list:
@@ -1868,6 +1995,513 @@ def do_history(cmd: str, rest: list) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- #
+# Plan mode (`scry plan`) — an interactive, panel-driven planning loop. Every
+# round the WHOLE panel proposes clarifying questions; the judge deduplicates them
+# (merging duplicates and dropping already-answered ones, but surfacing every
+# distinct question — no ranking); they're asked one at a time; answers accumulate;
+# rounds repeat until the panel is confident (or the user types `done`); then the
+# normal fusion pipeline drafts and fuses a structured Markdown plan.
+# --------------------------------------------------------------------------- #
+
+def render_plan_prompt(request: str, transcript: list) -> str:
+    """The original request plus the accumulated Q&A, rendered for model prompts.
+    `transcript` is a list of {"q","a"} dicts in ask order. The Q&A is labelled as
+    data (it embeds prior model output + user answers — keep the framing explicit)."""
+    out = [f"Original request:\n{request}"]
+    if transcript:
+        qa = "\n".join(f"Q{i + 1}: {t['q']}\nA{i + 1}: {t['a']}"
+                       for i, t in enumerate(transcript))
+        out.append("Clarifying questions already answered:\n" + qa)
+    else:
+        out.append("No clarifying questions have been answered yet.")
+    return "\n\n".join(out)
+
+
+def _qkey(q: dict) -> str:
+    """A normalized key for a question dict — the dedup identity (lowercased text)."""
+    return str(q.get("q", "")).strip().lower()
+
+
+def _local_dedup(questions: list) -> list:
+    """Deterministic fallback dedup: drop blanks and case-insensitive repeats,
+    preserving first-seen order. Used when the judge can't produce usable JSON."""
+    seen, out = set(), []
+    for q in questions:
+        key = _qkey(q)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(q)
+    return out
+
+
+def _questions_of(obj) -> list:
+    """Pull a clean question list out of a parsed interviewer/judge object: keep
+    only dicts with non-empty `q`. Tolerates a missing/None/non-list `questions`."""
+    qs = obj.get("questions") if isinstance(obj, dict) else None
+    if not isinstance(qs, list):
+        return []
+    return [q for q in qs if isinstance(q, dict) and str(q.get("q", "")).strip()]
+
+
+async def gather_questions(cfg: dict, request: str, transcript: list,
+                           settings: dict, log, meters: list, depth: int,
+                           cwd: str) -> tuple:
+    """Fan the interviewer prompt out to the WHOLE panel in parallel. Returns
+    (raw_questions, all_ready): the flat concatenation of every model's proposed
+    questions, and True iff every model that responded set ready=true with no
+    questions. Mirrors scry_run's panel loop — one bad/non-JSON model is logged and
+    contributes nothing, but never aborts the round (and never counts as ready)."""
+    panel = cfg.get("panel", [])
+    web = bool(settings.get("web_tools"))
+    user = (render_plan_prompt(request, transcript)
+            + "\n\nWhat clarifying questions do you still need? Reply with the JSON object.")
+
+    async def ask_one(m: dict) -> dict:
+        label = m.get("label", m["provider"])
+        cmeta: dict = {}
+        try:
+            txt = await call_cli(cfg, m["provider"], m.get("model", ""),
+                                 PLAN_INTERVIEWER_SYSTEM, user, cwd, depth,
+                                 web, settings, cmeta)
+            obj = tolerant_json(txt) or {}
+            qs = _questions_of(obj)
+            ready = bool(obj.get("ready")) and not qs
+            log(f"  ✓ {label}: {len(qs)} question(s)" + (" · ready" if ready else ""))
+            meters.append({"stage": "interview", "label": label,
+                           "provider": m["provider"], "ok": True, **cmeta})
+            return {"ok": True, "ready": ready, "questions": qs}
+        except Exception as e:  # noqa: BLE001 — one bad interviewer must not abort
+            log(f"  ✗ {label}: {e}")
+            meters.append({"stage": "interview", "label": label,
+                           "provider": m["provider"], "ok": False})
+            return {"ok": False, "ready": False, "questions": []}
+
+    results = await asyncio.gather(*(ask_one(m) for m in panel))
+    raw = [q for r in results for q in r["questions"]]
+    responders = [r for r in results if r["ok"]]
+    all_ready = bool(responders) and all(r["ready"] for r in responders)
+    return raw, all_ready
+
+
+async def dedup_questions(cfg: dict, request: str, transcript: list, raw: list,
+                          settings: dict, log, meters: list, depth: int,
+                          cwd: str) -> list:
+    """Ask the judge to merge duplicate questions and drop already-answered ones,
+    preserving every distinct question (no ranking). Short-circuits with no model
+    call when there's nothing to merge. On a judge error or unusable JSON, falls
+    back to a deterministic local dedup so we never crash or silently drop work."""
+    if len(raw) <= 1:
+        return list(raw)
+    j = cfg["judge"]
+    payload = json.dumps({"proposed_questions": raw}, ensure_ascii=False)
+    juser = (render_plan_prompt(request, transcript)
+             + "\n\nNewly proposed clarifying questions (JSON):\n" + payload
+             + "\n\nReturn the deduplicated JSON object.")
+    jmeta: dict = {}
+    try:
+        txt = await call_cli(cfg, j["provider"], j.get("model", ""),
+                             PLAN_QUESTION_JUDGE_SYSTEM, juser, cwd, depth,
+                             False, settings, jmeta)  # dedup never needs web
+        meters.append({"stage": "dedup", "label": "dedup",
+                       "provider": j["provider"], "ok": True, **jmeta})
+        qs = _questions_of(tolerant_json(txt))
+        if qs:
+            return qs
+        log("  ! dedup returned nothing usable; using raw questions")
+    except Exception as e:  # noqa: BLE001
+        log(f"  ! dedup failed: {e}; using raw questions")
+        meters.append({"stage": "dedup", "label": "dedup",
+                       "provider": j["provider"], "ok": False})
+    return _local_dedup(raw)
+
+
+# Typing this as any answer ends the interview early and jumps to synthesis.
+PLAN_DONE_SENTINEL = "done"
+
+
+def _ask_plan(prompt: str) -> tuple:
+    """Read one plan answer. Returns (text, done). EOF (piped input exhausted /
+    Ctrl-D) and the literal `done` both mean "stop asking". Unlike `_ask`, EOF is
+    distinguished from an empty line so an exhausted stdin can't spin the loop. The
+    prompt is written to stderr (not stdout) so the plan/JSON on stdout stays clean."""
+    sys.stderr.write(prompt)
+    sys.stderr.flush()
+    try:
+        raw = input()
+    except EOFError:
+        return "", True
+    if raw.strip().lower() == PLAN_DONE_SENTINEL:
+        return "", True
+    return raw, False
+
+
+def ask_questions_interactively(questions: list, asked_keys: set, save_cb=None) -> tuple:
+    """Ask each not-yet-asked question one at a time, grill-me style. Numbered
+    multiple choice when `options` is present (a number selects, anything else is
+    free text); otherwise free text. Returns (qa_pairs, done); `done` is True if the
+    user typed `done` or hit EOF. Each presented question's key is added to
+    `asked_keys` so it is never re-surfaced in a later round. All prompts go to
+    stderr — stdout carries only the final plan/JSON."""
+    qa: list = []
+    color = color_enabled(sys.stderr)
+    for q in questions:
+        key = _qkey(q)
+        if not key or key in asked_keys:
+            continue
+        text = str(q.get("q", "")).strip()
+        why = str(q.get("why", "")).strip()
+        raw_opts = q.get("options")
+        opts = ([str(o).strip() for o in raw_opts if str(o).strip()]
+                if isinstance(raw_opts, list) else [])
+        # Natural reading order: question, then rationale, then options, then prompt.
+        print(f"\x1b[1m{text}\x1b[0m" if color else text, file=sys.stderr)
+        if why:
+            print(f"\x1b[2m({why})\x1b[0m" if color else f"({why})", file=sys.stderr)
+        if opts:
+            for i, o in enumerate(opts, 1):
+                print(f"  {i}. {o}", file=sys.stderr)
+            ans, done = _ask_plan(
+                f"[1-{len(opts)}, or type your own; "
+                f"'{PLAN_DONE_SENTINEL}' to finish]: ")
+            if done:
+                return qa, True
+            s = ans.strip()
+            if s.isdigit() and 1 <= int(s) <= len(opts):
+                ans = opts[int(s) - 1]
+        else:
+            ans, done = _ask_plan(f"['{PLAN_DONE_SENTINEL}' to finish]: ")
+            if done:
+                return qa, True
+        asked_keys.add(key)
+        qa.append({"q": text, "a": ans})
+        if save_cb:
+            save_cb(qa)
+    return qa, False
+
+
+def do_plan_list(as_json: bool = False) -> int:
+    # Same store `--resume` reads: unfinished plan-mode entries from history.jsonl,
+    # in append order (each checkpoint re-appends its entry, so the LAST line is the
+    # most recently saved session).
+    candidates = [e for e in _read_history()
+                  if e.get("unfinished") and e.get("mode", "plan") == "plan"]
+
+    sessions = []
+    home = _scry_home()
+    for e in candidates:
+        fname = e.get("file")          # already carries the `.json` suffix
+        if not fname:
+            continue
+        p = home / "runs" / fname
+        if not p.exists():
+            continue
+        try:
+            state = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        if state.get("status") != "unfinished" or state.get("mode", "plan") != "plan":
+            continue
+
+        try:
+            updated = p.stat().st_mtime   # true last-updated; the stored `ts` is
+        except OSError:                   # frozen at creation and goes stale on resume
+            updated = state.get("ts", e.get("ts", 0))
+
+        display_id = fname[:-5] if fname.endswith(".json") else fname
+        sessions.append({
+            "id": display_id,                                   # usable as --resume=<id>
+            "updated": updated,
+            "prompt": state.get("prompt", e.get("prompt", "")),
+            "rounds": state.get("rounds", 1),
+            "answered": len(state.get("transcript", [])),
+            "interview_done": state.get("interview_done", False),
+        })
+
+    if not sessions:
+        if as_json:
+            print("[]")
+        else:
+            print("scry: no unfinished plan sessions", file=sys.stderr)
+        return 0
+
+    # Most-recently-saved first, matching what `scry plan --resume` (no id) resumes
+    # (unfinished[-1]). NOT sorted by the frozen creation `ts`, which would put a
+    # resumed-but-older session in the wrong place.
+    sessions.reverse()
+
+    if as_json:
+        print(json.dumps(sessions, indent=2))
+        return 0
+
+    for s in sessions:
+        when = time.strftime("%m-%d %H:%M", time.localtime(s["updated"]))
+        prompt = s["prompt"].replace("\n", " ")[:64]
+        print(f"{s['id']}  {when}  R{s['rounds']:<2}  {s['answered']:>2}Q  {prompt}")
+
+    return 0
+
+
+def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
+            out: str | None = None, no_anim: bool = False, quiet: bool = False,
+            as_json: bool = False, no_save: bool = False, resume: str | bool = False,
+            repo_context: bool = True) -> int:
+    """The interactive `scry plan` loop. Each round the whole panel proposes
+    clarifying questions, the judge dedups them, and they're asked one at a time;
+    rounds repeat until the panel is confident, the user types `done`, or the
+    max-rounds cap is hit. Then the fusion pipeline drafts and fuses a Markdown plan
+    (reusing scry_run with a plan-specific aggregator prompt). With repo_context the
+    panel runs (read-only) in the invocation directory so plans are grounded in the
+    actual code; the final draft gets a longer timeout for its web-researched output."""
+    t0 = time.time()
+    max_rounds = max(1, int(plan_settings.get("max_rounds", 6) or 6))
+    final_timeout_scale = float(plan_settings.get("final_timeout_scale", 3) or 1)
+    # repo_context: let the panel read the directory `scry plan` was launched in
+    # (read-only — mutators stay disabled). None => each fan-out gets a scrubbed temp
+    # cwd, as normal runs do. A provided repo cwd is the user's — never deleted.
+    repo_cwd = os.getcwd() if repo_context else None
+    # Clarifying questions are about the user's intent, not external facts, so the
+    # interview rounds default to web OFF (cheaper, faster) regardless of `settings`.
+    isettings = dict(settings)
+    isettings["web_tools"] = bool(plan_settings.get("interview_web", False))
+
+    reduced_motion = no_anim or ("SCRY_NO_ANIM" in os.environ)
+    # A fresh orb is built per fan-out and fully stopped before any input() — the
+    # orb hides the cursor and repaints stderr on a thread, so it must never be live
+    # while we read an answer. Gate on stdin too (unlike the run path, plan reads it).
+    animate = (not quiet and not reduced_motion and color_enabled(sys.stderr)
+               and sys.stderr.isatty() and sys.stdin.isatty())
+    orb = None
+    orb_stopped = {"v": True}
+
+    def stop_orb() -> None:
+        if orb is not None and not orb_stopped["v"]:
+            orb.stop()
+            orb_stopped["v"] = True
+
+    def start_orb(caption: str) -> None:
+        nonlocal orb
+        if not animate:
+            return
+        orb = ScryingOrb()
+        orb_stopped["v"] = False
+        orb.start(caption)
+
+    def log(msg: str) -> None:
+        if quiet:
+            return
+        if orb is None or orb_stopped["v"]:
+            print(msg, file=sys.stderr, flush=True)
+            return
+        s = msg.strip()
+        if s.startswith("▸"):
+            orb.set_caption(s.lstrip("▸").strip())
+        else:
+            orb.note(msg)
+
+    transcript: list = []
+    asked_keys: set = set()
+    meters: list = []
+    depth = int(os.environ.get("SCRY_DEPTH", "0") or "0")
+    start_round = 1
+    pending_qs = None
+    all_ready = False
+    interview_done = False
+    run_id = None
+
+    if resume:
+        try:
+            home = _scry_home()
+            target_id = resume if isinstance(resume, str) else None
+            p = None
+            if target_id:
+                p = home / "runs" / f"{target_id}.json"
+                if not p.exists():
+                    p = home / "runs" / target_id
+            else:
+                history = _read_history()
+                unfinished = [e for e in history if e.get("unfinished")]
+                if unfinished:
+                    last = unfinished[-1]
+                    p = home / "runs" / (last.get("file") or "")
+            
+            if not p or not p.exists():
+                print("scry: no unfinished plan session found to resume", file=sys.stderr)
+                return 1
+                
+            state = json.loads(p.read_text())
+            if state.get("status") != "unfinished" and not target_id:
+                print("scry: no unfinished plan session found to resume", file=sys.stderr)
+                return 1
+                
+            if request and state.get("prompt") and request != state.get("prompt"):
+                print("scry: cannot combine --resume with a new prompt", file=sys.stderr)
+                return 1
+                
+            request = state.get("prompt", "")
+            transcript = state.get("transcript", [])
+            asked_keys = set(state.get("asked_keys", []))
+            meters = state.get("meters", [])
+            start_round = state.get("rounds", 1)
+            pending_qs = state.get("pending_qs")
+            all_ready = state.get("all_ready", False)
+            interview_done = state.get("interview_done", False)
+            run_id = p.stem
+        except OSError:
+            print("scry: no unfinished plan session found to resume", file=sys.stderr)
+            return 1
+        except ValueError:
+            print("scry: corrupted plan session file", file=sys.stderr)
+            return 1
+    else:
+        run_id = str(int(time.time() * 1000))
+
+    def _save_state(qa_so_far: list = None) -> None:
+        if no_save:
+            return
+        result = {
+            "mode": "plan",
+            "status": "unfinished",
+            "prompt": request,
+            "transcript": transcript + (qa_so_far or []),
+            "asked_keys": list(asked_keys),
+            "meters": meters,
+            "rounds": round_no,
+            "pending_qs": pending_qs,
+            "all_ready": all_ready,
+            "interview_done": interview_done,
+            "cost": summarize_cost(meters, time.time() - t0),
+        }
+        save_run(result, run_id)
+
+    async def _round(cwd: str) -> tuple:
+        log("▸ panel: gathering clarifying questions…")
+        raw, all_ready = await gather_questions(
+            cfg, request, transcript, isettings, log, meters, depth, cwd)
+        if all_ready or not raw:
+            return [], all_ready
+        log("▸ judge: deduplicating questions…")
+        deduped = await dedup_questions(
+            cfg, request, transcript, raw, isettings, log, meters, depth, cwd)
+        return deduped, all_ready
+
+    round_no = start_round
+    try:
+        if interview_done:
+            pass  # jump straight to plan synthesis
+        else:
+            for round_no in range(start_round, max_rounds + 1):
+                _save_state()
+                if pending_qs is not None:
+                    deduped = pending_qs
+                    pending_qs = None
+                else:
+                    own_cwd = repo_cwd is None
+                    cwd = tempfile.mkdtemp(prefix="scry-plan-") if own_cwd else repo_cwd
+                    try:
+                        start_orb(f"round {round_no}: consulting the panel…")
+                        try:
+                            deduped, all_ready = asyncio.run(_round(cwd))
+                        finally:
+                            stop_orb()  # cursor restored before we read any answer
+                    finally:
+                        if own_cwd:          # never delete the user's repo cwd
+                            shutil.rmtree(cwd, ignore_errors=True)
+                
+                pending_qs = deduped
+                _save_state()
+
+                new_qs = [q for q in deduped if _qkey(q) not in asked_keys]
+                if all_ready or not new_qs:
+                    log("▸ the panel is confident — drafting the plan…")
+                    pending_qs = None
+                    interview_done = True
+                    _save_state()
+                    break
+                hdr = f"Round {round_no} — {len(new_qs)} question(s):"
+                print("\n" + (f"\x1b[1m{hdr}\x1b[0m"
+                              if color_enabled(sys.stderr) else hdr), file=sys.stderr)
+                qa, done = ask_questions_interactively(new_qs, asked_keys, save_cb=_save_state)
+                transcript.extend(qa)
+                pending_qs = None
+                if done:
+                    interview_done = True
+                _save_state()
+                if done:
+                    log("▸ done — drafting the plan with what we have…")
+                    break
+            else:
+                log(f"▸ reached the {max_rounds}-round cap — drafting the plan…")
+                interview_done = True
+                _save_state()
+
+        # Final plan: reuse the fusion pipeline (panel drafts → judge compares →
+        # synthesis) with the plan-specific aggregator prompt, on the enriched request.
+        # The final draft is web-on and long-form (slow), so give it a higher timeout
+        # ceiling; it runs in the repo cwd too so the drafts can read the code.
+        stream_final = (not as_json and not quiet and sys.stdout.isatty())
+        fsettings = dict(settings)
+        if final_timeout_scale and final_timeout_scale != 1:
+            fsettings["timeout_scale"] = final_timeout_scale
+        start_orb("synthesizing the plan…")
+        try:
+            result = asyncio.run(scry_run(
+                cfg, render_plan_prompt(request, transcript), "fusion",
+                fsettings, log, stream_final, stop_orb,
+                aggregator_system=PLAN_SYNTH_SYSTEM, cwd=repo_cwd))
+        finally:
+            stop_orb()
+    except AllPanelsFailed as e:
+        stop_orb()
+        if as_json:
+            print(json.dumps({"status": "error", "failure_reason": e.failure_reason,
+                              "responses": [{"model": r["label"], "ok": r["ok"],
+                                             "error": r["error"]} for r in e.responses]},
+                             indent=2))
+        else:
+            print(f"scry: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        stop_orb()
+        return 130
+
+    # Plan-specific record fields. Keep the ORIGINAL request as `prompt` so
+    # `scry log`/`scry last` read cleanly (the enriched prompt rides only in the
+    # model calls). The full Q&A transcript is saved alongside.
+    result["mode"] = "plan"
+    result["prompt"] = request
+    result["transcript"] = transcript
+    result["rounds"] = round_no
+    final_meters = meters + (result.get("cost", {}).get("by_stage") or [])
+    result["cost"] = summarize_cost(final_meters, time.time() - t0)
+
+    plan_md = result.get("final") or ""
+    cost = result.get("cost")
+    if cost and not as_json and not quiet:
+        print(format_cost_tally(cost, color_enabled(sys.stderr)), file=sys.stderr)
+
+    if out:
+        try:
+            p = Path(out)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(plan_md + "\n")        # only written once synthesis succeeded
+            msg = f"✓ wrote plan to {out}"
+            print(f"\x1b[32m{msg}\x1b[0m" if color_enabled(sys.stderr) else msg,
+                  file=sys.stderr)
+        except OSError as e:
+            print(f"scry: could not write {out}: {e}", file=sys.stderr)
+
+    if settings.get("save_history", True) and not no_save:
+        save_run(result, run_id)
+
+    if as_json:
+        print(json.dumps({k: v for k, v in result.items() if k != "streamed"},
+                         ensure_ascii=False, indent=2))
+    elif not result.get("streamed"):
+        print(plan_md)
+    return 0
+
+
 def main() -> int:
     # History sub-commands: `scry last`, `scry log [N]`. Intercepted before
     # argparse, and only when unambiguous (no extra words/flags) so a real prompt
@@ -1915,7 +2549,8 @@ def main() -> int:
                     help="never print the consensus map")
     ap.add_argument("--config", help="path to a config.json")
     ap.add_argument("--out", help="(with `init`) path to write the generated config "
-                    "(default: the global ~/.config/scry/config.json, or ./scry.config.json with --local)")
+                    "(default: the global ~/.config/scry/config.json, or ./scry.config.json with --local); "
+                    "(with `plan`) path to write the generated Markdown plan")
     ap.add_argument("--local", action="store_true",
                     help="(with `init`) write a project-local ./scry.config.json in the current "
                          "directory instead of the global ~/.config/scry/config.json")
@@ -1929,6 +2564,14 @@ def main() -> int:
     ap.add_argument("--quiet", action="store_true", help="suppress progress on stderr")
     ap.add_argument("--no-save", action="store_true",
                     help="don't record this run to ~/.scry (scry last / scry log)")
+    ap.add_argument("--max-rounds", type=int, metavar="N",
+                    help="(with `plan`) cap interactive clarifying rounds (default 6)")
+    ap.add_argument("--resume", nargs="?", const=True, default=False,
+                    help="(with `plan`) continue the most recent unfinished plan session (or --resume=<id>)")
+    ap.add_argument("--list", action="store_true",
+                    help="(with `plan`) list unfinished, resumable plan sessions")
+    ap.add_argument("--no-repo", action="store_true",
+                    help="(with `plan`) don't give the panel read-only access to the current directory")
     ap.add_argument("--version", action="version", version=f"scry {VERSION}")
     args = ap.parse_args()
 
@@ -1941,6 +2584,39 @@ def main() -> int:
     # `scry update` — fetch the latest single-file build and swap it in place.
     if args.prompt[:1] == ["update"]:
         return do_update(args.force)
+
+    # `scry plan "<request>"` — the interactive, panel-driven planning loop. The
+    # request is the remaining positionals; stdin is reserved for the user's answers
+    # (never read as the request, unlike a normal query) so piped answers work.
+    if args.prompt[:1] == ["plan"]:
+        if args.list:
+            return do_plan_list(as_json=args.as_json)
+        if args.panel:
+            cfg["panel"] = parse_panel(args.panel)
+        if args.aggregator:
+            cfg["aggregator"] = parse_member(args.aggregator)
+        if args.judge:
+            cfg["judge"] = parse_member(args.judge)
+        psettings = dict(cfg["settings"])
+        if args.no_web:
+            psettings["web_tools"] = False
+        if args.effort:
+            psettings["effort"] = args.effort
+        if args.max_tool_calls is not None:
+            psettings["max_tool_calls"] = args.max_tool_calls
+        if args.max_output_tokens is not None:
+            psettings["max_output_tokens"] = args.max_output_tokens
+        plan_settings = dict(cfg.get("plan", {}))
+        if args.max_rounds is not None:
+            plan_settings["max_rounds"] = args.max_rounds
+        repo_context = (not args.no_repo) and bool(plan_settings.get("repo_context", True))
+        request = " ".join(args.prompt[1:]).strip()
+        if not request and not args.resume:
+            ap.error('plan needs a request, e.g.  scry plan "build X"')
+        return do_plan(cfg, request, psettings, plan_settings, out=args.out,
+                       no_anim=args.no_anim, quiet=args.quiet,
+                       as_json=args.as_json, no_save=args.no_save, resume=args.resume,
+                       repo_context=repo_context)
 
     if args.panel:
         cfg["panel"] = parse_panel(args.panel)

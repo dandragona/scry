@@ -342,6 +342,12 @@ DEFAULT_CONFIG = {
         # → slow). A ceiling, so it never slows the fast web-off interview rounds; it
         # just lets the patient final synthesis finish instead of timing out.
         "final_timeout_scale": 3,
+        # Multiply the tool-call/turn cap (max_tool_calls -> claude's --max-turns)
+        # for the FINAL plan draft only. That draft is web-on and reads the repo, so
+        # 8 turns is often too few — opus exhausts them researching and Claude Code
+        # returns is_error/error_max_turns (surfaced as "model error: exit 1"). 3x
+        # (8 -> 24) gives it room; the web-off interview rounds are unaffected.
+        "final_tool_call_scale": 3,
     },
 }
 
@@ -2242,10 +2248,124 @@ def do_plan_list(as_json: bool = False) -> int:
     return 0
 
 
+def _diag_path(plan_path: str) -> str:
+    """The diagnostics file that rides alongside a plan file: strip a trailing
+    `.md` and append `.diagnostics.md` (so `foo/plan.md` -> `foo/plan.diagnostics.md`;
+    an extension-less path just gets the suffix appended)."""
+    base = plan_path[:-3] if plan_path.endswith(".md") else plan_path
+    return base + ".diagnostics.md"
+
+
+def _final_draft_settings(settings: dict, plan_settings: dict) -> dict:
+    """Settings for the FINAL plan draft (web-on, long-form, tool-heavy). It scales
+    the per-call timeout (final_timeout_scale) AND the tool-call/turn cap
+    (final_tool_call_scale) up from the interview defaults, so the patient final
+    synthesis can finish researching without tripping claude's `--max-turns` cap
+    (the usual cause of an opus 'exit 1' on the draft). Both default to 3x; a scale
+    of 1 is a no-op. Never mutates the input."""
+    f = dict(settings)
+    tscale = float(plan_settings.get("final_timeout_scale", 3) or 1)
+    cscale = float(plan_settings.get("final_tool_call_scale", 3) or 1)
+    if tscale and tscale != 1:
+        f["timeout_scale"] = tscale
+    mtc = f.get("max_tool_calls")
+    if mtc and cscale and cscale != 1:
+        f["max_tool_calls"] = int(mtc * cscale)
+    return f
+
+
+def render_plan_diagnostics(result: dict, cfg: dict, settings: dict,
+                            plan_settings: dict, run_id: str) -> str:
+    """A human-readable Markdown diagnostics report written alongside the plan:
+    per-stage model status/cost (so a failed panel member — e.g. an opus draft that
+    hit the turn cap — is visible at a glance), the settings the run used, and the
+    judge's consensus map. Plain Markdown, no ANSI."""
+    cost = result.get("cost") or {}
+    # Per-panel error text + timing live on `responses`, not the cost meters.
+    err_by_label = {r.get("model"): r.get("error")
+                    for r in result.get("responses", [])
+                    if not r.get("ok") and r.get("error")}
+    secs_by_label = {r.get("model"): r.get("seconds")
+                     for r in result.get("responses", [])}
+
+    def _money(c) -> str:
+        return (f"${c:.4f}" if isinstance(c, (int, float))
+                and not isinstance(c, bool) else "—")
+
+    def _member(x) -> str:
+        if not isinstance(x, dict):
+            return str(x) if x else ""
+        return x.get("label") or (x.get("provider", "")
+                                  + (f":{x['model']}" if x.get("model") else ""))
+
+    lines = ["# scry plan — diagnostics", ""]
+    lines.append(f"- **request:** {result.get('prompt', '')}")
+    lines.append(f"- **run id:** {run_id}")
+    lines.append(f"- **rounds:** {result.get('rounds', '')}")
+    if cost.get("seconds") is not None:
+        lines.append(f"- **elapsed:** {cost['seconds']}s")
+    lines.append(f"- **total cost:** {_money(cost.get('total_usd'))}")
+    lines.append("")
+
+    # Per-stage model table — every call across the pipeline, status before detail
+    # so a FAILED row jumps out.
+    lines += ["## models", "",
+              "| stage | model | status | time | tokens | cost | detail |",
+              "|---|---|---|---|---|---|---|"]
+    for m in cost.get("by_stage", []):
+        label = m.get("label", "")
+        ok = m.get("ok", True)
+        is_panel = m.get("stage") == "panel"
+        secs = secs_by_label.get(label) if is_panel else None
+        time_s = f"{secs}s" if secs is not None else ""
+        detail = err_by_label.get(label, "") if (is_panel and not ok) else ""
+        lines.append(
+            f"| {m.get('stage', '')} | {label} | {'ok' if ok else 'FAILED'} | "
+            f"{time_s} | {_ktok(m.get('output_tokens'))} | "
+            f"{_money(m.get('cost_usd'))} | {detail} |")
+    lines.append("")
+
+    # Settings the run used — the cap is the crux of the opus failure, so show both
+    # the base value and the scaled final-draft value.
+    fset = _final_draft_settings(settings, plan_settings)
+    base_mtc, final_mtc = settings.get("max_tool_calls"), fset.get("max_tool_calls")
+    cap_line = f"- **max_tool_calls:** {base_mtc}"
+    if final_mtc is not None and final_mtc != base_mtc:
+        cap_line += f"  (final draft: {final_mtc})"
+    lines += ["## settings", "",
+              f"- **panel:** {', '.join(_member(m) for m in cfg.get('panel', []))}",
+              f"- **judge:** {_member(cfg.get('judge'))}",
+              f"- **aggregator:** {_member(cfg.get('aggregator'))}",
+              cap_line,
+              f"- **web_tools:** {bool(settings.get('web_tools'))}",
+              f"- **effort:** {settings.get('effort') or 'default'}",
+              f"- **final_timeout_scale:** {plan_settings.get('final_timeout_scale', 3)}",
+              f"- **final_tool_call_scale:** {plan_settings.get('final_tool_call_scale', 3)}",
+              ""]
+
+    # Consensus map (the judge's 5-field analysis), rendered as Markdown.
+    analysis = result.get("analysis")
+    if isinstance(analysis, dict):
+        map_lines = []
+        for key, _glyph, label, _code in _MAP_FIELDS:
+            items = analysis.get(key) or []
+            if not isinstance(items, list):
+                items = [items]
+            items = [str(x).strip() for x in items if str(x).strip()]
+            if not items:
+                continue
+            map_lines.append(f"### {label}")
+            map_lines += [f"- {it}" for it in items]
+            map_lines.append("")
+        if map_lines:
+            lines += ["## consensus map", ""] + map_lines
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
             out: str | None = None, no_anim: bool = False, quiet: bool = False,
             as_json: bool = False, no_save: bool = False, resume: str | bool = False,
-            repo_context: bool = True) -> int:
+            repo_context: bool = True, no_out: bool = False) -> int:
     """The interactive `scry plan` loop. Each round the whole panel proposes
     clarifying questions, the judge dedups them, and they're asked one at a time;
     rounds repeat until the panel is confident, the user types `done`, or the
@@ -2255,7 +2375,6 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
     actual code; the final draft gets a longer timeout for its web-researched output."""
     t0 = time.time()
     max_rounds = max(1, int(plan_settings.get("max_rounds", 6) or 6))
-    final_timeout_scale = float(plan_settings.get("final_timeout_scale", 3) or 1)
     # repo_context: let the panel read the directory `scry plan` was launched in
     # (read-only — mutators stay disabled). None => each fan-out gets a scrubbed temp
     # cwd, as normal runs do. A provided repo cwd is the user's — never deleted.
@@ -2440,9 +2559,10 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
         # The final draft is web-on and long-form (slow), so give it a higher timeout
         # ceiling; it runs in the repo cwd too so the drafts can read the code.
         stream_final = (not as_json and not quiet and sys.stdout.isatty())
-        fsettings = dict(settings)
-        if final_timeout_scale and final_timeout_scale != 1:
-            fsettings["timeout_scale"] = final_timeout_scale
+        # The final draft is web-on, long-form and tool-heavy: scale BOTH its timeout
+        # and its tool-call/turn cap up (see _final_draft_settings) so opus doesn't
+        # trip claude's --max-turns and fail with "model error: exit 1".
+        fsettings = _final_draft_settings(settings, plan_settings)
         start_orb("synthesizing the plan…")
         try:
             result = asyncio.run(scry_run(
@@ -2480,16 +2600,30 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
     if cost and not as_json and not quiet:
         print(format_cost_tally(cost, color_enabled(sys.stderr)), file=sys.stderr)
 
-    if out:
-        try:
-            p = Path(out)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(plan_md + "\n")        # only written once synthesis succeeded
-            msg = f"✓ wrote plan to {out}"
-            print(f"\x1b[32m{msg}\x1b[0m" if color_enabled(sys.stderr) else msg,
-                  file=sys.stderr)
-        except OSError as e:
-            print(f"scry: could not write {out}: {e}", file=sys.stderr)
+    # Writing the plan + a diagnostics file is the default; --out overrides the path,
+    # --no-out suppresses both (print-to-stdout only). The diagnostics file rides
+    # alongside the plan so a failed panel member (e.g. an opus draft that hit the
+    # turn cap) is visible without digging through ~/.scry.
+    if not no_out:
+        plan_path = out or f"scry-plan-{run_id}.md"
+        diag_path = _diag_path(plan_path)
+
+        def _write(path: str, body: str, label: str) -> None:
+            try:
+                p = Path(path)
+                if p.parent != Path(""):
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(body)
+                msg = f"✓ wrote {label} to {path}"
+                print(f"\x1b[32m{msg}\x1b[0m" if color_enabled(sys.stderr) else msg,
+                      file=sys.stderr)
+            except OSError as e:
+                print(f"scry: could not write {path}: {e}", file=sys.stderr)
+
+        _write(plan_path, plan_md + "\n", "plan")  # only reached once synthesis succeeded
+        _write(diag_path,
+               render_plan_diagnostics(result, cfg, settings, plan_settings, run_id),
+               "diagnostics")
 
     if settings.get("save_history", True) and not no_save:
         save_run(result, run_id)
@@ -2550,7 +2684,10 @@ def main() -> int:
     ap.add_argument("--config", help="path to a config.json")
     ap.add_argument("--out", help="(with `init`) path to write the generated config "
                     "(default: the global ~/.config/scry/config.json, or ./scry.config.json with --local); "
-                    "(with `plan`) path to write the generated Markdown plan")
+                    "(with `plan`) path to write the Markdown plan (default: "
+                    "./scry-plan-<id>.md); a <plan>.diagnostics.md is written alongside it")
+    ap.add_argument("--no-out", action="store_true",
+                    help="(with `plan`) don't write the plan or diagnostics files; print to stdout only")
     ap.add_argument("--local", action="store_true",
                     help="(with `init`) write a project-local ./scry.config.json in the current "
                          "directory instead of the global ~/.config/scry/config.json")
@@ -2616,7 +2753,7 @@ def main() -> int:
         return do_plan(cfg, request, psettings, plan_settings, out=args.out,
                        no_anim=args.no_anim, quiet=args.quiet,
                        as_json=args.as_json, no_save=args.no_save, resume=args.resume,
-                       repo_context=repo_context)
+                       repo_context=repo_context, no_out=args.no_out)
 
     if args.panel:
         cfg["panel"] = parse_panel(args.panel)

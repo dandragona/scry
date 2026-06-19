@@ -387,6 +387,47 @@ class PlanSubprocessTest(unittest.TestCase):
         self.assertIn("## Context", written)
         self.assertIn("## Context", cp.stdout)         # still printed too
 
+    # ----- default: writes plan + diagnostics into the cwd (no --out) ------- #
+    def test_default_writes_plan_and_diagnostics_to_cwd(self):
+        d = tempfile.mkdtemp(prefix="scry-plan-cwd-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        env = self._env(h.claude_plan(rounds_before_ready=1))
+        cp = h.run_scry(self._args(), input="linux\nok\n", env=env, cwd=d)
+        self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
+        files = os.listdir(d)
+        plans = [f for f in files if f.startswith("scry-plan-")
+                 and f.endswith(".md") and not f.endswith(".diagnostics.md")]
+        diags = [f for f in files if f.endswith(".diagnostics.md")]
+        self.assertEqual(len(plans), 1, files)
+        self.assertEqual(len(diags), 1, files)
+        with open(os.path.join(d, plans[0])) as f:
+            self.assertIn("## Context", f.read())
+        with open(os.path.join(d, diags[0])) as f:
+            diag = f.read()
+        self.assertIn("diagnostics", diag.lower())
+        self.assertIn("## settings", diag)
+
+    # ----- --no-out: print only, leave no files behind --------------------- #
+    def test_no_out_writes_nothing(self):
+        d = tempfile.mkdtemp(prefix="scry-plan-noout-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        env = self._env(h.claude_plan(rounds_before_ready=1))
+        cp = h.run_scry(self._args("--no-out"), input="linux\nok\n", env=env, cwd=d)
+        self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
+        self.assertEqual([f for f in os.listdir(d) if f.startswith("scry-plan-")], [])
+        self.assertIn("## Context", cp.stdout)            # still printed to stdout
+
+    # ----- --out: diagnostics file rides alongside the plan ---------------- #
+    def test_out_writes_diagnostics_alongside(self):
+        d = tempfile.mkdtemp(prefix="scry-plan-out-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        out = os.path.join(d, "myplan.md")
+        env = self._env(h.claude_plan(rounds_before_ready=1))
+        cp = h.run_scry(self._args("--out", out), input="linux\nok\n", env=env, cwd=d)
+        self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
+        self.assertTrue(os.path.exists(out))
+        self.assertTrue(os.path.exists(os.path.join(d, "myplan.diagnostics.md")))
+
     # ----- history records mode "plan"; `scry last` reprints it ------------- #
     def test_history_saved_as_plan_mode(self):
         home = tempfile.mkdtemp(prefix="scry-home-")
@@ -652,6 +693,125 @@ class PlanListSubprocessTest(unittest.TestCase):
         cp = self._list(env=self._env())   # empty StubBins → no model could be spawned
         self.assertEqual(cp.returncode, 0, cp.stderr)
         self.assertIn("1700000000999", cp.stdout)
+
+
+# --------------------------------------------------------------------------- #
+# Pure helpers for the default-output + diagnostics feature:
+#   _diag_path             — derive the diagnostics path from the plan path
+#   _final_draft_settings  — scale max_tool_calls + timeout for the final draft
+#   render_plan_diagnostics — the human-readable .diagnostics.md body
+# --------------------------------------------------------------------------- #
+class DiagPathTest(unittest.TestCase):
+    def setUp(self):
+        self.scry = h.load_scry()
+
+    def test_replaces_md_extension(self):
+        self.assertEqual(self.scry._diag_path("plan.md"), "plan.diagnostics.md")
+
+    def test_keeps_directory(self):
+        self.assertEqual(self.scry._diag_path("a/b/plan.md"),
+                         "a/b/plan.diagnostics.md")
+
+    def test_appends_when_no_md_extension(self):
+        self.assertEqual(self.scry._diag_path("plan"), "plan.diagnostics.md")
+
+    def test_default_id_filename(self):
+        self.assertEqual(self.scry._diag_path("scry-plan-123.md"),
+                         "scry-plan-123.diagnostics.md")
+
+
+class FinalDraftSettingsTest(unittest.TestCase):
+    def setUp(self):
+        self.scry = h.load_scry()
+
+    def test_scales_cap_and_sets_timeout(self):
+        f = self.scry._final_draft_settings(
+            {"max_tool_calls": 8},
+            {"final_timeout_scale": 3, "final_tool_call_scale": 3})
+        self.assertEqual(f["max_tool_calls"], 24)
+        self.assertEqual(f["timeout_scale"], 3)
+
+    def test_scale_of_one_leaves_cap_unchanged(self):
+        f = self.scry._final_draft_settings(
+            {"max_tool_calls": 8},
+            {"final_timeout_scale": 1, "final_tool_call_scale": 1})
+        self.assertEqual(f["max_tool_calls"], 8)
+
+    def test_missing_cap_is_not_invented(self):
+        f = self.scry._final_draft_settings({}, {"final_tool_call_scale": 3})
+        self.assertNotIn("max_tool_calls", f)
+
+    def test_defaults_to_triple_when_unset(self):
+        # An empty plan-settings dict still applies the built-in 3x default.
+        f = self.scry._final_draft_settings({"max_tool_calls": 8}, {})
+        self.assertEqual(f["max_tool_calls"], 24)
+
+    def test_does_not_mutate_input(self):
+        base = {"max_tool_calls": 8}
+        self.scry._final_draft_settings(base, {"final_tool_call_scale": 3})
+        self.assertEqual(base, {"max_tool_calls": 8})
+
+
+class RenderPlanDiagnosticsTest(unittest.TestCase):
+    def setUp(self):
+        self.scry = h.load_scry()
+        self.result = {
+            "mode": "plan",
+            "prompt": "build a rate limiter",
+            "rounds": 2,
+            "responses": [
+                {"model": "claude-opus", "content": "", "ok": False,
+                 "error": "model error: exit 1", "seconds": 4.2},
+                {"model": "codex-gpt", "content": "draft", "ok": True,
+                 "error": "", "seconds": 101.0},
+            ],
+            "analysis": {"consensus": ["c1"], "contradictions": ["x1"],
+                         "partial_coverage": [], "unique_insights": [],
+                         "blind_spots": []},
+            "cost": {"total_usd": 0.12, "seconds": 110.0, "by_stage": [
+                {"stage": "panel", "label": "claude-opus", "ok": False,
+                 "output_tokens": 0},
+                {"stage": "panel", "label": "codex-gpt", "ok": True,
+                 "output_tokens": 1500, "cost_usd": 0.05},
+                {"stage": "synth", "label": "synth", "ok": True,
+                 "output_tokens": 2000, "cost_usd": 0.07},
+            ]},
+        }
+        self.cfg = {"panel": [{"label": "claude-opus"}, {"label": "codex-gpt"}],
+                    "judge": {"provider": "claude", "model": "opus"},
+                    "aggregator": {"provider": "claude", "model": "opus"}}
+        self.settings = {"max_tool_calls": 8, "web_tools": True, "effort": None}
+        self.plan_settings = {"final_timeout_scale": 3, "final_tool_call_scale": 3}
+
+    def _render(self):
+        return self.scry.render_plan_diagnostics(
+            self.result, self.cfg, self.settings, self.plan_settings,
+            "1700000000001")
+
+    def test_header_has_request_and_run_id(self):
+        md = self._render()
+        self.assertIn("diagnostics", md.lower())
+        self.assertIn("build a rate limiter", md)
+        self.assertIn("1700000000001", md)
+
+    def test_failed_model_row_shows_error(self):
+        md = self._render()
+        self.assertIn("claude-opus", md)
+        self.assertIn("model error: exit 1", md)
+        self.assertIn("FAILED", md)
+
+    def test_ok_model_listed(self):
+        self.assertIn("codex-gpt", self._render())
+
+    def test_settings_show_base_and_scaled_cap(self):
+        md = self._render()
+        self.assertIn("final draft: 24", md)        # 8 * 3
+        self.assertIn("final_tool_call_scale", md)
+
+    def test_consensus_map_rendered(self):
+        md = self._render()
+        self.assertIn("c1", md)
+        self.assertIn("x1", md)
 
 
 if __name__ == "__main__":

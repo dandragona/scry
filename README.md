@@ -188,7 +188,8 @@ Verification / Risks`).
 
 ```sh
 scry plan "add rate limiting to my API"     # interactive: answer questions one at a time
-scry plan "..." --out plan.md               # also write the plan to a file
+scry plan "..." --out plan.md               # write the plan to a chosen path (default: ./scry-plan-<id>.md)
+scry plan "..." --no-out                    # don't write any files; print to stdout only
 scry plan "..." --max-rounds 3              # cap the clarifying rounds (default 6)
 scry plan "..." --json                      # {mode:"plan", transcript, rounds, final, ...}
 scry plan --resume                          # continue the most recent interrupted session
@@ -198,10 +199,15 @@ scry plan "..." --no-repo                   # don't let the panel read the curre
 ```
 
 The plan prints to stdout (pipeable) and is saved to history — `scry last` re-prints it. Progress and
-the clarifying questions go to stderr, so a redirected/piped stdout stays clean. The clarifying-question
-rounds run with web tools **off** by default (they're about your intent, not external facts; configurable
-via `plan.interview_web`); the final plan drafting uses web per your normal settings. Tune defaults with
-the top-level `plan` config block (`max_rounds`, `interview_web`, `repo_context`, `final_timeout_scale`).
+the clarifying questions go to stderr, so a redirected/piped stdout stays clean. By default it also writes
+two files next to where you run it: the plan (`./scry-plan-<id>.md`, or your `--out PATH`) and a
+human-readable **diagnostics file** alongside it (`<plan>.diagnostics.md`) — a per-stage table of which
+models ran, their status/timing/cost, **any failures** (e.g. a panel member that errored), the settings the
+run used, and the judge's consensus map. Pass `--no-out` to skip both and print to stdout only. The
+clarifying-question rounds run with web tools **off** by default (they're about your intent, not external
+facts; configurable via `plan.interview_web`); the final plan drafting uses web per your normal settings.
+Tune defaults with the top-level `plan` config block (`max_rounds`, `interview_web`, `repo_context`,
+`final_timeout_scale`, `final_tool_call_scale`).
 
 **Repo-aware by default.** Unlike a normal `scry` run (which fans out in a scrubbed temp cwd), `scry plan`
 gives the panel **read-only** access to the directory you launch it in, so the plan is grounded in your
@@ -211,7 +217,10 @@ repo directly.
 
 **Patient final draft.** The interview rounds stay fast (web-off, fail-fast), but the final web-researched
 draft gets a longer timeout ceiling (`plan.final_timeout_scale`, default 3×) so it finishes instead of
-timing out. A higher ceiling never slows the fast interview calls.
+timing out, **and** a larger tool-call/turn budget (`plan.final_tool_call_scale`, default 3× → 24): that
+draft is web-on and reads your repo, so the base cap of 8 turns is often too few — a model can exhaust it
+mid-research and fail (claude surfaces this as `model error: exit 1`). Both scales apply only to the final
+draft and never slow the fast interview calls.
 
 **Resumable.** Every plan run checkpoints its transcript after each answer; if one is interrupted (Ctrl-C,
 a crash, a failed draft), `scry plan --resume` continues it from where it stopped — replaying your answers,
@@ -222,7 +231,8 @@ the round it reached, how many questions you answered, and the original request.
 | Flag | Effect (with `plan`) |
 |---|---|
 | `--max-rounds N` | cap interactive clarifying rounds (default 6; the hard backstop on cost) |
-| `--out PATH` | also write the generated Markdown plan to `PATH` |
+| `--out PATH` | write the Markdown plan to `PATH` (default `./scry-plan-<id>.md`); a `<plan>.diagnostics.md` is written alongside |
+| `--no-out` | don't write the plan or diagnostics files; print to stdout only |
 | `--resume[=<id>]` | continue the most recent (or a specific) unfinished planning session |
 | `--list` | list unfinished, resumable sessions (free — reads history, runs no models) |
 | `--no-repo` | don't give the panel read-only access to the current directory |

@@ -6,7 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **`scry plan` no longer intermittently fails its claude/opus draft with
+  `model error: exit 1`.** The final plan draft is web-on and reads the repo, so it
+  runs as an agentic tool-use loop; the base cap of 8 tool calls (claude's
+  `--max-turns`) was often too few — opus would exhaust it mid-research and Claude
+  Code returned `is_error`/`error_max_turns` with no result. The final draft now gets
+  a scaled tool-call budget (`plan.final_tool_call_scale`, default 3× → 24), mirroring
+  the existing `final_timeout_scale`. Interview rounds (web-off) are unaffected.
+
 ### Changed
+- **`scry plan` writes its output by default.** It now saves the plan to
+  `./scry-plan-<id>.md` (override with `--out PATH`) plus a diagnostics file alongside
+  it, instead of only printing to stdout. Pass `--no-out` for the old print-only
+  behavior.
 - **Config is global-first.** The canonical config lives once per computer at
   `~/.config/scry/config.json`; a project that needs a different panel opts in with a
   `./scry.config.json` (which overrides the global config when `scry` runs from that
@@ -21,6 +34,11 @@ All notable changes to this project are documented here. The format follows
   its name: gaze into the orb, see one answer from many models.
 
 ### Added
+- **`scry plan` diagnostics file.** Every plan run now writes a human-readable
+  `<plan>.diagnostics.md` next to the plan: a per-stage table of which models ran,
+  their status/timing/cost, **any failures** (so a panel member that errored is visible
+  at a glance), the settings the run used (including the base and scaled tool-call cap),
+  and the judge's consensus map. Suppress with `--no-out`.
 - **Moonshot Kimi provider (`kimi`)** — fan a prompt out to Kimi via the Kimi CLI in
   headless print mode (`kimi --quiet`), authenticated with `kimi login` (Kimi Code
   OAuth — reuses your membership, no API key). Uses your account's default model

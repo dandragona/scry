@@ -34,6 +34,14 @@ All notable changes to this project are documented here. The format follows
   its name: gaze into the orb, see one answer from many models.
 
 ### Added
+- **`/scry-plan` Claude Code skill + `scry plan --step` protocol.** Run the full
+  panel-driven planning interview from inside Claude Code: the panel's clarifying
+  questions are relayed to you as native question cards, your answers feed back round
+  by round, then scry drafts a repo-grounded plan + diagnostics. The skill drives a new
+  headless `scry plan --step --json` protocol — each call reads an optional answers
+  payload on stdin (`{"answers":[{"q","a"}],"done":bool}`) and prints one JSON envelope
+  (`questions` / `ready` / `done` / `error`), carrying state between calls via the
+  existing resume checkpoints. The installer now drops both `/scry` and `/scry-plan`.
 - **`scry plan` diagnostics file.** Every plan run now writes a human-readable
   `<plan>.diagnostics.md` next to the plan: a per-stage table of which models ran,
   their status/timing/cost, **any failures** (so a panel member that errored is visible

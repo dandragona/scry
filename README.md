@@ -133,6 +133,13 @@ agent's tool output is just hundreds of lines of escape codes burning tokens, so
 turns it off and returns only the fused answer. Ask for "where do they disagree?" and it adds
 the consensus map. (Source: [`.claude/skills/scry/SKILL.md`](.claude/skills/scry/SKILL.md).)
 
+A second skill, **`/scry-plan <request>`**, runs the full panel-driven planning mode (below)
+from inside Claude Code: the panel's clarifying questions are relayed to you as native
+question cards, your answers feed back round by round, and scry drafts a repo-grounded plan +
+diagnostics. It drives scry's headless `scry plan --step` JSON protocol (one round per call,
+state carried via resume checkpoints).
+(Source: [`.claude/skills/scry-plan/SKILL.md`](.claude/skills/scry-plan/SKILL.md).)
+
 ## Usage
 
 ```sh

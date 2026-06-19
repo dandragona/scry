@@ -2362,6 +2362,107 @@ def render_plan_diagnostics(result: dict, cfg: dict, settings: dict,
     return "\n".join(lines).rstrip() + "\n"
 
 
+class PlanResumeError(Exception):
+    """A --resume could not be satisfied (no session, mismatched prompt, corrupt
+    file). Carries a user-facing message; the caller decides how to surface it."""
+
+
+def _load_plan_session(resume: str | bool, request: str) -> dict:
+    """Load a resumable plan checkpoint, or initialize a fresh session when `resume`
+    is falsy. Returns a state dict (request, transcript, asked_keys, meters,
+    start_round, pending_qs, all_ready, interview_done, run_id). Raises
+    PlanResumeError(message) when a requested resume can't be honored. Shared by the
+    interactive `do_plan` and the headless `do_plan_step` so both read/write the same
+    checkpoint format."""
+    state = {
+        "request": request, "transcript": [], "asked_keys": set(), "meters": [],
+        "start_round": 1, "pending_qs": None, "all_ready": False,
+        "interview_done": False, "run_id": str(int(time.time() * 1000)),
+    }
+    if not resume:
+        return state
+    home = _scry_home()
+    target_id = resume if isinstance(resume, str) else None
+    p = None
+    if target_id:
+        p = home / "runs" / f"{target_id}.json"
+        if not p.exists():
+            p = home / "runs" / target_id
+    else:
+        unfinished = [e for e in _read_history() if e.get("unfinished")]
+        if unfinished:
+            p = home / "runs" / (unfinished[-1].get("file") or "")
+    if not p or not p.exists():
+        raise PlanResumeError("no unfinished plan session found to resume")
+    try:
+        st = json.loads(p.read_text())
+    except OSError:
+        raise PlanResumeError("no unfinished plan session found to resume")
+    except ValueError:
+        raise PlanResumeError("corrupted plan session file")
+    if st.get("status") != "unfinished" and not target_id:
+        raise PlanResumeError("no unfinished plan session found to resume")
+    if request and st.get("prompt") and request != st.get("prompt"):
+        raise PlanResumeError("cannot combine --resume with a new prompt")
+    state.update({
+        "request": st.get("prompt", ""),
+        "transcript": st.get("transcript", []),
+        "asked_keys": set(st.get("asked_keys", [])),
+        "meters": st.get("meters", []),
+        "start_round": st.get("rounds", 1),
+        "pending_qs": st.get("pending_qs"),
+        "all_ready": st.get("all_ready", False),
+        "interview_done": st.get("interview_done", False),
+        "run_id": p.stem,
+    })
+    return state
+
+
+def _plan_result_fields(result: dict, request: str, transcript: list,
+                        round_no: int, meters: list, t0: float) -> dict:
+    """Stamp the plan-specific fields onto a finished fusion `result` (original
+    request as `prompt`, the Q&A transcript, round count, and a cost roll-up that
+    folds the interview meters into the draft's). Shared finalize step."""
+    result["mode"] = "plan"
+    result["prompt"] = request
+    result["transcript"] = transcript
+    result["rounds"] = round_no
+    final_meters = meters + (result.get("cost", {}).get("by_stage") or [])
+    result["cost"] = summarize_cost(final_meters, time.time() - t0)
+    return result
+
+
+def _write_plan_files(plan_md: str, result: dict, cfg: dict, settings: dict,
+                      plan_settings: dict, run_id: str, out: str | None,
+                      announce) -> tuple:
+    """Write the plan (`out` or ./scry-plan-<id>.md) and its diagnostics file
+    alongside it. `announce` is an optional callable(msg) for the per-file status
+    line (None = silent, for headless callers). Returns (plan_path, diag_path), with
+    a path set to None if that write failed."""
+    plan_path = out or f"scry-plan-{run_id}.md"
+    diag_path = _diag_path(plan_path)
+
+    def _w(path: str, body: str, label: str):
+        try:
+            p = Path(path)
+            if p.parent != Path(""):
+                p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(body)
+            if announce:
+                announce(f"✓ wrote {label} to {path}")
+            return path
+        except OSError as e:
+            if announce:
+                announce(f"scry: could not write {path}: {e}")
+            return None
+
+    pp = _w(plan_path, plan_md + "\n", "plan")  # only reached once synthesis succeeded
+    dp = _w(diag_path,
+            render_plan_diagnostics(result, cfg, settings, plan_settings, run_id),
+            "diagnostics")
+    return pp, dp
+
+
 def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
             out: str | None = None, no_anim: bool = False, quiet: bool = False,
             as_json: bool = False, no_save: bool = False, resume: str | bool = False,
@@ -2418,62 +2519,21 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
         else:
             orb.note(msg)
 
-    transcript: list = []
-    asked_keys: set = set()
-    meters: list = []
     depth = int(os.environ.get("SCRY_DEPTH", "0") or "0")
-    start_round = 1
-    pending_qs = None
-    all_ready = False
-    interview_done = False
-    run_id = None
-
-    if resume:
-        try:
-            home = _scry_home()
-            target_id = resume if isinstance(resume, str) else None
-            p = None
-            if target_id:
-                p = home / "runs" / f"{target_id}.json"
-                if not p.exists():
-                    p = home / "runs" / target_id
-            else:
-                history = _read_history()
-                unfinished = [e for e in history if e.get("unfinished")]
-                if unfinished:
-                    last = unfinished[-1]
-                    p = home / "runs" / (last.get("file") or "")
-            
-            if not p or not p.exists():
-                print("scry: no unfinished plan session found to resume", file=sys.stderr)
-                return 1
-                
-            state = json.loads(p.read_text())
-            if state.get("status") != "unfinished" and not target_id:
-                print("scry: no unfinished plan session found to resume", file=sys.stderr)
-                return 1
-                
-            if request and state.get("prompt") and request != state.get("prompt"):
-                print("scry: cannot combine --resume with a new prompt", file=sys.stderr)
-                return 1
-                
-            request = state.get("prompt", "")
-            transcript = state.get("transcript", [])
-            asked_keys = set(state.get("asked_keys", []))
-            meters = state.get("meters", [])
-            start_round = state.get("rounds", 1)
-            pending_qs = state.get("pending_qs")
-            all_ready = state.get("all_ready", False)
-            interview_done = state.get("interview_done", False)
-            run_id = p.stem
-        except OSError:
-            print("scry: no unfinished plan session found to resume", file=sys.stderr)
-            return 1
-        except ValueError:
-            print("scry: corrupted plan session file", file=sys.stderr)
-            return 1
-    else:
-        run_id = str(int(time.time() * 1000))
+    try:
+        st = _load_plan_session(resume, request)
+    except PlanResumeError as e:
+        print(f"scry: {e}", file=sys.stderr)
+        return 1
+    request = st["request"]
+    transcript = st["transcript"]
+    asked_keys = st["asked_keys"]
+    meters = st["meters"]
+    start_round = st["start_round"]
+    pending_qs = st["pending_qs"]
+    all_ready = st["all_ready"]
+    interview_done = st["interview_done"]
+    run_id = st["run_id"]
 
     def _save_state(qa_so_far: list = None) -> None:
         if no_save:
@@ -2588,12 +2648,7 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
     # Plan-specific record fields. Keep the ORIGINAL request as `prompt` so
     # `scry log`/`scry last` read cleanly (the enriched prompt rides only in the
     # model calls). The full Q&A transcript is saved alongside.
-    result["mode"] = "plan"
-    result["prompt"] = request
-    result["transcript"] = transcript
-    result["rounds"] = round_no
-    final_meters = meters + (result.get("cost", {}).get("by_stage") or [])
-    result["cost"] = summarize_cost(final_meters, time.time() - t0)
+    _plan_result_fields(result, request, transcript, round_no, meters, t0)
 
     plan_md = result.get("final") or ""
     cost = result.get("cost")
@@ -2605,25 +2660,11 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
     # alongside the plan so a failed panel member (e.g. an opus draft that hit the
     # turn cap) is visible without digging through ~/.scry.
     if not no_out:
-        plan_path = out or f"scry-plan-{run_id}.md"
-        diag_path = _diag_path(plan_path)
-
-        def _write(path: str, body: str, label: str) -> None:
-            try:
-                p = Path(path)
-                if p.parent != Path(""):
-                    p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(body)
-                msg = f"✓ wrote {label} to {path}"
-                print(f"\x1b[32m{msg}\x1b[0m" if color_enabled(sys.stderr) else msg,
-                      file=sys.stderr)
-            except OSError as e:
-                print(f"scry: could not write {path}: {e}", file=sys.stderr)
-
-        _write(plan_path, plan_md + "\n", "plan")  # only reached once synthesis succeeded
-        _write(diag_path,
-               render_plan_diagnostics(result, cfg, settings, plan_settings, run_id),
-               "diagnostics")
+        def _announce(msg: str) -> None:
+            colored = (msg.startswith("✓") and color_enabled(sys.stderr))
+            print(f"\x1b[32m{msg}\x1b[0m" if colored else msg, file=sys.stderr)
+        _write_plan_files(plan_md, result, cfg, settings, plan_settings, run_id,
+                          out, _announce)
 
     if settings.get("save_history", True) and not no_save:
         save_run(result, run_id)
@@ -2633,6 +2674,144 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
                          ensure_ascii=False, indent=2))
     elif not result.get("streamed"):
         print(plan_md)
+    return 0
+
+
+def _plan_step_finalize(cfg: dict, request: str, transcript: list, settings: dict,
+                        plan_settings: dict, run_id: str, meters: list, t0: float,
+                        repo_cwd: str | None, out: str | None, no_out: bool,
+                        no_save: bool, round_no: int) -> int:
+    """Draft the plan from the gathered transcript and print the terminal `done`
+    envelope (or an `error` envelope, exit 1, if every panel draft fails). Writes the
+    plan + diagnostics files unless no_out, and records the finished run to history."""
+    try:
+        result = asyncio.run(scry_run(
+            cfg, render_plan_prompt(request, transcript), "fusion",
+            _final_draft_settings(settings, plan_settings), lambda _m: None,
+            aggregator_system=PLAN_SYNTH_SYSTEM, cwd=repo_cwd))
+    except AllPanelsFailed as e:
+        print(json.dumps({"status": "error", "error": str(e),
+                          "responses": [{"model": r["label"], "ok": r["ok"],
+                                         "error": r["error"]} for r in e.responses]},
+                         ensure_ascii=False))
+        return 1
+    _plan_result_fields(result, request, transcript, round_no, meters, t0)
+    plan_md = result.get("final") or ""
+    plan_path = diag_path = None
+    if not no_out:
+        plan_path, diag_path = _write_plan_files(
+            plan_md, result, cfg, settings, plan_settings, run_id, out, None)
+    if settings.get("save_history", True) and not no_save:
+        save_run(result, run_id)
+    print(json.dumps({"status": "done", "id": run_id, "final": plan_md,
+                      "plan_path": plan_path, "diagnostics_path": diag_path,
+                      "responses": result.get("responses"),
+                      "cost": result.get("cost")}, ensure_ascii=False))
+    return 0
+
+
+def do_plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *,
+                 resume: str | bool = False, no_save: bool = False,
+                 repo_context: bool = True, out: str | None = None,
+                 no_out: bool = False) -> int:
+    """One headless, JSON-driven step of the plan interview — the protocol the
+    /scry-plan skill uses to drive full plan mode from inside Claude Code. Never
+    animates or blocks on interactive input. Reads an optional answers payload on
+    stdin (`{"answers":[{"q","a"}],"done":bool}`), advances the interview by one
+    round via the existing resume checkpoints, and prints exactly one JSON envelope:
+
+      {"status":"questions","id","round","questions":[{q,why,options}]}  answer & repeat
+      {"status":"ready","id"}                          send {"done":true} to draft
+      {"status":"done","id","final","plan_path","diagnostics_path","responses","cost"}
+      {"status":"error","error"}                       (exit 1)
+    """
+    t0 = time.time()
+    max_rounds = max(1, int(plan_settings.get("max_rounds", 6) or 6))
+    repo_cwd = os.getcwd() if repo_context else None
+    isettings = dict(settings)
+    isettings["web_tools"] = bool(plan_settings.get("interview_web", False))
+    depth = int(os.environ.get("SCRY_DEPTH", "0") or "0")
+    log = lambda _m: None  # noqa: E731 — headless: keep stdout to the JSON envelope
+
+    try:
+        st = _load_plan_session(resume, request)
+    except PlanResumeError as e:
+        print(json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False))
+        return 1
+    request = st["request"]
+    transcript = st["transcript"]
+    asked_keys = st["asked_keys"]
+    meters = st["meters"]
+    interview_done = st["interview_done"]
+    run_id = st["run_id"]
+    rounds_done = st["start_round"] if resume else 0   # question-rounds emitted so far
+
+    # Optional answers payload on stdin (never block on a tty).
+    raw_in = ""
+    try:
+        if not sys.stdin.isatty():
+            raw_in = sys.stdin.read()
+    except (OSError, ValueError):
+        raw_in = ""
+    try:
+        payload = json.loads(raw_in) if raw_in.strip() else {}
+    except ValueError:
+        print(json.dumps({"status": "error",
+                          "error": "answers payload is not valid JSON"}))
+        return 1
+    if not isinstance(payload, dict):
+        payload = {}
+    done = bool(payload.get("done"))
+    for qa in (payload.get("answers") or []):
+        q = str(qa.get("q", "")).strip()
+        if not q:
+            continue
+        transcript.append({"q": q, "a": str(qa.get("a", "")).strip()})
+        asked_keys.add(_qkey({"q": q}))
+
+    def _checkpoint(pending_qs, done_flag) -> None:
+        if no_save:
+            return
+        save_run({"mode": "plan", "status": "unfinished", "prompt": request,
+                  "transcript": transcript, "asked_keys": list(asked_keys),
+                  "meters": meters, "rounds": rounds_done, "pending_qs": pending_qs,
+                  "all_ready": False, "interview_done": done_flag,
+                  "cost": summarize_cost(meters, time.time() - t0)}, run_id)
+
+    # Finalize: draw the plan when asked, when the interview is already done, or when
+    # the round cap is reached.
+    if done or interview_done or rounds_done >= max_rounds:
+        return _plan_step_finalize(cfg, request, transcript, settings, plan_settings,
+                                   run_id, meters, t0, repo_cwd, out, no_out, no_save,
+                                   rounds_done)
+
+    # Otherwise gather the next round of clarifying questions.
+    own_cwd = repo_cwd is None
+    cwd = tempfile.mkdtemp(prefix="scry-plan-") if own_cwd else repo_cwd
+    try:
+        raw, all_ready = asyncio.run(gather_questions(
+            cfg, request, transcript, isettings, log, meters, depth, cwd))
+        if all_ready or not raw:
+            deduped = []
+        else:
+            deduped = asyncio.run(dedup_questions(
+                cfg, request, transcript, raw, isettings, log, meters, depth, cwd))
+    except AllPanelsFailed as e:
+        print(json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False))
+        return 1
+    finally:
+        if own_cwd:
+            shutil.rmtree(cwd, ignore_errors=True)
+
+    new_qs = [q for q in deduped if _qkey(q) not in asked_keys]
+    if all_ready or not new_qs:
+        _checkpoint(None, True)          # interview over — ready to draft
+        print(json.dumps({"status": "ready", "id": run_id}, ensure_ascii=False))
+        return 0
+    rounds_done += 1
+    _checkpoint(deduped, False)
+    print(json.dumps({"status": "questions", "id": run_id, "round": rounds_done,
+                      "questions": new_qs}, ensure_ascii=False))
     return 0
 
 
@@ -2688,6 +2867,10 @@ def main() -> int:
                     "./scry-plan-<id>.md); a <plan>.diagnostics.md is written alongside it")
     ap.add_argument("--no-out", action="store_true",
                     help="(with `plan`) don't write the plan or diagnostics files; print to stdout only")
+    ap.add_argument("--step", action="store_true",
+                    help="(with `plan`) headless one-round JSON interview step for orchestration "
+                         "(the /scry-plan skill); reads an answers payload on stdin, prints one "
+                         "JSON envelope, never prompts")
     ap.add_argument("--local", action="store_true",
                     help="(with `init`) write a project-local ./scry.config.json in the current "
                          "directory instead of the global ~/.config/scry/config.json")
@@ -2750,6 +2933,11 @@ def main() -> int:
         request = " ".join(args.prompt[1:]).strip()
         if not request and not args.resume:
             ap.error('plan needs a request, e.g.  scry plan "build X"')
+        if args.step:
+            return do_plan_step(cfg, request, psettings, plan_settings,
+                                resume=args.resume, no_save=args.no_save,
+                                repo_context=repo_context, out=args.out,
+                                no_out=args.no_out)
         return do_plan(cfg, request, psettings, plan_settings, out=args.out,
                        no_anim=args.no_anim, quiet=args.quiet,
                        as_json=args.as_json, no_save=args.no_save, resume=args.resume,

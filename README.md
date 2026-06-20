@@ -86,12 +86,21 @@ One line (stdlib-only, so there's nothing to build):
 curl -fsSL https://raw.githubusercontent.com/dandragona/scry/main/install.sh | sh
 ```
 
-Or by hand — it's a single file:
+It installs into a **user-owned** directory — `~/.local/bin` by default, like `rustup`/`uv`/`pipx`
+— so **no `sudo`** is ever needed to install, update, or run it. If that dir isn't on your `PATH`,
+the installer prints the exact `export PATH=…` line to add (it never edits your shell files).
+Pick a different location with `INSTALL_DIR=~/bin`.
+
+Or by hand — it's a single file (keep it somewhere you own, e.g. `~/.local/bin`):
 
 ```sh
-chmod +x scry
-sudo mkdir -p /usr/local/bin && sudo ln -sf "$PWD/scry" /usr/local/bin/scry   # or copy anywhere on PATH
+mkdir -p ~/.local/bin
+install -m 755 scry ~/.local/bin/scry          # 755 so the interpreter can read it
+install -m 755 scry-deepseek ~/.local/bin/      # only needed for the DeepSeek provider
 ```
+
+> Avoid `sudo`-installing into `/usr/local/bin`: a root-owned scry then needs `sudo` to update,
+> and (installed mode 711) can even be unreadable by your user. Keep it user-owned.
 
 Then set up your panel and confirm your CLIs are logged in (both spend nothing):
 
@@ -108,11 +117,12 @@ scry update     # fetch the latest single-file build and swap it in place
 
 `scry update` downloads the newest `scry` from GitHub, verifies it's complete and
 valid (length, entry point, and that it compiles), and **atomically** replaces your
-installed copy — preserving the executable bit. It won't install a truncated download
-or an older version (pass `--force` to downgrade). No `sudo` needed unless scry lives
-in a system directory (e.g. `/usr/local/bin`), in which case it prints the exact
-elevated command to run. Honors the same `SCRY_REPO` / `SCRY_REF` / `SCRY_UPDATE_URL`
-overrides as the installer.
+installed copy — keeping it executable and forcing it world-readable (so an older,
+broken root-owned install self-heals). It won't install a truncated download or an
+older version (pass `--force` to downgrade). For a user-owned install (the default)
+no `sudo` is needed; if scry lives in a system directory it prints the exact elevated
+command. Honors the same `SCRY_REPO` / `SCRY_REF` / `SCRY_UPDATE_URL` overrides as
+the installer.
 
 `scry init` is optional — `scry` runs with built-in defaults — but it's the fastest way to
 compose a panel from the subscriptions you actually have (Kimi included).

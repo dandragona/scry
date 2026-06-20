@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **`scry` installed unreadable → `[Errno 13] Permission denied` / "needs sudo to run".**
+  `install.sh` set the binary's mode with `chmod +x` on a `mktemp` (0600) file, yielding
+  **711**. For a root-owned install in `/usr/local/bin` (the default, which needs sudo to
+  write), that's executable-but-not-*readable* by non-owners — and since `scry` is a Python
+  script the interpreter must read to run, plain `scry …` failed with `[Errno 13]` and only
+  `sudo scry` worked. `install.sh` now installs **755**, and `scry update` forces read bits
+  (`| 0o444`) on the swapped-in file so an existing broken install **self-heals** on the next
+  `scry update`.
 - **`scry plan` no longer intermittently fails its claude/opus draft with
   `model error: exit 1`.** The final plan draft is web-on and reads the repo, so it
   runs as an agentic tool-use loop; the base cap of 8 tool calls (claude's

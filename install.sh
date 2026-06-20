@@ -44,7 +44,12 @@ install_file() {
   head -n1 "$tmp" | grep -q 'python3' \
     || { rm -f "$tmp"; err "downloaded $name doesn't look like a scry script."; }
   $SUDO mv "$tmp" "$dest" || { rm -f "$tmp"; err "could not install $name to $INSTALL_DIR"; }
-  $SUDO chmod +x "$dest"  || err "could not make $dest executable"
+  # 755, not `+x`: scry is a Python script the interpreter must READ to run. mktemp
+  # makes the tempfile 0600, so a bare `chmod +x` yields 0711 — and when $dest is
+  # root-owned (a sudo install into /usr/local/bin), non-owners get execute-but-not-
+  # read, so `scry` fails with "[Errno 13] Permission denied" and only `sudo scry`
+  # works. World-readable (755) is required for a shared CLI script.
+  $SUDO chmod 755 "$dest" || err "could not make $dest executable"
   printf '  -> %s\n' "$dest"
 }
 

@@ -69,6 +69,22 @@ class TestUpdate(unittest.TestCase):
         self.assertNotEqual(self.copy.read_bytes(), self.orig_bytes)
         self.assertEqual(self.copy.read_bytes(), payload)
 
+    def test_upgrade_makes_file_world_readable(self):
+        # Regression: install.sh could leave scry mode 711 (root-owned → a python
+        # script non-owners can't READ, so the interpreter fails with Errno 13 and
+        # you're forced to `sudo scry`). An update must HEAL that, not preserve it:
+        # the swapped-in file must be readable by group + other.
+        import stat
+        os.chmod(self.copy, 0o711)
+        payload = self._bump("99.0.0")
+        with h.FileServer(payload) as srv:
+            r = _run_update(self.copy, srv.url)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        mode = stat.S_IMODE(os.stat(self.copy).st_mode)
+        self.assertTrue(mode & stat.S_IRGRP, oct(mode))   # group can read
+        self.assertTrue(mode & stat.S_IROTH, oct(mode))   # other can read
+        self.assertTrue(mode & stat.S_IXUSR, oct(mode))   # still executable
+
     def test_downgrade_without_force_refused(self):
         payload = self._bump("0.0.1")
         with h.FileServer(payload) as srv:

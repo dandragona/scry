@@ -1626,8 +1626,12 @@ def do_update(force: bool = False) -> int:
         print("  Re-run with " + c("--force", "1") + " to install it anyway.")
         return 1
 
-    # Atomic, same-directory swap; preserve the existing mode (exec bit).
-    mode = os.stat(target).st_mode
+    # Atomic, same-directory swap; preserve the existing mode but FORCE read bits on
+    # for all (`| 0o444`). scry is a Python script the interpreter must be able to
+    # read to run; a root-owned, mode-711 install (install.sh's old `chmod +x` on a
+    # 0600 tempfile) is executable-but-unreadable for non-owners, so plain `scry`
+    # fails with Errno 13 and only `sudo scry` works. OR-ing in read self-heals that.
+    mode = os.stat(target).st_mode | 0o444
     tmp_name = None
     try:
         fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=".scry-update-")

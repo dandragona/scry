@@ -24,6 +24,14 @@ All notable changes to this project are documented here. The format follows
   the existing `final_timeout_scale`. Interview rounds (web-off) are unaffected.
 
 ### Changed
+- **The installer no longer uses `sudo` or installs into a system directory.** `install.sh`
+  now installs into a **user-owned** dir — `~/.local/bin` by default (override with
+  `INSTALL_DIR`), like `rustup`/`uv`/`pipx` — so install, update, and run never need
+  elevation, and the root-owned/unreadable failure mode can't occur. If the dir isn't on
+  `PATH` it prints the exact `export PATH=…` line to add (it never edits your shell files),
+  and it warns if an older `scry` earlier on `PATH` would shadow the new one. Covered by a
+  new sandboxed `tests/test_install.py` (runs the real installer with a `sudo` stub that
+  fails if invoked).
 - **`scry plan` writes its output by default.** It now saves the plan to
   `./scry-plan-<id>.md` (override with `--out PATH`) plus a diagnostics file alongside
   it, instead of only printing to stdout. Pass `--no-out` for the old print-only

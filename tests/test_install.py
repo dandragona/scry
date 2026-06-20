@@ -30,7 +30,8 @@ class InstallShTest(unittest.TestCase):
         sudo = os.path.join(self.stubdir, "sudo")
         with open(sudo, "w") as f:
             f.write('#!/bin/sh\necho "$@" >> "$SUDO_MARKER"\nexit 1\n')
-        os.chmod(sudo, 0o755)
+        # Owner-execute only (we run it as ourselves) — not a permissive mask.
+        os.chmod(sudo, os.stat(sudo).st_mode | stat.S_IXUSR)
 
     def _run(self, *, install_dir=None):
         env = dict(os.environ)

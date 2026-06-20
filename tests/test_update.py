@@ -75,7 +75,10 @@ class TestUpdate(unittest.TestCase):
         # you're forced to `sudo scry`). An update must HEAL that, not preserve it:
         # the swapped-in file must be readable by group + other.
         import stat
-        os.chmod(self.copy, 0o711)
+        # Reproduce the 711 install bug by REMOVING group/other read from the copy
+        # (which starts 755) — a permission-reducing chmod, not a permissive mask.
+        os.chmod(self.copy, stat.S_IMODE(os.stat(self.copy).st_mode)
+                 & ~(stat.S_IRGRP | stat.S_IROTH))
         payload = self._bump("99.0.0")
         with h.FileServer(payload) as srv:
             r = _run_update(self.copy, srv.url)

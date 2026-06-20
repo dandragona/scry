@@ -24,6 +24,13 @@ All notable changes to this project are documented here. The format follows
   the existing `final_timeout_scale`. Interview rounds (web-off) are unaffected.
 
 ### Changed
+- **`scry plan`'s final-draft timeout ceiling default raised 3× → 5×** (`plan.final_timeout_scale`).
+  The web-on, repo-reading final plan draft can legitimately run long — a deep opus draft exceeded
+  the old 3× (360s → 1080s) ceiling and got killed, silently dropping it from the fused plan. The
+  timeout is a *ceiling*, not a fixed wait, so this never slows panelists that finish quickly (e.g.
+  codex/gemini in well under a minute) — it only gives a slow one room to complete (360s → 1800s).
+  Override per-machine with `plan.final_timeout_scale`; the tool-call budget (`final_tool_call_scale`)
+  is unchanged at 3×.
 - **The installer no longer uses `sudo` or installs into a system directory.** `install.sh`
   now installs into a **user-owned** dir — `~/.local/bin` by default (override with
   `INSTALL_DIR`), like `rustup`/`uv`/`pipx` — so install, update, and run never need

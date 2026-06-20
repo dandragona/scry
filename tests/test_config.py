@@ -351,7 +351,7 @@ class TestLoadConfigPlanBlock(unittest.TestCase):
         self.assertEqual(cfg["plan"]["max_rounds"], 6)
         self.assertIs(cfg["plan"]["interview_web"], False)
         self.assertIs(cfg["plan"]["repo_context"], True)      # panel reads the repo
-        self.assertEqual(cfg["plan"]["final_timeout_scale"], 3)  # patient final draft
+        self.assertEqual(cfg["plan"]["final_timeout_scale"], 5)  # patient final draft
 
     def test_partial_plan_override_keeps_other_new_keys(self):
         scry = h.load_scry()
@@ -359,7 +359,7 @@ class TestLoadConfigPlanBlock(unittest.TestCase):
         cfg = scry.load_config(p)
         self.assertIs(cfg["plan"]["repo_context"], False)        # overridden
         self.assertEqual(cfg["plan"]["max_rounds"], 6)           # backfilled
-        self.assertEqual(cfg["plan"]["final_timeout_scale"], 3)  # backfilled
+        self.assertEqual(cfg["plan"]["final_timeout_scale"], 5)  # backfilled
 
     def test_config_without_plan_key_is_backfilled(self):
         scry = h.load_scry()

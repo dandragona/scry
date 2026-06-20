@@ -340,8 +340,10 @@ DEFAULT_CONFIG = {
         "repo_context": True,
         # Multiply provider timeouts for the FINAL plan draft only (web-on, long-form
         # → slow). A ceiling, so it never slows the fast web-off interview rounds; it
-        # just lets the patient final synthesis finish instead of timing out.
-        "final_timeout_scale": 3,
+        # just lets the patient final synthesis finish instead of timing out. 5x
+        # (360s base -> 1800s) — a deep opus web-on draft can run past the old 3x/1080s
+        # and get killed, silently dropping it from the fused plan.
+        "final_timeout_scale": 5,
         # Multiply the tool-call/turn cap (max_tool_calls -> claude's --max-turns)
         # for the FINAL plan draft only. That draft is web-on and reads the repo, so
         # 8 turns is often too few — opus exhausts them researching and Claude Code
@@ -2265,10 +2267,10 @@ def _final_draft_settings(settings: dict, plan_settings: dict) -> dict:
     the per-call timeout (final_timeout_scale) AND the tool-call/turn cap
     (final_tool_call_scale) up from the interview defaults, so the patient final
     synthesis can finish researching without tripping claude's `--max-turns` cap
-    (the usual cause of an opus 'exit 1' on the draft). Both default to 3x; a scale
-    of 1 is a no-op. Never mutates the input."""
+    (the usual cause of an opus 'exit 1' on the draft). final_timeout_scale defaults
+    to 5x, final_tool_call_scale to 3x; a scale of 1 is a no-op. Never mutates the input."""
     f = dict(settings)
-    tscale = float(plan_settings.get("final_timeout_scale", 3) or 1)
+    tscale = float(plan_settings.get("final_timeout_scale", 5) or 1)
     cscale = float(plan_settings.get("final_tool_call_scale", 3) or 1)
     if tscale and tscale != 1:
         f["timeout_scale"] = tscale
@@ -2343,7 +2345,7 @@ def render_plan_diagnostics(result: dict, cfg: dict, settings: dict,
               cap_line,
               f"- **web_tools:** {bool(settings.get('web_tools'))}",
               f"- **effort:** {settings.get('effort') or 'default'}",
-              f"- **final_timeout_scale:** {plan_settings.get('final_timeout_scale', 3)}",
+              f"- **final_timeout_scale:** {plan_settings.get('final_timeout_scale', 5)}",
               f"- **final_tool_call_scale:** {plan_settings.get('final_tool_call_scale', 3)}",
               ""]
 

@@ -233,7 +233,7 @@ Note this sends repo contents to your panel models — the same exposure as runn
 repo directly.
 
 **Patient final draft.** The interview rounds stay fast (web-off, fail-fast), but the final web-researched
-draft gets a longer timeout ceiling (`plan.final_timeout_scale`, default 3×) so it finishes instead of
+draft gets a longer timeout ceiling (`plan.final_timeout_scale`, default 5×) so it finishes instead of
 timing out, **and** a larger tool-call/turn budget (`plan.final_tool_call_scale`, default 3× → 24): that
 draft is web-on and reads your repo, so the base cap of 8 turns is often too few — a model can exhaust it
 mid-research and fail (claude surfaces this as `model error: exit 1`). Both scales apply only to the final

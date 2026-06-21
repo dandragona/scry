@@ -61,7 +61,7 @@ class TestClaude(_Base):
     def test_web_on_full_wiring(self):
         p = self.prov("claude")
         argv, env = self.scry.render_call(
-            p, "opus", "SYS", True, self.settings(), "/tmp/out")
+            p, "opus", "SYS", True, self.settings(max_tool_calls=8), "/tmp/out")
         # model flag pair
         self.assertTrue(_adjacent(argv, "--model", "opus"))
         # buffered json output (not streaming)
@@ -71,12 +71,19 @@ class TestClaude(_Base):
             argv, ["--allowedTools", "WebSearch,WebFetch,Read,Grep,Glob"]))
         self.assertTrue(_contains_seq(
             argv, ["--disallowedTools", "Bash Edit Write NotebookEdit"]))
-        # tool cap from settings.max_tool_calls=8 (config default)
+        # tool cap rendered from an explicit settings.max_tool_calls
         self.assertTrue(_contains_seq(argv, ["--max-turns", "8"]))
         # system flag pair (system="SYS")
         self.assertTrue(_adjacent(argv, "--append-system-prompt", "SYS"))
         # no env overrides by default (max_output_tokens is null)
         self.assertEqual(env, {})
+
+    def test_no_tool_cap_when_unset(self):
+        # max_tool_calls is uncapped (None) by default -> no --max-turns is sent.
+        p = self.prov("claude")
+        argv, _ = self.scry.render_call(
+            p, "opus", "SYS", True, self.settings(max_tool_calls=None), "/tmp/out")
+        self.assertNotIn("--max-turns", argv)
 
     def test_system_omitted_when_none(self):
         p = self.prov("claude")

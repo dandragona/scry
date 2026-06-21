@@ -182,7 +182,7 @@ DEFAULT_TIMEOUT = 420
 
 DEFAULT_SETTINGS = {
     "web_tools": True,         # web_search+web_fetch on panel + judge (Fusion behavior)
-    "max_tool_calls": 8,       # Fusion default (range 1-16); applied where supported
+    "max_tool_calls": None,    # uncapped by default; set N to cap claude's web tool-call turns (--max-turns)
     "effort": None,            # reasoning effort; None = each CLI's own default
     "max_output_tokens": None,  # applied where supported (claude only)
     "timeout": DEFAULT_TIMEOUT,  # per-call timeout (s); same default for every phase
@@ -200,7 +200,7 @@ DEFAULT_PHASES = {
     "judge": {},                                       # judge — inherit globals (web on)
     "synthesis": {"web_tools": False},                 # fused answer: no web (Fusion behavior)
     "interview": {"web_tools": False},                 # plan clarifying rounds: web off, fail-fast
-    "final": {"max_tool_calls": 24, "timeout": 2100},  # plan deep draft: more turns, longer ceiling
+    "final": {"timeout": 2100},                        # plan deep draft: longer ceiling (turns uncapped)
 }
 
 DEFAULT_CONFIG = {
@@ -1221,7 +1221,7 @@ def do_dry_run(cfg: dict, mode: str, settings: dict,
     judge_set = _phase_settings(settings, phases, "judge", None, cli_overrides)
     synth_set = _phase_settings(settings, phases, "synthesis", None, cli_overrides)
     print(f"[dry-run] mode={mode}  web_tools={bool(panel_set.get('web_tools'))}"
-          f"  max_tool_calls={panel_set.get('max_tool_calls')}"
+          f"  max_tool_calls={panel_set.get('max_tool_calls') or 'uncapped'}"
           f"  effort={panel_set.get('effort')}"
           f"  max_output_tokens={panel_set.get('max_output_tokens')}"
           f"  (per-phase resolved; judge/synthesis may differ)\n")
@@ -1536,8 +1536,7 @@ def do_init(cfg: dict, out: str | None, force: bool, no_anim: bool = False,
 
     new_cfg = {
         "mode": "fusion",
-        "settings": {"web_tools": web, "max_tool_calls": 8,
-                     "effort": None, "max_output_tokens": None},
+        "settings": {"web_tools": web, "effort": None, "max_output_tokens": None},
         "panel": panel,
         "judge": parse_member(judge),
         "aggregator": parse_member(aggr),

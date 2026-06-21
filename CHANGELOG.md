@@ -40,6 +40,11 @@ All notable changes to this project are documented here. The format follows
   drifting toward the cap, so the default is now shorter; raise it back per-run with
   `--max-rounds N` or permanently via `plan.max_rounds` in config. Type `done` at any
   prompt to stop early regardless of the cap.
+- **`max_tool_calls` is now uncapped by default** (was 8). A turn cap (`claude --max-turns`) discards
+  the model's work on overrun rather than returning a partial answer, so as a default it only caused
+  surprise failures; the per-call `timeout` is the real backstop. `scry init` no longer writes it, and
+  `phases.final` no longer needs its old `max_tool_calls: 24`. Still fully supported as an opt-in — set
+  `max_tool_calls` in `settings`, any `phases.<stage>`, or via `--max-tool-calls` to cap claude's turns.
 - **Per-phase settings — every pipeline stage is now independently configurable** via a new top-level
   `phases` block. Each stage (`panel`, `judge`, `synthesis` for a run; `interview`, `final` for `scry
   plan`) inherits the global `settings` and overrides only what it lists — `web_tools`, `max_tool_calls`,
@@ -50,12 +55,11 @@ All notable changes to this project are documented here. The format follows
   phase. Replaces the previous per-provider timeouts (claude/deepseek 360s, codex/agy/kimi 420s) that made
   models race different clocks. A new global `--timeout` flag overrides it for a run.
 - **`scry plan`'s final draft sets its budget directly, not by scaling.** The deep, web-on, repo-reading
-  draft is web-on and reads your repo, so the base 8-turn cap is often too few — a model exhausts it
-  mid-research and fails (claude: `model error: exit 1`). `phases.final` now declares absolute values
-  (`max_tool_calls: 24`, `timeout: 2100`) layered across the draft's panel/judge/synthesis. **Removed** the
-  old multiplier knobs `plan.final_tool_call_scale` / `plan.final_timeout_scale` (and `plan.interview_web`
-  → `phases.interview.web_tools`); old keys in a config are ignored and the new defaults reproduce the
-  prior behavior exactly.
+  draft can run long, so `phases.final` declares an explicit `timeout: 2100` layered across the draft's
+  panel/judge/synthesis (tool-call turns are uncapped — see above). **Removed** the old multiplier knobs
+  `plan.final_tool_call_scale` / `plan.final_timeout_scale` (and `plan.interview_web` →
+  `phases.interview.web_tools`); old keys in a config are ignored and the new defaults reproduce the prior
+  behavior exactly.
 - **The installer no longer uses `sudo` or installs into a system directory.** `install.sh`
   now installs into a **user-owned** dir — `~/.local/bin` by default (override with
   `INSTALL_DIR`), like `rustup`/`uv`/`pipx` — so install, update, and run never need

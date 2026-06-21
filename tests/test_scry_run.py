@@ -411,7 +411,8 @@ class ScryRunCwdTest(unittest.IsolatedAsyncioTestCase):
 class EffectiveTimeoutTest(unittest.TestCase):
     """call_cli's per-call timeout, read straight from a call's resolved (phase) settings;
     falls back to DEFAULT_TIMEOUT when unset/zero. No scaling, no per-provider override —
-    the value is whatever the phase resolved to (e.g. phases.final raises it for the draft)."""
+    the value is whatever the phase resolved to (e.g. phases.final raises it for the draft).
+    Returns None to disable the cap entirely (SCRY_NO_TIMEOUT env, or a negative timeout)."""
 
     def setUp(self):
         self.scry = h.load_scry()
@@ -428,6 +429,25 @@ class EffectiveTimeoutTest(unittest.TestCase):
                          float(self.scry.DEFAULT_TIMEOUT))
         self.assertEqual(self.scry._effective_timeout({"timeout": None}),
                          float(self.scry.DEFAULT_TIMEOUT))
+
+    def test_negative_timeout_disables_cap(self):
+        # A negative timeout (`--timeout -1`, or `"timeout": -1` in config) is the
+        # explicit opt-out: no kill, the call runs to completion.
+        self.assertIsNone(self.scry._effective_timeout({"timeout": -1}))
+
+    def test_env_var_disables_cap(self):
+        # SCRY_NO_TIMEOUT overrides everything, even an explicit positive timeout.
+        prev = os.environ.get("SCRY_NO_TIMEOUT")
+        os.environ["SCRY_NO_TIMEOUT"] = "1"
+        try:
+            self.assertIsNone(self.scry._effective_timeout({"timeout": 2100}))
+        finally:
+            if prev is None:
+                os.environ.pop("SCRY_NO_TIMEOUT", None)
+            else:
+                os.environ["SCRY_NO_TIMEOUT"] = prev
+        # ...and once unset, the cap is back.
+        self.assertEqual(self.scry._effective_timeout({"timeout": 2100}), 2100.0)
 
 
 class PhaseSettingsTest(unittest.TestCase):

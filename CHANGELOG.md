@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`SCRY_NO_TIMEOUT` / a negative `--timeout` disables the per-call timeout** (no kill —
+  the call runs to completion, however long it takes). The per-call timeout is a hard
+  `SIGKILL` that **discards the subprocess's work**, so a slow-but-progressing web-heavy
+  agentic call — notably the `scry plan` final-draft panel, where claude/opus reads the
+  repo + web to draft — could burn its whole ceiling and be killed with **0 tokens
+  returned** rather than a partial answer. This escape hatch lets such a call finish: set
+  the env var `SCRY_NO_TIMEOUT=1` (overrides every phase, regardless of config), or pass a
+  negative `--timeout` (e.g. `--timeout -1`) or `"timeout": -1` in `settings`/`phases`. A
+  timeout of `0`/unset still falls back to the default — a stray zero must not silently
+  uncap a run and let it hang forever.
+
 ### Fixed
 - **`scry plan` panel drafters now write a plan instead of trying to *do* the task.**
   The final-draft panel reuses the fusion pipeline, but each proposer was invoked with

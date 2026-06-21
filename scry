@@ -711,12 +711,25 @@ class AllPanelsFailed(RuntimeError):
         self.responses = responses
 
 
-def _effective_timeout(settings: dict) -> float:
+def _effective_timeout(settings: dict) -> float | None:
     """The per-call timeout (seconds), read from a call's resolved (phase) settings;
     falls back to DEFAULT_TIMEOUT when unset. A ceiling — a fast call finishes well under
     it; raising it (e.g. via phases.final for the plan draft) only lets a genuinely slow
-    call run longer before being killed."""
-    return float(settings.get("timeout") or DEFAULT_TIMEOUT)
+    call run longer before being killed.
+
+    Returns None to disable the timeout entirely (no kill — the call runs to completion,
+    however long it takes) when the env var SCRY_NO_TIMEOUT is set, or when the resolved
+    timeout is negative (e.g. `--timeout -1`, or `"timeout": -1` in config). This is a
+    debugging escape hatch for slow, web-heavy agentic calls (e.g. the plan final-draft
+    panel) that would otherwise be SIGKILLed mid-flight with all their work discarded.
+    A timeout of 0/None still falls back to DEFAULT_TIMEOUT — a stray zero must not
+    silently disable the cap and let a run hang forever."""
+    if os.environ.get("SCRY_NO_TIMEOUT"):
+        return None
+    t = settings.get("timeout")
+    if t is not None and float(t) < 0:
+        return None
+    return float(t or DEFAULT_TIMEOUT)
 
 
 def resolve_command(cmd0: str):
@@ -832,13 +845,16 @@ async def call_cli(cfg: dict, provider_name: str, model: str, system: str | None
             raise ProviderError(f"command not found: {argv[0]}")
 
         stdin_bytes = b"" if prompt_is_arg else user_text.encode()
-        try:
-            out, err = await asyncio.wait_for(
-                proc.communicate(stdin_bytes), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise ProviderError(f"timeout after {int(timeout)}s")
+        if timeout is None:               # timeout disabled — run to completion, no kill
+            out, err = await proc.communicate(stdin_bytes)
+        else:
+            try:
+                out, err = await asyncio.wait_for(
+                    proc.communicate(stdin_bytes), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise ProviderError(f"timeout after {int(timeout)}s")
 
         rc = proc.returncode
         err_txt = err.decode(errors="replace").strip()
@@ -956,7 +972,9 @@ async def stream_call(cfg: dict, provider_name: str, model: str, system: str | N
         meta: dict = {}
         try:
             while True:
-                line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
+                line = (await proc.stdout.readline() if timeout is None
+                        else await asyncio.wait_for(
+                            proc.stdout.readline(), timeout=timeout))
                 if not line:
                     break
                 s = line.decode(errors="replace").strip()
@@ -2512,9 +2530,10 @@ def render_plan_diagnostics(result: dict, cfg: dict, settings: dict,
 
     def _phase_summary(name: str, overlay: dict | None = None) -> str:
         s = _phase_settings(settings, phases, name, overlay)
+        t = _effective_timeout(s)
         return (f"web {'on' if s.get('web_tools') else 'off'}, "
                 f"max_tool_calls {s.get('max_tool_calls')}, "
-                f"timeout {int(_effective_timeout(s))}s")
+                f"timeout {'off' if t is None else f'{int(t)}s'}")
 
     lines += ["## settings", "",
               f"- **panel:** {', '.join(_member(m) for m in cfg.get('panel', []))}",

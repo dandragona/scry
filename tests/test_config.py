@@ -17,7 +17,33 @@ sys.path.insert(0, os.path.dirname(__file__))
 import _harness as h  # noqa: E402
 
 
+@contextlib.contextmanager
+def _isolated_config_env():
+    """Run load_config(None) against an empty HOME + cwd so it ignores any real
+    machine config (~/.config/scry/config.json or ./scry.config.json). Without this,
+    a developer box that has run `scry init` fails the default-equality assertions
+    below (e.g. a customized panel length) — these tests assert the built-in defaults."""
+    home = tempfile.mkdtemp(prefix="scry-home-")
+    cwd = tempfile.mkdtemp(prefix="scry-cwd-")
+    saved = os.getcwd()
+    try:
+        with h.env_vars(HOME=home):
+            os.chdir(cwd)
+            yield
+    finally:
+        os.chdir(saved)
+        _rmtree(home)
+        _rmtree(cwd)
+
+
 class TestLoadConfigDefaults(unittest.TestCase):
+    def setUp(self):
+        # load_config(None) reads the machine's global/local config, so isolate to an
+        # empty HOME + cwd; otherwise a configured dev box fails these default checks.
+        iso = _isolated_config_env()
+        iso.__enter__()
+        self.addCleanup(iso.__exit__, None, None, None)
+
     def test_none_returns_deepcopy_of_default_config(self):
         scry = h.load_scry()
         cfg = scry.load_config(None)
@@ -337,6 +363,14 @@ class TestLoadConfigPlanBlock(unittest.TestCase):
     """`scry plan` reads a top-level `plan` block; load_config backfills it from
     DEFAULT_CONFIG['plan'] like it does for settings, so old configs still work."""
 
+    def setUp(self):
+        # test_none_has_plan_defaults calls load_config(None); isolate HOME + cwd so a
+        # configured dev box can't override the plan defaults this asserts. (Harmless
+        # for the explicit-path tests here, which read absolute temp paths.)
+        iso = _isolated_config_env()
+        iso.__enter__()
+        self.addCleanup(iso.__exit__, None, None, None)
+
     def _write(self, obj) -> str:
         d = tempfile.mkdtemp(prefix="scry-cfg-")
         self.addCleanup(_rmtree, d)
@@ -349,9 +383,7 @@ class TestLoadConfigPlanBlock(unittest.TestCase):
         scry = h.load_scry()
         cfg = scry.load_config(None)
         self.assertEqual(cfg["plan"]["max_rounds"], 6)
-        self.assertIs(cfg["plan"]["interview_web"], False)
         self.assertIs(cfg["plan"]["repo_context"], True)      # panel reads the repo
-        self.assertEqual(cfg["plan"]["final_timeout_scale"], 5)  # patient final draft
 
     def test_partial_plan_override_keeps_other_new_keys(self):
         scry = h.load_scry()
@@ -359,21 +391,20 @@ class TestLoadConfigPlanBlock(unittest.TestCase):
         cfg = scry.load_config(p)
         self.assertIs(cfg["plan"]["repo_context"], False)        # overridden
         self.assertEqual(cfg["plan"]["max_rounds"], 6)           # backfilled
-        self.assertEqual(cfg["plan"]["final_timeout_scale"], 5)  # backfilled
 
     def test_config_without_plan_key_is_backfilled(self):
         scry = h.load_scry()
         p = self._write({"mode": "fusion"})  # no "plan" key at all
         cfg = scry.load_config(p)
         self.assertEqual(cfg["plan"]["max_rounds"], 6)
-        self.assertIs(cfg["plan"]["interview_web"], False)
+        self.assertIs(cfg["plan"]["repo_context"], True)
 
     def test_partial_plan_override_backfills_missing_keys(self):
         scry = h.load_scry()
         p = self._write({"plan": {"max_rounds": 3}})
         cfg = scry.load_config(p)
         self.assertEqual(cfg["plan"]["max_rounds"], 3)        # kept
-        self.assertIs(cfg["plan"]["interview_web"], False)    # backfilled
+        self.assertIs(cfg["plan"]["repo_context"], True)      # backfilled
 
     def test_plan_block_does_not_leak_into_settings_equality(self):
         # Adding the plan block must NOT disturb the settings == DEFAULT_SETTINGS
@@ -382,6 +413,54 @@ class TestLoadConfigPlanBlock(unittest.TestCase):
         p = self._write({"plan": {"max_rounds": 9}})
         cfg = scry.load_config(p)
         self.assertEqual(cfg["settings"], dict(scry.DEFAULT_SETTINGS))
+
+
+class TestLoadConfigPhases(unittest.TestCase):
+    """load_config backfills the top-level `phases` block from DEFAULT_PHASES, merging a
+    partial user phase on top of its default and ignoring a non-dict (e.g. a `_note`)."""
+
+    def setUp(self):
+        iso = _isolated_config_env()
+        iso.__enter__()
+        self.addCleanup(iso.__exit__, None, None, None)
+
+    def _write(self, obj) -> str:
+        d = tempfile.mkdtemp(prefix="scry-cfg-")
+        self.addCleanup(_rmtree, d)
+        p = os.path.join(d, "config.json")
+        with open(p, "w") as f:
+            f.write(json.dumps(obj))
+        return p
+
+    def test_none_has_phase_defaults(self):
+        scry = h.load_scry()
+        ph = scry.load_config(None)["phases"]
+        self.assertEqual(set(ph), set(scry.DEFAULT_PHASES))
+        self.assertIs(ph["synthesis"]["web_tools"], False)
+        self.assertIs(ph["interview"]["web_tools"], False)
+        self.assertEqual(ph["final"]["max_tool_calls"], 24)
+        self.assertEqual(ph["final"]["timeout"], 2100)
+
+    def test_partial_phase_override_keeps_sibling_defaults(self):
+        scry = h.load_scry()
+        p = self._write({"phases": {"judge": {"web_tools": False}}})
+        ph = scry.load_config(p)["phases"]
+        self.assertIs(ph["judge"]["web_tools"], False)          # overridden
+        self.assertEqual(ph["final"]["max_tool_calls"], 24)     # sibling default kept
+        self.assertEqual(ph["synthesis"], {"web_tools": False})
+
+    def test_non_dict_phase_value_ignored(self):
+        scry = h.load_scry()
+        p = self._write({"phases": {"_note": "explain", "judge": {"max_tool_calls": 4}}})
+        ph = scry.load_config(p)["phases"]
+        self.assertNotIn("_note", ph)
+        self.assertEqual(ph["judge"]["max_tool_calls"], 4)
+
+    def test_unknown_phase_preserved(self):
+        scry = h.load_scry()
+        p = self._write({"phases": {"custom": {"timeout": 99}}})
+        ph = scry.load_config(p)["phases"]
+        self.assertEqual(ph["custom"], {"timeout": 99})
 
 
 def _rmtree(path):

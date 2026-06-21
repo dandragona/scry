@@ -24,13 +24,22 @@ All notable changes to this project are documented here. The format follows
   the existing `final_timeout_scale`. Interview rounds (web-off) are unaffected.
 
 ### Changed
-- **`scry plan`'s final-draft timeout ceiling default raised 3× → 5×** (`plan.final_timeout_scale`).
-  The web-on, repo-reading final plan draft can legitimately run long — a deep opus draft exceeded
-  the old 3× (360s → 1080s) ceiling and got killed, silently dropping it from the fused plan. The
-  timeout is a *ceiling*, not a fixed wait, so this never slows panelists that finish quickly (e.g.
-  codex/gemini in well under a minute) — it only gives a slow one room to complete (360s → 1800s).
-  Override per-machine with `plan.final_timeout_scale`; the tool-call budget (`final_tool_call_scale`)
-  is unchanged at 3×.
+- **Per-phase settings — every pipeline stage is now independently configurable** via a new top-level
+  `phases` block. Each stage (`panel`, `judge`, `synthesis` for a run; `interview`, `final` for `scry
+  plan`) inherits the global `settings` and overrides only what it lists — `web_tools`, `max_tool_calls`,
+  `timeout`, `effort`, `max_output_tokens`. Resolution per call (later wins): `settings` → `phases[stage]`
+  → the `final` overlay (plan draft only) → explicit CLI flags. e.g. run the judge web-off with fewer
+  turns: `"judge": {"web_tools": false, "max_tool_calls": 4}`.
+- **All providers share one per-call `timeout`** (`settings.timeout`, default **420s**), overridable per
+  phase. Replaces the previous per-provider timeouts (claude/deepseek 360s, codex/agy/kimi 420s) that made
+  models race different clocks. A new global `--timeout` flag overrides it for a run.
+- **`scry plan`'s final draft sets its budget directly, not by scaling.** The deep, web-on, repo-reading
+  draft is web-on and reads your repo, so the base 8-turn cap is often too few — a model exhausts it
+  mid-research and fails (claude: `model error: exit 1`). `phases.final` now declares absolute values
+  (`max_tool_calls: 24`, `timeout: 2100`) layered across the draft's panel/judge/synthesis. **Removed** the
+  old multiplier knobs `plan.final_tool_call_scale` / `plan.final_timeout_scale` (and `plan.interview_web`
+  → `phases.interview.web_tools`); old keys in a config are ignored and the new defaults reproduce the
+  prior behavior exactly.
 - **The installer no longer uses `sudo` or installs into a system directory.** `install.sh`
   now installs into a **user-owned** dir — `~/.local/bin` by default (override with
   `INSTALL_DIR`), like `rustup`/`uv`/`pipx` — so install, update, and run never need
@@ -84,8 +93,8 @@ All notable changes to this project are documented here. The format follows
   that it compiles — so a dropped connection can't brick the binary) and not a
   downgrade, then **atomically** swaps it in place (same-directory temp + `os.replace`),
   preserving the exec bit. No `sudo` unless installed to a system dir (it prints the
-  exact elevated command, preserving any overrides). Honors `SCRY_REPO` / `SCRY_REF` /
-  `SCRY_UPDATE_URL`, mirroring `install.sh`.
+  exact elevated command, preserving any overrides). Honors `SCRY_REPO` / `SCRY_REF`
+  (shared with `install.sh`) plus `SCRY_UPDATE_URL` (a self-update-only full-file override).
 - **`scry init`** — an interactive setup wizard that lists your installed provider CLIs,
   lets you compose a panel (**repeats allowed**, with optional `:model`), pick a judge +
   aggregator, toggle web search, and writes a minimal config. By default it writes the

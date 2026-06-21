@@ -2872,12 +2872,18 @@ def _plan_step_finalize(cfg: dict, request: str, transcript: list, settings: dic
     """Draft the plan from the gathered transcript and print the terminal `done`
     envelope (or an `error` envelope, exit 1, if every panel draft fails). Writes the
     plan + diagnostics files unless no_out, and records the finished run to history."""
+    # Headless finalize: stdout is the single JSON envelope, so stream the
+    # panel → judge → synthesis progress to stderr (the /scry-plan skill relays it).
+    def log(msg: str) -> None:
+        print(msg, file=sys.stderr, flush=True)
+
     try:
         result = asyncio.run(scry_run(
             cfg, render_plan_prompt(request, transcript), "fusion",
-            settings, lambda _m: None,
+            settings, log,
             aggregator_system=PLAN_SYNTH_SYSTEM, cwd=repo_cwd,
-            run_overlay=cfg["phases"].get("final"), cli_overrides=cli_overrides))
+            run_overlay=cfg["phases"].get("final"), cli_overrides=cli_overrides,
+            panel_system=PLAN_DRAFTER_SYSTEM))
     except AllPanelsFailed as e:
         print(json.dumps({"status": "error", "error": str(e),
                           "responses": [{"model": r["label"], "ok": r["ok"],
@@ -2920,7 +2926,12 @@ def do_plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *
     interview_set = _phase_settings(settings, cfg.get("phases", {}), "interview",
                                     None, cli_overrides)
     depth = _depth_guard()
-    log = lambda _m: None  # noqa: E731 — headless: keep stdout to the JSON envelope
+    # Headless: stdout carries exactly one JSON envelope, so route human-readable
+    # pipeline progress (▸ stage / ✓ model / ✗ model) to stderr instead of dropping
+    # it. The /scry-plan skill relays these so the user can see where the (often
+    # multi-minute) draft is in the panel → judge → synthesis pipeline.
+    def log(msg: str) -> None:
+        print(msg, file=sys.stderr, flush=True)
 
     try:
         st = _load_plan_session(resume, request)
@@ -2978,11 +2989,13 @@ def do_plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *
     own_cwd = repo_cwd is None
     cwd = tempfile.mkdtemp(prefix="scry-plan-") if own_cwd else repo_cwd
     try:
+        log("▸ panel: gathering clarifying questions…")
         raw, all_ready = asyncio.run(gather_questions(
             cfg, request, transcript, interview_set, log, meters, depth, cwd))
         if all_ready or not raw:
             deduped = []
         else:
+            log("▸ judge: deduplicating questions…")
             deduped = asyncio.run(dedup_questions(
                 cfg, request, transcript, raw, interview_set, log, meters, depth, cwd))
     finally:

@@ -81,7 +81,7 @@ For `DEEPSEEK_API_KEY` (and any other keys a `.env` carries, e.g.
 2. $SCRY_ENV_FILE                            # explicit path override
 3. <dir of abspath(scry-deepseek)>/.env      # current behavior (cloned repo / local)
 4. <dir of realpath(scry-deepseek)>/.env     # symlinked installs (skip if == #3)
-5. $XDG_CONFIG_HOME/scry/.env                # default ~/.config/scry/.env (canonical fallback)
+5. ~/.config/scry/.env                       # scry's existing config home (canonical fallback)
 ```
 
 Among files, a higher-priority file that supplies a given key wins; the real env
@@ -89,6 +89,13 @@ var beats all files. This is the standard "more-specific wins, user-global last"
 precedence (mirrors git repo-config > `~/.config/git`). `~/.config/scry/.env` is
 the *recommended* home not because it's highest priority but because it's the one
 location that always works (every shell, cron, CI, Claude Code).
+
+**Consistency note:** scry core already keeps its config at `~/.config/scry/`
+(`config.json`, via `_global_config_path` → `Path.home()/".config"/"scry"`), and
+like that function we deliberately do **not** honor `$XDG_CONFIG_HOME` — so
+`scry-deepseek` looks for its `.env` in the same directory scry's own config
+lives. This makes `~/.config/scry/.env` a natural sibling of `config.json`, not a
+new convention.
 
 ### Code shape (`scry-deepseek`)
 
@@ -98,9 +105,9 @@ fake path and never read the repo's real `.env`:
 
 ```python
 def _config_dir() -> str:
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
-        os.path.expanduser("~"), ".config")
-    return os.path.join(base, "scry")
+    # Mirror scry core's _global_config_path (~/.config/scry). Like it, we do NOT
+    # honor XDG_CONFIG_HOME — so scry-deepseek's .env sits beside scry's config.json.
+    return os.path.join(os.path.expanduser("~"), ".config", "scry")
 
 def _env_file_candidates(script_path: str) -> list[str]:
     cands = []
@@ -155,17 +162,21 @@ See README: "DeepSeek - the API-key exception".
 
 ## Testing
 
-New `tests/test_deepseek_env.py`, loading `scry-deepseek` via the existing
-`tests/_harness.py` `SourceFileLoader` pattern. Each test passes a **fake
-script_path** under a `tempfile.TemporaryDirectory()` and points
-`XDG_CONFIG_HOME` / `SCRY_ENV_FILE` at temp paths, with `os.environ` saved and
-restored — so the repo's real `.env` is never read and the suite stays hermetic.
+New `tests/test_deepseek_env.py`, loading `scry-deepseek` via a new
+`load_scry_deepseek()` added to `tests/_harness.py` (same cached
+`SourceFileLoader` pattern as `load_scry`). Each test passes a **fake
+script_path** under a `tempfile.TemporaryDirectory()` and points `HOME` (for the
+`~/.config/scry/.env` candidate) and `SCRY_ENV_FILE` at temp paths via the
+harness's `env_vars()` context manager — so `os.environ` is restored and the
+repo's real `.env` is never read (the suite stays hermetic). Build fake paths
+through `os.path.realpath(tmp)` so macOS's `/var`→`/private/var` symlink doesn't
+make the realpath candidate spuriously differ from the abspath candidate.
 
 Cases (TDD — write failing first):
 
 - Real `DEEPSEEK_API_KEY` in env → all files ignored (env wins).
 - `$SCRY_ENV_FILE` → key loaded from that file.
-- `XDG_CONFIG_HOME=<tmp>` with `<tmp>/scry/.env` → key loaded (the installed-user
+- `HOME=<tmp>` with `<tmp>/.config/scry/.env` → key loaded (the installed-user
   path).
 - script-dir `.env` still loaded (backward compat) when it's the only source.
 - Precedence: with several present, the higher-priority file wins; a real env var

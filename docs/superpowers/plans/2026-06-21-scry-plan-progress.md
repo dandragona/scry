@@ -202,27 +202,18 @@ with:
     finally:
 ```
 
-- [ ] **Step 5: Thread `log` into `_plan_step_finalize`**
+- [ ] **Step 5: Emit finalize-draft progress to stderr**
 
-In `scry`, change the `_plan_step_finalize` signature (`scry:2868-2872`) to accept `log`:
-
-```python
-def _plan_step_finalize(cfg: dict, request: str, transcript: list, settings: dict,
-                        plan_settings: dict, run_id: str, meters: list, t0: float,
-                        repo_cwd: str | None, out: str | None, no_out: bool,
-                        no_save: bool, round_no: int, log=None,
-                        cli_overrides: dict | None = None) -> int:
-```
-
-Immediately after the docstring (before the `try:` at `scry:2876`), add the stderr fallback so the function is safe to call without a `log`:
+`_plan_step_finalize` is headless-only (its sole caller is `do_plan_step`'s finalize branch), so give it its own stderr logger inline — no new parameter, no `None`-fallback. Do NOT change the signature. Immediately after the docstring (before the `try:` at `scry:2876`), add:
 
 ```python
-    if log is None:
-        def log(msg: str) -> None:  # default: pipeline progress to stderr
-            print(msg, file=sys.stderr, flush=True)
+    # Headless finalize: stdout is the single JSON envelope, so stream the
+    # panel → judge → synthesis progress to stderr (the /scry-plan skill relays it).
+    def log(msg: str) -> None:
+        print(msg, file=sys.stderr, flush=True)
 ```
 
-Then in the `scry_run(...)` call, replace **only** the no-op log argument line — leave the `panel_system=PLAN_DRAFTER_SYSTEM` line added in Task 0 intact. Change the line:
+Then in the `scry_run(...)` call, change **only** the no-op log argument line — leave the `panel_system=PLAN_DRAFTER_SYSTEM` line added in Task 0 intact. Change the line:
 
 ```python
             settings, lambda _m: None,
@@ -245,28 +236,19 @@ After this edit the call reads (for reference — do not retype the whole block)
             panel_system=PLAN_DRAFTER_SYSTEM))
 ```
 
-- [ ] **Step 6: Pass `do_plan_step`'s `log` into the finalize call**
+The finalize call site in `do_plan_step` (`scry:2972-2975`) needs **no change** — `_plan_step_finalize` now logs on its own.
 
-In `do_plan_step`, update the finalize call site (`scry:2972-2975`) to pass `log=log`:
-
-```python
-    if done or interview_done or rounds_done >= max_rounds:
-        return _plan_step_finalize(cfg, request, transcript, settings, plan_settings,
-                                   run_id, meters, t0, repo_cwd, out, no_out, no_save,
-                                   rounds_done, log=log, cli_overrides=cli_overrides)
-```
-
-- [ ] **Step 7: Run the new tests to verify they pass**
+- [ ] **Step 6: Run the new tests to verify they pass**
 
 Run: `python3 -m unittest tests.test_plan.PlanStepSubprocessTest.test_done_draft_emits_progress_to_stderr tests.test_plan.PlanStepSubprocessTest.test_question_round_emits_progress_to_stderr -v`
 Expected: PASS (both).
 
-- [ ] **Step 8: Run the full plan test module to check for regressions**
+- [ ] **Step 7: Run the full plan test module to check for regressions**
 
 Run: `python3 -m unittest tests.test_plan -v`
 Expected: PASS — all existing `PlanStepSubprocessTest` / `PlanSubprocessTest` tests still green (stdout envelopes unchanged).
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add scry tests/test_plan.py
@@ -385,4 +367,4 @@ Use the `superpowers:finishing-a-development-branch` skill to choose merge / PR 
 
 **Placeholder scan:** No TBD/TODO; every code step shows exact old→new text and exact commands. ✓
 
-**Type consistency:** `log` is `Callable[[str], None]` everywhere; `_plan_step_finalize` gains `log=None` with a stderr fallback and is called with `log=log`; `scry_run`'s 5th positional arg receives `log`. Event strings (`▸ panel:`, `▸ synthesis:`, `gathering clarifying questions`) match what `scry_run`/`do_plan` already emit. ✓
+**Type consistency:** `log` is `Callable[[str], None]` everywhere; `do_plan_step` and `_plan_step_finalize` each define their own inline stderr `log` (no signature change, no threading); `scry_run`'s 5th positional arg receives `log`. Event strings (`▸ panel:`, `▸ synthesis:`, `gathering clarifying questions`) match what `scry_run`/`do_plan` already emit. ✓

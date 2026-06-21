@@ -354,8 +354,8 @@ a small stdlib adapter, **`scry-deepseek`**, that calls DeepSeek's OpenAI-compat
 cp .env.example .env && $EDITOR .env                 # add DEEPSEEK_API_KEY=sk-… (gitignored; recommended)
 # …or, equivalently, export it in your shell:
 export DEEPSEEK_API_KEY=sk-...                        # platform.deepseek.com (metered, pay-as-you-go)
-scry --panel "claude:opus,codex,deepseek:deepseek-chat" "..."
-scry --check --panel "...,deepseek:deepseek-chat"    # shows: ✓ deepseek installed
+scry --panel "claude:opus,codex,deepseek" "..."     # deepseek inherits the top-tier default (deepseek-v4-pro)
+scry --check --panel "...,deepseek"                  # shows: ✓ deepseek installed
 ```
 
 - **Key management:** put `DEEPSEEK_API_KEY` in a local **`.env`** (copy `.env.example`; it's gitignored —

@@ -38,6 +38,7 @@ TESTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TESTS_DIR.parent
 SCRY = REPO_ROOT / "scry"
 SCRY_EVAL = REPO_ROOT / "scry-eval"
+SCRY_DEEPSEEK = REPO_ROOT / "scry-deepseek"
 CONFIG_JSON = REPO_ROOT / "config.json"
 
 
@@ -66,6 +67,11 @@ def load_scry():
 def load_scry_eval():
     """The `scry-eval` harness loaded as a module."""
     return _load("scry_eval_sut", SCRY_EVAL)
+
+
+def load_scry_deepseek():
+    """The `scry-deepseek` adapter loaded as a module (symbols only)."""
+    return _load("scry_deepseek_sut", SCRY_DEEPSEEK)
 
 
 # --------------------------------------------------------------------------- #

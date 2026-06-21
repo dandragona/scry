@@ -24,6 +24,25 @@ import urllib.error
 import urllib.request
 
 
+# DeepSeek's chat API silently defaults max_tokens to 4096, truncating long
+# answers. We instead request the chosen model's documented maximum output so
+# nothing is cut off — a ceiling is free (the model stops when done).
+DEEPSEEK_MAX_OUTPUT = {
+    "deepseek-v4-pro": 384000,     # V4 family: 1M context, 384K max output
+    "deepseek-chat": 8192,         # legacy alias -> V4-Flash (non-thinking)
+    "deepseek-reasoner": 8192,     # legacy alias -> V4-Flash (thinking)
+}
+DEFAULT_MAX_OUTPUT = 8192          # safe documented ceiling for unknown ids
+
+
+def resolve_max_tokens(explicit, model):
+    """Output-token ceiling to request: an explicit --max-tokens if given, else
+    the model's documented maximum (never the API's silent 4096 default)."""
+    if explicit:
+        return explicit
+    return DEEPSEEK_MAX_OUTPUT.get(model, DEFAULT_MAX_OUTPUT)
+
+
 def _load_env_file() -> None:
     """Load KEY=VALUE lines from a `.env` next to this script into the process
     environment, WITHOUT overriding variables already set (so an explicit
@@ -76,9 +95,8 @@ def main() -> int:
     if args.system:
         messages.append({"role": "system", "content": args.system})
     messages.append({"role": "user", "content": prompt})
-    payload = {"model": args.model, "messages": messages, "stream": False}
-    if args.max_tokens:
-        payload["max_tokens"] = args.max_tokens
+    payload = {"model": args.model, "messages": messages, "stream": False,
+               "max_tokens": resolve_max_tokens(args.max_tokens, args.model)}
 
     url = args.base_url.rstrip("/") + "/chat/completions"
     req = urllib.request.Request(

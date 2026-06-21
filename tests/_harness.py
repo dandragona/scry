@@ -266,7 +266,7 @@ def default_stubs() -> dict:
         "claude": claude_json("CLAUDE ANSWER"),
         "codex": codex_outfile("CODEX ANSWER"),
         "agy": agy_text("GEMINI ANSWER"),
-        "kimi": kimi_text("KIMI ANSWER"),
+        "kimi-cli": kimi_text("KIMI ANSWER"),
     }
 
 

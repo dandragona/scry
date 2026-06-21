@@ -854,6 +854,9 @@ class PlanStepSubprocessTest(unittest.TestCase):
             seen = f.read()
         # The panel proposers must be reframed as plan AUTHORS, not executors.
         self.assertIn(scry.PLAN_DRAFTER_SYSTEM, seen)
+        # Guard the invariant the assertion relies on: the drafter prompt is a
+        # distinct prompt from the synth one (mirrors the interactive analog).
+        self.assertNotEqual(scry.PLAN_DRAFTER_SYSTEM, scry.PLAN_SYNTH_SYSTEM)
 
     # ----- the draft streams pipeline progress to stderr -------------------- #
     def test_done_draft_emits_progress_to_stderr(self):
@@ -876,6 +879,7 @@ class PlanStepSubprocessTest(unittest.TestCase):
         rec, cp = self._run(self._start_args(), "", env)
         self.assertEqual(rec["status"], "questions")
         self.assertIn("gathering clarifying questions", cp.stderr)
+        self.assertIn("deduplicating", cp.stderr)
 
 
 # --------------------------------------------------------------------------- #

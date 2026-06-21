@@ -94,7 +94,7 @@ class TestMissingKeyMessage(unittest.TestCase):
         try:
             dest = os.path.join(copydir, "scry-deepseek")
             shutil.copy2(h.REPO_ROOT / "scry-deepseek", dest)
-            os.chmod(dest, 0o755)
+            os.chmod(dest, 0o700)
             empty_home = os.path.join(copydir, "home")
             os.makedirs(empty_home)
             env = os.environ.copy()

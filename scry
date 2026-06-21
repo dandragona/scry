@@ -920,7 +920,7 @@ async def stream_call(cfg: dict, provider_name: str, model: str, system: str | N
             await proc.stdin.drain()
             proc.stdin.close()
         except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
+            pass  # child already closed stdin / exited — nothing to send; read its output
 
         timeout = _effective_timeout(settings)
         acc: list = []

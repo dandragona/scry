@@ -80,8 +80,8 @@ trap 'rm -rf "$STUB"' EXIT
 printf '#!/bin/sh\necho "claude 0.0.0-stub"\n'              > "$STUB/claude"
 printf '#!/bin/sh\necho "Logged in as ci@example.com"\n'    > "$STUB/codex"
 printf '#!/bin/sh\necho "agy 0.0.0-stub"\n'                 > "$STUB/agy"
-printf '#!/bin/sh\necho "kimi 0.0.0-stub"\n'                > "$STUB/kimi"
-chmod +x "$STUB/claude" "$STUB/codex" "$STUB/agy" "$STUB/kimi"
+printf '#!/bin/sh\necho "kimi-cli 0.0.0-stub"\n'            > "$STUB/kimi-cli"
+chmod +x "$STUB/claude" "$STUB/codex" "$STUB/agy" "$STUB/kimi-cli"
 
 # --- doctor passes when all CLIs are present ---------------------------------
 PATH="$STUB:$PATH" "$SCRY" --check >/dev/null 2>&1 || fail "--check should pass with stubs present"
@@ -118,7 +118,7 @@ pass "--dry-run builds panel + judge + aggregator argv"
 # --- dry-run renders the kimi provider (quiet + generated agent file) ---------
 # Default (no model): kimi uses the account default, so no --model is emitted.
 KOUT="$(PATH="$STUB:$PATH" "$SCRY" --dry-run --panel "claude:opus,kimi" "x")"
-echo "$KOUT" | grep -q "kimi --quiet"  || fail "dry-run missing 'kimi --quiet'"
+echo "$KOUT" | grep -q "kimi-cli --quiet"  || fail "dry-run missing 'kimi-cli --quiet'"
 echo "$KOUT" | grep -q -- "--agent-file" || fail "dry-run missing kimi '--agent-file'"
 # An explicit model is rendered as --model.
 PATH="$STUB:$PATH" "$SCRY" --dry-run --panel "kimi:kimi-for-coding" "x" \

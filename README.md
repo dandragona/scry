@@ -69,8 +69,8 @@ Everything else is matched:
   - **Google Antigravity** (`agy`) — Gemini panel member. Headless via `agy -p "<prompt>"`. Wired in by
     default (`Gemini 3.1 Pro (High)`). See "Adding Google" to change the model. **Live web search works**
     via Gemini grounding (on by default — verified).
-  - **Moonshot Kimi** (`kimi`) — `kimi login` (Kimi Code OAuth — reuses your membership, **no API key**).
-    Headless via `kimi --quiet`. Uses your account's default model (the Kimi Code membership exposes
+  - **Moonshot Kimi** (`kimi-cli`) — `kimi-cli login` (Kimi Code OAuth — reuses your membership, **no API key**).
+    Headless via `kimi-cli --quiet`. Uses your account's default model (the Kimi Code membership exposes
     `kimi-for-coding`). Web via `SearchWeb`/`FetchURL`. See "Adding Moonshot" below.
 
 > New? Run **`scry init`** — an interactive setup wizard that detects which of these CLIs you have and
@@ -316,22 +316,22 @@ no API key. The default panel uses `Gemini 3.1 Pro (High)`, completing the 3-mod
   `agy` returns live, post-cutoff data with `vertexaisearch…/grounding-api-redirect` citations). There's
   no flag to force or disable it, so `--no-web` does *not* suppress agy's grounding (see Caveats).
 
-### Moonshot (Kimi / `kimi`)
+### Moonshot (Kimi / `kimi-cli`)
 
-Moonshot is wired in via the **Kimi CLI** (`kimi`), authenticated with `kimi login` (Kimi Code OAuth —
+Moonshot is wired in via the **Kimi CLI** (`kimi-cli`), authenticated with `kimi-cli login` (Kimi Code OAuth —
 it reuses your Kimi membership, **no API key**; we unset `KIMI_API_KEY` so a stray key can't divert
 billing off the subscription). Install it with `curl -LsSf https://code.kimi.com/install.sh | bash`
 (or `uv tool install --python 3.13 kimi-cli`).
 
 - **Default model:** none — scry passes no `--model`, so kimi uses your account's `default_model`.
-  The Kimi Code membership configures `kimi-for-coding` at `kimi login`. A model id passed to
-  `kimi --model` **must be defined in your `~/.kimi/config.toml`** (run `kimi info` / check that file to
+  The Kimi Code membership configures `kimi-for-coding` at `kimi-cli login`. A model id passed to
+  `kimi-cli --model` **must be defined in your `~/.kimi/config.toml`** (run `kimi-cli info` / check that file to
   see what your account exposes), so pin one only if it's there — e.g.
   `scry --panel "claude:opus,codex,kimi:kimi-k2.6" "..."`, where `kimi-k2.6` is the Kimi member of
   OpenRouter's **Budget** Fusion panel (Gemini 3 Flash + Kimi K2.6 + DeepSeek V4 Pro, within ~1% of
   Fable 5) — but it'll error with `LLM not set` if your membership doesn't define it. Leaving the model
   blank (the default) always works.
-- **How it's driven:** `kimi --quiet` runs print mode (`--print --output-format text
+- **How it's driven:** `kimi-cli --quiet` runs print mode (`--print --output-format text
   --final-message-only`), which prints **only the final answer as plain text** (`"capture": "text"`) and
   auto-approves tool calls (`--afk`); the prompt arrives on **stdin**. There's no per-call
   system-prompt flag, so (like codex/agy) the system prompt is folded into the prompt.
@@ -517,11 +517,11 @@ variance — this proves the harness, not a benchmark figure).
   `--no-web` can't disable agy's grounding (the panel's other members do honor it). `--sandbox` is
   available if you want terminal restrictions. Default `--print-timeout` is 5m; `scry` sets 400s under
   the shared 420s `settings.timeout`.
-- **Moonshot (`kimi`).** Auth is `kimi login` (Kimi Code OAuth — reuses your membership, no API key);
+- **Moonshot (`kimi-cli`).** Auth is `kimi-cli login` (Kimi Code OAuth — reuses your membership, no API key);
   `KIMI_API_KEY` is unset so a stray key can't divert billing off the subscription. Print mode
   auto-approves tool calls (`--afk`), so scry constrains it to **read-only** via a generated
   `--agent-file` (no `Shell`/`WriteFile`/`StrReplaceFile`/`Agent`); that same file is how `--no-web` is
-  honored (it also drops `SearchWeb`/`FetchURL`). `kimi --version` only confirms the binary — login isn't
+  honored (it also drops `SearchWeb`/`FetchURL`). `kimi-cli --version` only confirms the binary — login isn't
   cheaply verifiable, so `scry --check` reports "installed & runnable", not "logged in". Uses the shared
   `settings.timeout` (default 420s) like every other provider.
 - **`ANTHROPIC_API_KEY`** is unset for `claude` calls so it never silently bills the Console API.

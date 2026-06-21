@@ -311,7 +311,7 @@ DEFAULT_CONFIG = {
             },
             "caps": {},
         },
-        # Moonshot via the Kimi CLI (`kimi`). Headless: `kimi --quiet` runs print
+        # Moonshot via the Kimi CLI (`kimi-cli`). Headless: `kimi-cli --quiet` runs print
         # mode (`--print --output-format text --final-message-only`), which prints
         # ONLY the final assistant message as plain text (capture: "text") and
         # implicitly auto-approves tool calls (`--afk`). The prompt arrives on stdin.
@@ -321,19 +321,19 @@ DEFAULT_CONFIG = {
         # the built-in `default` agent minus the mutating tools, and toggles web by
         # also excluding the SearchWeb+FetchURL tools when web is off. That is the
         # faithful equivalent of claude's `--disallowedTools` / codex's read-only
-        # sandbox, and unlike agy it CAN honor `--no-web`. Auth is `kimi login`
+        # sandbox, and unlike agy it CAN honor `--no-web`. Auth is `kimi-cli login`
         # (Kimi Code OAuth — reuses your membership, no API key); we unset
         # KIMI_API_KEY so a stray key can't divert billing off the subscription.
         "kimi": {
-            "cmd": ["kimi", "--quiet"],
+            "cmd": ["kimi-cli", "--quiet"],
             "model_flag": "--model",               # -m / --model NAME
             "capture": "text",                     # --quiet => plain final message
             "system_flag": None,                   # no system flag -> fold into prompt
             "prompt": "stdin",
             "env_unset": ["KIMI_API_KEY"],         # force subscription (OAuth) auth
             "check": {
-                "probe": ["kimi", "--version"], "verifies_auth": False,
-                "note": "log in for subscription auth:  kimi login  "
+                "probe": ["kimi-cli", "--version"], "verifies_auth": False,
+                "note": "log in for subscription auth:  kimi-cli login  "
                         "(Kimi Code OAuth — reuses your membership, no API key)",
                 "install": "install Kimi CLI — curl -LsSf https://code.kimi.com/install.sh | bash"
                            "  (or: uv tool install --python 3.13 kimi-cli)",
@@ -1265,9 +1265,9 @@ def do_dry_run(cfg: dict, mode: str, settings: dict,
 
 # Suggested (model, label) per provider, used to pre-fill the wizard. An empty
 # model means "let the CLI use its own default" — for kimi that's whatever your
-# `kimi login` configured (the Kimi Code membership exposes `kimi-for-coding`).
+# `kimi-cli login` configured (the Kimi Code membership exposes `kimi-for-coding`).
 # We default kimi to empty rather than a fixed id because a model passed to
-# `kimi --model` must be defined in your ~/.kimi/config.toml, and the membership
+# `kimi-cli --model` must be defined in your ~/.kimi/config.toml, and the membership
 # only defines its own; pin one (e.g. `kimi:kimi-k2.6`, OpenRouter's near-Fable
 # Budget-panel member) only if your account actually exposes it.
 INIT_SUGGEST = {

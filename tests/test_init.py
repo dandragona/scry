@@ -28,7 +28,7 @@ def _stub_env():
     not-found, which is fine — do_init still adds them if selected."""
     return h.StubBins({
         "claude": h.claude_json("CLAUDE"),
-        "kimi": h.kimi_text("KIMI"),
+        "kimi-cli": h.kimi_text("KIMI"),
     })
 
 

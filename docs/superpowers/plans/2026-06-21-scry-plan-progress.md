@@ -19,6 +19,95 @@
 
 ---
 
+### Task 0: Fix missing drafter system prompt in the headless draft
+
+**Why:** `_plan_step_finalize` (the path `/scry-plan` actually uses) calls `scry_run` without `panel_system=PLAN_DRAFTER_SYSTEM`. Only the interactive `do_plan` (`scry:2819`) passes it. So headless drafters get no drafter prompt and try to *execute* the task in the repo cwd instead of writing a plan — the exact regression commit #22 fixed for the interactive path only. This degrades plan quality and inflates runtime. One-line fix + regression test. Do this task FIRST.
+
+**Files:**
+- Modify: `scry` — the `scry_run(...)` call in `_plan_step_finalize` (`scry:2877-2881`).
+- Test: `tests/test_plan.py` — add one test to `class PlanStepSubprocessTest` (alongside the others, ~`tests/test_plan.py:817`).
+
+**Interfaces:**
+- Consumes: `scry_run(..., panel_system=…)` keyword arg; module constant `scry.PLAN_DRAFTER_SYSTEM`; test hook `SCRY_SYSDUMP` (the `claude_plan` stub appends every system prompt it receives to this file).
+- Produces: no signature changes — the headless draft now hands `PLAN_DRAFTER_SYSTEM` to each panel proposer.
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `tests/test_plan.py` inside `class PlanStepSubprocessTest` (mirrors `PlanSubprocessTest.test_final_draft_panel_receives_drafter_system`, but for the `--step` path):
+
+```python
+    # ----- the --step draft hands the drafter prompt to the panel ----------- #
+    def test_step_draft_panel_receives_drafter_system(self):
+        scry = h.load_scry()
+        d = tempfile.mkdtemp(prefix="scry-step-sysdump-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        dump = os.path.join(d, "sys.txt")
+        out = tempfile.mkdtemp(prefix="scry-step-out-")
+        self.addCleanup(shutil.rmtree, out, ignore_errors=True)
+        env = self._env(h.claude_plan(rounds_before_ready=1))
+        env["SCRY_SYSDUMP"] = dump
+        rec, _ = self._run(self._start_args(), json.dumps({"done": True}),
+                           env, cwd=out)
+        self.assertEqual(rec["status"], "done")
+        with open(dump) as f:
+            seen = f.read()
+        # The panel proposers must be reframed as plan AUTHORS, not executors.
+        self.assertIn(scry.PLAN_DRAFTER_SYSTEM, seen)
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `python3 -m unittest tests.test_plan.PlanStepSubprocessTest.test_step_draft_panel_receives_drafter_system -v`
+Expected: FAIL — `panel_system` is `None`, so the drafters receive no drafter prompt and `PLAN_DRAFTER_SYSTEM` never appears in the sysdump.
+
+- [ ] **Step 3: Add `panel_system=PLAN_DRAFTER_SYSTEM` to the finalize draft**
+
+In `scry`, in `_plan_step_finalize`, change the `scry_run(...)` call (`scry:2877-2881`) from:
+
+```python
+        result = asyncio.run(scry_run(
+            cfg, render_plan_prompt(request, transcript), "fusion",
+            settings, lambda _m: None,
+            aggregator_system=PLAN_SYNTH_SYSTEM, cwd=repo_cwd,
+            run_overlay=cfg["phases"].get("final"), cli_overrides=cli_overrides))
+```
+
+to (adds the final keyword arg — mirrors `do_plan`'s call at `scry:2813-2818`):
+
+```python
+        result = asyncio.run(scry_run(
+            cfg, render_plan_prompt(request, transcript), "fusion",
+            settings, lambda _m: None,
+            aggregator_system=PLAN_SYNTH_SYSTEM, cwd=repo_cwd,
+            run_overlay=cfg["phases"].get("final"), cli_overrides=cli_overrides,
+            panel_system=PLAN_DRAFTER_SYSTEM))
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `python3 -m unittest tests.test_plan.PlanStepSubprocessTest.test_step_draft_panel_receives_drafter_system -v`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scry tests/test_plan.py
+git commit -m "$(cat <<'EOF'
+Pass PLAN_DRAFTER_SYSTEM to the headless plan draft panel
+
+_plan_step_finalize (the path /scry-plan uses) called scry_run without
+panel_system, so headless drafters got no drafter prompt and tried to
+EXECUTE the task in the repo cwd instead of writing a plan — the #22
+regression, fixed only for the interactive path. Pass the drafter system
+prompt here too, with a --step regression test.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
 ### Task 1: Route headless `--step` progress to stderr
 
 **Files:**
@@ -133,14 +222,27 @@ Immediately after the docstring (before the `try:` at `scry:2876`), add the stde
             print(msg, file=sys.stderr, flush=True)
 ```
 
-Then in the `scry_run(...)` call (`scry:2877-2881`) replace the no-op `lambda _m: None` with `log`:
+Then in the `scry_run(...)` call, replace **only** the no-op log argument line — leave the `panel_system=PLAN_DRAFTER_SYSTEM` line added in Task 0 intact. Change the line:
+
+```python
+            settings, lambda _m: None,
+```
+
+to:
+
+```python
+            settings, log,
+```
+
+After this edit the call reads (for reference — do not retype the whole block):
 
 ```python
         result = asyncio.run(scry_run(
             cfg, render_plan_prompt(request, transcript), "fusion",
             settings, log,
             aggregator_system=PLAN_SYNTH_SYSTEM, cwd=repo_cwd,
-            run_overlay=cfg["phases"].get("final"), cli_overrides=cli_overrides))
+            run_overlay=cfg["phases"].get("final"), cli_overrides=cli_overrides,
+            panel_system=PLAN_DRAFTER_SYSTEM))
 ```
 
 - [ ] **Step 6: Pass `do_plan_step`'s `log` into the finalize call**
@@ -273,6 +375,7 @@ Use the `superpowers:finishing-a-development-branch` skill to choose merge / PR 
 ## Self-Review
 
 **Spec coverage:**
+- "Drafter prompt reaches headless panel (folded-in fix)" → Task 0 (test-first); Task 1 Step 5 explicitly preserves the `panel_system` line.
 - "Emit stage + per-model progress during headless draft" → Task 1 Steps 3, 5, 6 + test Step 1.
 - "Same for interview rounds (panel gathering / judge dedup)" → Task 1 Step 4 + `test_question_round_emits_progress_to_stderr`.
 - "Keep stdout to one JSON envelope" → Global Constraints + the `assertNotIn("▸", cp.stdout)` / single-line assertions in Task 1 Step 1; existing tests in Task 1 Step 8.

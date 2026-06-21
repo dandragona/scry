@@ -248,6 +248,32 @@ class AskQuestionsTest(unittest.TestCase):
             [{"q": "OS?", "options": ["linux", "macos"]}], ["freebsd"])
         self.assertEqual(qa[0]["a"], "freebsd")
 
+    def test_multi_numeric_options_resolve_to_text(self):
+        # A multi-select answer ("1,3,4,5") must record the chosen option TEXT,
+        # not the bare numbers — otherwise the transcript sent to the drafting
+        # models says "A: 1,3,4,5" with no idea what those numbers meant.
+        qa, done, _ = self._ask(
+            [{"q": "Sources?",
+              "options": ["X/Twitter", "Reddit", "RSS", "HN", "Mastodon"]}],
+            ["1,3,4,5"])
+        self.assertEqual(qa[0]["a"], "X/Twitter, RSS, HN, Mastodon")
+
+    def test_multi_numeric_options_space_separated(self):
+        qa, done, _ = self._ask(
+            [{"q": "OS?", "options": ["linux", "macos", "windows"]}], ["1 3"])
+        self.assertEqual(qa[0]["a"], "linux, windows")
+
+    def test_multi_numeric_dedups_preserving_order(self):
+        qa, done, _ = self._ask(
+            [{"q": "OS?", "options": ["linux", "macos", "windows"]}], ["3, 1, 3"])
+        self.assertEqual(qa[0]["a"], "windows, linux")
+
+    def test_multi_numeric_out_of_range_kept_as_free_text(self):
+        # Not a clean list of in-range numbers → leave it verbatim (free text).
+        qa, done, _ = self._ask(
+            [{"q": "OS?", "options": ["linux", "macos"]}], ["1,9"])
+        self.assertEqual(qa[0]["a"], "1,9")
+
     def test_done_sentinel_stops_immediately(self):
         qa, done, _ = self._ask([{"q": "A"}, {"q": "B"}], ["done"])
         self.assertTrue(done)
@@ -336,6 +362,25 @@ class PlanSubprocessTest(unittest.TestCase):
                     "final", "cost"):
             self.assertIn(key, rec)
         self.assertEqual(rec["prompt"], self.REQUEST)  # original request, not enriched
+
+    # ----- the panel drafters are told to WRITE a plan, not implement ------- #
+    def test_final_draft_panel_receives_drafter_system(self):
+        # Regression for the half-strength plan panel: each final-draft proposer must
+        # be handed PLAN_DRAFTER_SYSTEM. Without it an agentic CLI tries to EXECUTE the
+        # task (churns tool calls / attempts file writes in the repo cwd) instead of
+        # drafting a plan as text, which is what made opus time out at 0 tokens.
+        scry = h.load_scry()
+        d = tempfile.mkdtemp(prefix="scry-sysdump-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        dump = os.path.join(d, "sys.txt")
+        env = self._env(h.claude_plan(rounds_before_ready=1), SCRY_SYSDUMP=dump)
+        cp = h.run_scry(self._args(), input="linux\nok\n", env=env)
+        self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
+        with open(dump) as f:
+            seen = f.read()
+        # The drafter prompt reached the panel, and it is distinct from the synth one.
+        self.assertIn(scry.PLAN_DRAFTER_SYSTEM, seen)
+        self.assertNotEqual(scry.PLAN_DRAFTER_SYSTEM, scry.PLAN_SYNTH_SYSTEM)
 
     # ----- done sentinel stops early ---------------------------------------- #
     def test_done_sentinel_stops_in_round_one(self):

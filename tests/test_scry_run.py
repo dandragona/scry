@@ -321,6 +321,43 @@ class ScryRunTest(unittest.IsolatedAsyncioTestCase):
             aggregator_system="CUSTOM-AGG-PROMPT")
         self.assertEqual(synth_system, "CUSTOM-AGG-PROMPT")
 
+    # ------------------------------------------------------------------ #
+    # panel_system: default None keeps proposers general-purpose; an override
+    # (e.g. `scry plan`'s PLAN_DRAFTER_SYSTEM) reaches EVERY proposer.
+    # ------------------------------------------------------------------ #
+    async def _run_capturing_panel_systems(self, **kwargs):
+        scry = self.scry
+        seen = []
+
+        async def fake_call_cli(cfg, provider, model, system, user, cwd,
+                                depth, web, settings, meta=None):
+            if system == scry.JUDGE_SYSTEM:
+                return json.dumps(ANALYSIS)
+            if system == scry.MOA_AGGREGATOR_SYSTEM:
+                return "FUSED"
+            seen.append(system)          # everything else is a panel proposer
+            return f"PROP[{provider}]"
+
+        self._patch_call_cli(fake_call_cli)
+        await scry.scry_run(self.cfg, "p", "fusion", self.cfg["settings"],
+                            self.log, **kwargs)
+        return seen
+
+    async def test_panel_system_defaults_to_none(self):
+        # Normal runs: the panel stays general-purpose (no proposer system prompt).
+        systems = await self._run_capturing_panel_systems()
+        self.assertEqual(len(systems), len(self.panel))
+        self.assertTrue(all(s is None for s in systems),
+                        f"expected every proposer system None, got {systems!r}")
+
+    async def test_panel_system_override_reaches_every_proposer(self):
+        # `scry plan` passes PLAN_DRAFTER_SYSTEM so each drafter writes a plan as text.
+        systems = await self._run_capturing_panel_systems(
+            panel_system="DRAFTER-PROMPT")
+        self.assertEqual(len(systems), len(self.panel))
+        self.assertTrue(all(s == "DRAFTER-PROMPT" for s in systems),
+                        f"expected every proposer to get the override, got {systems!r}")
+
 
 class ScryRunCwdTest(unittest.IsolatedAsyncioTestCase):
     """scry_run's optional cwd override (used by `scry plan` for repo-aware drafting).

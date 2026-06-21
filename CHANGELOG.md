@@ -7,6 +7,25 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **`scry plan` panel drafters now write a plan instead of trying to *do* the task.**
+  The final-draft panel reuses the fusion pipeline, but each proposer was invoked with
+  no system prompt — so an agentic coding CLI handed a bare task plus read-only repo +
+  web access behaved like a coding agent: it tried to implement the work rather than
+  describe it. The result was a half-strength panel (claude/opus churning tool calls to
+  a 0-token timeout, codex/kimi wasting turns on blocked writes, and the unsandboxed
+  agy/gemini member able to mutate the working tree). A new `PLAN_DRAFTER_SYSTEM` is now
+  threaded to every proposer via `scry_run(..., panel_system=...)`, telling them their
+  answer IS the plan, to read-only-ground it (no file writes, no mutating commands), and
+  to treat the answered questions as binding. Normal `scry` runs are unchanged
+  (`panel_system` defaults to `None`). This also restores the read-only invariant *by
+  instruction* for the agy member, which has no argv sandbox flag to enforce it.
+- **`scry plan` multiple-choice answers record the chosen option text, not bare
+  numbers.** Answering a clarifying question with several option numbers (e.g.
+  `1,3,4,5`) now resolves to the option labels in the transcript the drafting models
+  see; previously only a single-digit answer was mapped, so a multi-select was stored
+  verbatim as `1,3,4,5` and the plan referenced option numbers whose meanings it never
+  knew. Comma- or space-separated selections are both accepted; anything that isn't a
+  clean list of in-range numbers is still kept as free text.
 - **`scry plan` no longer intermittently fails its claude/opus draft with
   `model error: exit 1`.** The final plan draft is web-on and reads the repo, so it
   runs as an agentic tool-use loop; the base cap of 8 tool calls (claude's
@@ -16,6 +35,10 @@ All notable changes to this project are documented here. The format follows
   the existing `final_timeout_scale`. Interview rounds (web-off) are unaffected.
 
 ### Changed
+- **`scry plan` clarifying-round cap lowered to 5** (was 6). The interview was
+  drifting toward the cap, so the default is now shorter; raise it back per-run with
+  `--max-rounds N` or permanently via `plan.max_rounds` in config. Type `done` at any
+  prompt to stop early regardless of the cap.
 - **`scry plan` writes its output by default.** It now saves the plan to
   `./scry-plan-<id>.md` (override with `--out PATH`) plus a diagnostics file alongside
   it, instead of only printing to stdout. Pass `--no-out` for the old print-only

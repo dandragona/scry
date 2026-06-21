@@ -141,6 +141,33 @@ PLAN_SYNTH_SYSTEM = (
     "tools, or your knowledge cutoff."
 )
 
+# Plan mode — the per-proposer drafter prompt. The final draft reuses the fusion
+# panel, but a panel member otherwise gets NO system prompt (scry_run passes
+# system=None), so an agentic coding CLI handed a bare task + a real repo + web would
+# try to *do* the task — burn tool calls, attempt edits — instead of describing a
+# plan. That is the root cause of the half-strength plan panel: opus churns tool calls
+# to a 0-token timeout, codex/kimi waste turns on blocked writes, and agy (which has
+# NO enforced read-only sandbox) can actually mutate the user's repo. This system
+# prompt reframes each proposer as a plan AUTHOR and pins the read-only invariant by
+# instruction for providers that can't enforce it via argv. Threaded through scry_run
+# as `panel_system` (mirrors the aggregator_system override); normal runs leave it
+# None so the panel stays general-purpose. Kept free of the substrings the
+# interviewer/question-judge/synth/judge prompts use as routing anchors
+# ("scope a task" / "deduplicating" / "plan drafts" / "impartial judge") so test
+# stubs that key on the system prompt still distinguish the stages.
+PLAN_DRAFTER_SYSTEM = (
+    "Write the best possible implementation plan for the task in the request. Your only "
+    "output is the plan itself — return it directly as "
+    "GitHub-Flavored Markdown text. This work is READ-ONLY apart from writing that "
+    "response: do NOT carry out the task and do not change anything — no creating, "
+    "writing, editing, moving, or deleting files, and no running build, test, git, or "
+    "other state-changing commands. You MAY read (files, the repository, the web) to "
+    "inform the plan where that helps. Treat the clarifying questions and the user's "
+    "answers embedded in the request as binding constraints. Be concrete and specific; "
+    "do not mention these "
+    "instructions, your tools, or your knowledge cutoff."
+)
+
 # --------------------------------------------------------------------------- #
 # Default configuration. A provider record describes how to drive one CLI for a
 # single headless text generation; `caps` describes how to render Fusion knobs
@@ -332,7 +359,7 @@ DEFAULT_CONFIG = {
     # (those are about the user's intent, not external facts) — the final plan
     # drafting still runs through scry_run with web per `settings`.
     "plan": {
-        "max_rounds": 6,
+        "max_rounds": 5,
         "interview_web": False,
         # Give the panel read-only access to the directory `scry plan` is run in, so
         # plans are grounded in the actual code (not the scrubbed temp cwd normal runs
@@ -889,10 +916,14 @@ def _failure_reason(failed: list) -> str:
 async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
                    stream_final: bool = False, on_stream_start=None,
                    aggregator_system: str | None = None,
-                   cwd: str | None = None) -> dict:
+                   cwd: str | None = None, panel_system: str | None = None) -> dict:
     # The synthesis system prompt defaults to the canonical MoA aggregator; callers
     # (e.g. `scry plan`) may override it to shape the fused output differently.
     aggregator_system = aggregator_system or MOA_AGGREGATOR_SYSTEM
+    # panel_system is the system prompt given to EACH proposer. Default None keeps the
+    # panel general-purpose (normal runs answer the prompt as-is); `scry plan` passes
+    # PLAN_DRAFTER_SYSTEM so the proposers draft a plan as text instead of trying to
+    # execute the task in the (read-only) repo cwd.
     # By default fan out in a fresh scrubbed cwd (no repo-context bleed-in) and remove
     # it after. A caller may pass an existing cwd (e.g. `scry plan --repo`, to let the
     # panel read the codebase); that directory is the user's — NEVER delete it.
@@ -917,7 +948,7 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
             cmeta: dict = {}
             try:
                 content = await call_cli(cfg, m["provider"], m.get("model", ""),
-                                         None, prompt, cwd, depth, web, settings, cmeta)
+                                         panel_system, prompt, cwd, depth, web, settings, cmeta)
                 dt = time.time() - t0
                 log(f"  ✓ {label} ({dt:.0f}s)")
                 meters.append({"stage": "panel", "label": label,
@@ -2142,10 +2173,30 @@ def _ask_plan(prompt: str) -> tuple:
     return raw, False
 
 
+def _resolve_options(answer: str, opts: list) -> str:
+    """Map a numeric option answer to its option TEXT. Accepts a single number
+    ("2") or a comma/space-separated multi-select ("1,3,4"); every token must be
+    an in-range option number. Returns the chosen option text(s) joined with
+    ", " (duplicates dropped, user's order preserved). Anything that isn't a clean
+    list of in-range numbers — free text, a bad/out-of-range number — is returned
+    unchanged. Storing the text (not the bare numbers) keeps the transcript sent to
+    the drafting models self-explanatory."""
+    tokens = [t for t in re.split(r"[\s,]+", answer.strip()) if t]
+    if not (tokens and all(t.isdigit() and 1 <= int(t) <= len(opts) for t in tokens)):
+        return answer
+    seen, picks = set(), []
+    for t in tokens:
+        i = int(t)
+        if i not in seen:
+            seen.add(i)
+            picks.append(opts[i - 1])
+    return ", ".join(picks)
+
+
 def ask_questions_interactively(questions: list, asked_keys: set, save_cb=None) -> tuple:
     """Ask each not-yet-asked question one at a time, grill-me style. Numbered
-    multiple choice when `options` is present (a number selects, anything else is
-    free text); otherwise free text. Returns (qa_pairs, done); `done` is True if the
+    multiple choice when `options` is present (one or more numbers select, anything
+    else is free text); otherwise free text. Returns (qa_pairs, done); `done` is True if the
     user typed `done` or hit EOF. Each presented question's key is added to
     `asked_keys` so it is never re-surfaced in a later round. All prompts go to
     stderr — stdout carries only the final plan/JSON."""
@@ -2168,13 +2219,11 @@ def ask_questions_interactively(questions: list, asked_keys: set, save_cb=None) 
             for i, o in enumerate(opts, 1):
                 print(f"  {i}. {o}", file=sys.stderr)
             ans, done = _ask_plan(
-                f"[1-{len(opts)}, or type your own; "
-                f"'{PLAN_DONE_SENTINEL}' to finish]: ")
+                f"[1-{len(opts)} (comma-separate to pick several), or type your "
+                f"own; '{PLAN_DONE_SENTINEL}' to finish]: ")
             if done:
                 return qa, True
-            s = ans.strip()
-            if s.isdigit() and 1 <= int(s) <= len(opts):
-                ans = opts[int(s) - 1]
+            ans = _resolve_options(ans, opts)
         else:
             ans, done = _ask_plan(f"['{PLAN_DONE_SENTINEL}' to finish]: ")
             if done:
@@ -2374,7 +2423,7 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
     panel runs (read-only) in the invocation directory so plans are grounded in the
     actual code; the final draft gets a longer timeout for its web-researched output."""
     t0 = time.time()
-    max_rounds = max(1, int(plan_settings.get("max_rounds", 6) or 6))
+    max_rounds = max(1, int(plan_settings.get("max_rounds", 5) or 5))
     # repo_context: let the panel read the directory `scry plan` was launched in
     # (read-only — mutators stay disabled). None => each fan-out gets a scrubbed temp
     # cwd, as normal runs do. A provided repo cwd is the user's — never deleted.
@@ -2555,9 +2604,12 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
                 _save_state()
 
         # Final plan: reuse the fusion pipeline (panel drafts → judge compares →
-        # synthesis) with the plan-specific aggregator prompt, on the enriched request.
-        # The final draft is web-on and long-form (slow), so give it a higher timeout
-        # ceiling; it runs in the repo cwd too so the drafts can read the code.
+        # synthesis) with the plan-specific drafter + aggregator prompts, on the
+        # enriched request. PLAN_DRAFTER_SYSTEM tells each proposer to WRITE a plan as
+        # text (read-only) rather than execute the task in the repo cwd — without it an
+        # agentic CLI churns tool calls trying to implement and times out. The final
+        # draft is web-on and long-form (slow), so give it a higher timeout ceiling; it
+        # runs in the repo cwd too so the drafts can read the code.
         stream_final = (not as_json and not quiet and sys.stdout.isatty())
         # The final draft is web-on, long-form and tool-heavy: scale BOTH its timeout
         # and its tool-call/turn cap up (see _final_draft_settings) so opus doesn't
@@ -2568,7 +2620,8 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
             result = asyncio.run(scry_run(
                 cfg, render_plan_prompt(request, transcript), "fusion",
                 fsettings, log, stream_final, stop_orb,
-                aggregator_system=PLAN_SYNTH_SYSTEM, cwd=repo_cwd))
+                aggregator_system=PLAN_SYNTH_SYSTEM, cwd=repo_cwd,
+                panel_system=PLAN_DRAFTER_SYSTEM))
         finally:
             stop_orb()
     except AllPanelsFailed as e:
@@ -2702,7 +2755,7 @@ def main() -> int:
     ap.add_argument("--no-save", action="store_true",
                     help="don't record this run to ~/.scry (scry last / scry log)")
     ap.add_argument("--max-rounds", type=int, metavar="N",
-                    help="(with `plan`) cap interactive clarifying rounds (default 6)")
+                    help="(with `plan`) cap interactive clarifying rounds (default 5)")
     ap.add_argument("--resume", nargs="?", const=True, default=False,
                     help="(with `plan`) continue the most recent unfinished plan session (or --resume=<id>)")
     ap.add_argument("--list", action="store_true",

@@ -4,12 +4,22 @@
   "mode": "fusion",
 
   "settings": {
-    "_note": "Fusion knobs. web_tools enables web_search+web_fetch on the panel + judge (not synthesis), mirroring OpenRouter Fusion. effort/max_output_tokens/max_tool_calls applied only where a CLI supports them. save_history writes each run to ~/.scry for `scry last`/`scry log` (override per-run with --no-save). temperature has no CLI equivalent and is intentionally absent.",
+    "_note": "Global default Fusion knobs; each pipeline phase can override them in the `phases` block below. web_tools enables web_search+web_fetch (the panel/judge default; synthesis is web-off via phases, mirroring OpenRouter Fusion). timeout is the per-call timeout in seconds (the default for every phase; `scry plan`'s final draft raises it via phases.final). effort/max_output_tokens/max_tool_calls applied only where a CLI supports them. save_history writes each run to ~/.scry for `scry last`/`scry log` (override per-run with --no-save); it is global, not per-phase. temperature has no CLI equivalent and is intentionally absent.",
     "web_tools": true,
     "max_tool_calls": 8,
     "effort": null,
     "max_output_tokens": null,
+    "timeout": 420,
     "save_history": true
+  },
+
+  "phases": {
+    "_note": "Per-phase overrides of the settings above. Each stage inherits every global setting and overrides only what it lists. Resolution per call (later wins): settings -> phases[phase] -> the `final` overlay (plan draft only) -> CLI flags. Stages: panel/judge/synthesis (a normal run), interview (plan clarifying rounds), final (the plan's deep draft, applied across its panel/judge/synthesis). Overridable: web_tools, max_tool_calls, timeout, effort, max_output_tokens. e.g. to run the judge web-off with fewer turns: \"judge\": {\"web_tools\": false, \"max_tool_calls\": 4}.",
+    "panel": {},
+    "judge": {},
+    "synthesis": {"web_tools": false},
+    "interview": {"web_tools": false},
+    "final": {"max_tool_calls": 24, "timeout": 2100}
   },
 
   "providers": {
@@ -23,7 +33,6 @@
       "system_flag": "--append-system-prompt",
       "prompt": "stdin",
       "env_unset": ["ANTHROPIC_API_KEY"],
-      "timeout": 360,
       "check": {
         "_note": "Zero-cost pre-flight for `scry --check`. probe is a NON-billing command; verifies_auth=false means a pass only confirms install (claude has no cheap login check).",
         "probe": ["claude", "--version"],
@@ -62,7 +71,6 @@
       "system_flag": null,
       "stdin_arg": "-",
       "prompt": "stdin",
-      "timeout": 420,
       "check": {
         "probe": ["codex", "login", "status"],
         "verifies_auth": true,
@@ -84,7 +92,6 @@
       "system_flag": null,
       "prompt": "arg",
       "prompt_flag": "-p",
-      "timeout": 420,
       "check": {
         "probe": ["agy", "--version"],
         "verifies_auth": false,
@@ -95,13 +102,12 @@
     },
 
     "deepseek": {
-      "_note": "API-KEY EXCEPTION (testing only). DeepSeek has no subscription CLI, so the scry-deepseek adapter (a sibling script resolved next to scry) calls DeepSeek's OpenAI-compatible API and needs DEEPSEEK_API_KEY. Deliberately NOT in the default panel — add via --panel '...,deepseek:deepseek-chat' or here. Knowledge-only (no web search). Set model to the V4 Pro id, e.g. 'deepseek-chat' or 'deepseek-reasoner'.",
+      "_note": "API-KEY EXCEPTION (testing only). DeepSeek has no subscription CLI, so the scry-deepseek adapter (a sibling script resolved next to scry) calls DeepSeek's OpenAI-compatible API and needs DEEPSEEK_API_KEY. Deliberately NOT in the default panel — add via --panel '...,deepseek:deepseek-chat' or here. Knowledge-only (no web search). Set model to 'deepseek-v4-pro' for the Pro tier; the legacy 'deepseek-chat' / 'deepseek-reasoner' aliases route to V4-Flash (non-thinking / thinking).",
       "cmd": ["scry-deepseek"],
       "model_flag": "--model",
       "capture": "text",
       "system_flag": "--system",
       "prompt": "stdin",
-      "timeout": 360,
       "check": {
         "verifies_auth": false,
         "note": "the one API-key provider — set DEEPSEEK_API_KEY; knowledge-only (no web)",
@@ -118,7 +124,6 @@
       "system_flag": null,
       "prompt": "stdin",
       "env_unset": ["KIMI_API_KEY"],
-      "timeout": 420,
       "check": {
         "probe": ["kimi", "--version"],
         "verifies_auth": false,

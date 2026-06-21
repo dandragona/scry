@@ -4,37 +4,36 @@
 #   curl -fsSL https://raw.githubusercontent.com/dandragona/scry/main/install.sh | sh
 #
 # scry is one stdlib-only Python file, so there is nothing to build and no
-# dependencies to install. Override the source or destination if you like:
+# dependencies to install. It installs into a USER-OWNED directory and never uses
+# sudo — by default ~/.local/bin, like rustup / uv / pipx — so install, update, and
+# run all work without elevation. Override the source or destination if you like:
 #
-#   REPO=youruser/scry INSTALL_DIR=~/.local/bin sh install.sh
+#   SCRY_REPO=youruser/scry INSTALL_DIR=~/bin sh install.sh
 #
 set -eu
 
-REPO="${REPO:-dandragona/scry}"
-REF="${REF:-main}"
-INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+# SCRY_REPO / SCRY_REF are the canonical names (shared with `scry update`); the bare
+# REPO / REF are kept as fallbacks for backward compatibility.
+REPO="${SCRY_REPO:-${REPO:-dandragona/scry}}"
+REF="${SCRY_REF:-${REF:-main}}"
+# User-owned by default — never a system dir. A root-owned CLI is exactly what makes
+# you reach for sudo just to install/update/run it, so we don't go there.
+INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${REPO}/${REF}}"
 
-err() { printf '\033[31merror:\033[0m %s\n' "$1" >&2; exit 1; }
+err()  { printf '\033[31merror:\033[0m %s\n' "$1" >&2; exit 1; }
+note() { printf '\033[33mnote:\033[0m %s\n' "$1"; }
 
 command -v python3 >/dev/null 2>&1 || err "python3 not found (scry needs Python 3.9+)."
 command -v curl    >/dev/null 2>&1 || err "curl not found."
 
-# Ensure the install dir exists, escalating to sudo only when the location needs
-# it. /usr/local/bin is on the macOS default PATH but does not exist on a fresh
-# machine, so it must be created before anything can move into it. Remember
-# whether writes there need sudo so each file install reuses the same decision.
-SUDO=""
-if mkdir -p "$INSTALL_DIR" 2>/dev/null && [ -w "$INSTALL_DIR" ]; then
-  :
-else
-  printf 'Need sudo to write %s\n' "$INSTALL_DIR"
-  sudo mkdir -p "$INSTALL_DIR" || err "could not create $INSTALL_DIR"
-  SUDO="sudo"
-fi
+# Create the install dir AS YOU — no sudo, ever. If it can't be made writable, that's
+# a misconfigured INSTALL_DIR, not a license to escalate into a system directory.
+mkdir -p "$INSTALL_DIR" 2>/dev/null || true
+[ -w "$INSTALL_DIR" ] || err "$INSTALL_DIR isn't writable by $(id -un). Set INSTALL_DIR to a directory you own, e.g.  INSTALL_DIR=\$HOME/.local/bin sh install.sh"
 
-# Download one Python script from the repo and install it (executable) into
-# INSTALL_DIR. Used for both `scry` and its sibling `scry-deepseek` adapter.
+# Download one Python script from the repo and install it (executable AND world-
+# readable) into INSTALL_DIR. Used for both `scry` and its `scry-deepseek` sibling.
 install_file() {
   name="$1"
   dest="${INSTALL_DIR%/}/$name"
@@ -43,28 +42,30 @@ install_file() {
     || { rm -f "$tmp"; err "download failed from $RAW_BASE/$name"; }
   head -n1 "$tmp" | grep -q 'python3' \
     || { rm -f "$tmp"; err "downloaded $name doesn't look like a scry script."; }
-  $SUDO mv "$tmp" "$dest" || { rm -f "$tmp"; err "could not install $name to $INSTALL_DIR"; }
-  $SUDO chmod +x "$dest"  || err "could not make $dest executable"
+  mv "$tmp" "$dest" || { rm -f "$tmp"; err "could not install $name to $INSTALL_DIR"; }
+  # 755, not `+x`: scry is a Python script the interpreter must READ to run, so it
+  # has to be world-readable (a bare `chmod +x` on a 0600 tempfile yields 0711).
+  chmod 755 "$dest" || err "could not make $dest executable"
   printf '  -> %s\n' "$dest"
 }
 
-# scry also ships a Claude Code skill so you can run the panel as `/scry` from
-# inside Claude Code. Drop it into the user's personal skills dir (under $HOME,
-# so never needs sudo; honors CLAUDE_CONFIG_DIR). Best-effort: a failure here is
-# only a note, never an aborted install — the CLI is the thing that matters.
+# scry also ships Claude Code skills (/scry, /scry-plan). Drop each into the user's
+# personal skills dir (under $HOME, never needs sudo; honors CLAUDE_CONFIG_DIR).
+# Best-effort: a failure here is only a note, never an aborted install.
 install_skill() {
-  skill_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/scry"
+  name="$1"
+  skill_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/$name"
   tmp="$(mktemp)"
-  if ! curl -fsSL "$RAW_BASE/.claude/skills/scry/SKILL.md" -o "$tmp" 2>/dev/null; then
+  if ! curl -fsSL "$RAW_BASE/.claude/skills/$name/SKILL.md" -o "$tmp" 2>/dev/null; then
     rm -f "$tmp"
-    printf '\033[33mnote:\033[0m could not fetch the /scry Claude skill — skipped.\n'
+    note "could not fetch the /$name Claude skill — skipped."
     return 0
   fi
   if mkdir -p "$skill_dir" 2>/dev/null && mv "$tmp" "$skill_dir/SKILL.md" 2>/dev/null; then
     printf '  -> %s\n' "$skill_dir/SKILL.md"
   else
     rm -f "$tmp"
-    printf '\033[33mnote:\033[0m could not write the /scry Claude skill to %s — skipped.\n' "$skill_dir"
+    note "could not write the /$name Claude skill to $skill_dir — skipped."
   fi
 }
 
@@ -75,14 +76,35 @@ install_file scry
 # DeepSeek shows up as "not found" even with DEEPSEEK_API_KEY set.
 install_file scry-deepseek
 
-printf '\nInstalling the /scry Claude Code skill\n'
-install_skill
+printf '\nInstalling the /scry + /scry-plan Claude Code skills\n'
+install_skill scry
+install_skill scry-plan
 
 printf '\n\033[32m✓ installed\033[0m %s\n' "$("${INSTALL_DIR%/}/scry" --version 2>/dev/null || echo scry)"
+
+# PATH guidance — we PRINT the line to add and never touch your shell files.
 case ":$PATH:" in
-  *":${INSTALL_DIR%/}:"*) : ;;
-  *) printf '\033[33mnote:\033[0m %s is not on your PATH — add it.\n' "$INSTALL_DIR" ;;
+  *":${INSTALL_DIR%/}:"*) : ;;   # already on PATH — nothing to do
+  *)
+    rc="your shell profile"
+    case "${SHELL:-}" in
+      */zsh)  rc="$HOME/.zshrc" ;;
+      */bash) rc="$HOME/.bashrc" ;;
+    esac
+    note "${INSTALL_DIR%/} is not on your PATH."
+    printf '  Add it by appending this line to %s, then restart your shell:\n' "$rc"
+    printf '    export PATH="%s:$PATH"\n' "${INSTALL_DIR%/}"
+    ;;
 esac
+
+# Warn about an older scry that would SHADOW this one (e.g. a previous root-owned
+# /usr/local/bin install). Never auto-removed — that's the user's call (and sudo).
+existing="$(command -v scry 2>/dev/null || true)"
+if [ -n "$existing" ] && [ "$existing" != "${INSTALL_DIR%/}/scry" ]; then
+  note "another scry is earlier on your PATH and will shadow this one: $existing"
+  printf '  Remove it, e.g.:  rm %s   (sudo if it is root-owned)\n' "$existing"
+fi
+
 printf '\nNext: run \033[1mscry --check\033[0m to verify your model CLIs are logged in.\n'
 printf 'For DeepSeek, also set \033[1mDEEPSEEK_API_KEY\033[0m (see .env.example).\n'
-printf 'In Claude Code, run \033[1m/scry <prompt>\033[0m to consult the panel from your editor.\n'
+printf 'In Claude Code, run \033[1m/scry <prompt>\033[0m to consult the panel, or \033[1m/scry-plan <request>\033[0m to plan.\n'

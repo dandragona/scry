@@ -741,10 +741,109 @@ class PlanListSubprocessTest(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# `scry plan --step` — the headless, JSON-driven interview protocol that the
+# /scry-plan skill uses to drive the full plan mode from inside Claude Code.
+# Each call reads an optional answers payload on stdin and prints ONE JSON
+# envelope; state is carried between calls via the existing resume checkpoints.
+# --------------------------------------------------------------------------- #
+class PlanStepSubprocessTest(unittest.TestCase):
+    REQUEST = "build a rate limiter"
+
+    def _env(self, stub):
+        s = h.StubBins({"claude": stub})
+        self.addCleanup(shutil.rmtree, s.dir, ignore_errors=True)
+        env = s.env
+        home = tempfile.mkdtemp(prefix="scry-home-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        env["SCRY_HOME"] = home
+        return env
+
+    _PANEL = ["--panel", "claude:opus", "--judge", "claude:opus",
+              "--aggregator", "claude:opus"]
+
+    def _start_args(self, *extra):
+        return ["plan", self.REQUEST, "--no-anim", "--step", "--json",
+                *self._PANEL, *extra]
+
+    def _resume_args(self, rid, *extra):
+        return ["plan", f"--resume={rid}", "--no-anim", "--step", "--json",
+                *self._PANEL, *extra]
+
+    def _run(self, args, stdin, env, cwd=None):
+        cp = h.run_scry(args, input=stdin, env=env, cwd=cwd)
+        self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
+        return json.loads(cp.stdout), cp
+
+    # ----- start emits the first round's questions -------------------------- #
+    def test_start_emits_questions(self):
+        env = self._env(h.claude_plan(rounds_before_ready=1))
+        rec, _ = self._run(self._start_args(), "", env)
+        self.assertEqual(rec["status"], "questions")
+        self.assertTrue(rec["id"])
+        self.assertGreaterEqual(len(rec["questions"]), 1)
+        self.assertIn("q", rec["questions"][0])
+
+    # ----- a confident panel skips straight to ready ----------------------- #
+    def test_start_ready_when_panel_confident(self):
+        env = self._env(h.claude_plan(rounds_before_ready=0))
+        rec, _ = self._run(self._start_args(), "", env)
+        self.assertEqual(rec["status"], "ready")
+        self.assertTrue(rec["id"])
+
+    # ----- answering a round advances the interview ------------------------ #
+    def test_answer_advances_to_ready(self):
+        env = self._env(h.claude_plan(rounds_before_ready=1))
+        rec1, _ = self._run(self._start_args(), "", env)
+        rid = rec1["id"]
+        payload = json.dumps({"answers": [{"q": rec1["questions"][0]["q"],
+                                           "a": "linux"}], "done": False})
+        rec2, _ = self._run(self._resume_args(rid), payload, env)
+        self.assertEqual(rec2["status"], "ready")
+
+    # ----- done:true drafts the plan and writes the files ------------------ #
+    def test_done_drafts_and_writes_files(self):
+        d = tempfile.mkdtemp(prefix="scry-step-out-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        env = self._env(h.claude_plan(rounds_before_ready=1))
+        rec, _ = self._run(self._start_args(), json.dumps({"done": True}),
+                           env, cwd=d)
+        self.assertEqual(rec["status"], "done")
+        self.assertIn("## Context", rec["final"])
+        self.assertTrue(rec["plan_path"])
+        plans = [f for f in os.listdir(d)
+                 if f.endswith(".md") and not f.endswith(".diagnostics.md")]
+        diags = [f for f in os.listdir(d) if f.endswith(".diagnostics.md")]
+        self.assertEqual(len(plans), 1, os.listdir(d))
+        self.assertEqual(len(diags), 1, os.listdir(d))
+
+    # ----- the whole loop: start -> answer -> ready -> draft --------------- #
+    def test_full_loop_start_answer_draft(self):
+        env = self._env(h.claude_plan(rounds_before_ready=1))
+        rec1, _ = self._run(self._start_args(), "", env)
+        self.assertEqual(rec1["status"], "questions")
+        rid = rec1["id"]
+        ans = json.dumps({"answers": [{"q": rec1["questions"][0]["q"], "a": "x"}]})
+        rec2, _ = self._run(self._resume_args(rid), ans, env)
+        self.assertEqual(rec2["status"], "ready")
+        rec3, _ = self._run(self._resume_args(rid), json.dumps({"done": True}), env)
+        self.assertEqual(rec3["status"], "done")
+        self.assertIn("## Context", rec3["final"])
+
+    # ----- an unknown resume id is a clean JSON error, exit 1 -------------- #
+    def test_unknown_resume_emits_json_error(self):
+        env = self._env(h.claude_plan())
+        cp = h.run_scry(self._resume_args("9999999999999"), input="{}", env=env)
+        self.assertEqual(cp.returncode, 1)
+        rec = json.loads(cp.stdout)
+        self.assertEqual(rec["status"], "error")
+
+
+# --------------------------------------------------------------------------- #
 # Pure helpers for the default-output + diagnostics feature:
 #   _diag_path             — derive the diagnostics path from the plan path
-#   _final_draft_settings  — scale max_tool_calls + timeout for the final draft
 #   render_plan_diagnostics — the human-readable .diagnostics.md body
+# (The plan final draft's budget now comes from phases.final via _phase_settings;
+#  see test_scry_run.PhaseSettingsTest for the resolution tests.)
 # --------------------------------------------------------------------------- #
 class DiagPathTest(unittest.TestCase):
     def setUp(self):
@@ -763,38 +862,6 @@ class DiagPathTest(unittest.TestCase):
     def test_default_id_filename(self):
         self.assertEqual(self.scry._diag_path("scry-plan-123.md"),
                          "scry-plan-123.diagnostics.md")
-
-
-class FinalDraftSettingsTest(unittest.TestCase):
-    def setUp(self):
-        self.scry = h.load_scry()
-
-    def test_scales_cap_and_sets_timeout(self):
-        f = self.scry._final_draft_settings(
-            {"max_tool_calls": 8},
-            {"final_timeout_scale": 3, "final_tool_call_scale": 3})
-        self.assertEqual(f["max_tool_calls"], 24)
-        self.assertEqual(f["timeout_scale"], 3)
-
-    def test_scale_of_one_leaves_cap_unchanged(self):
-        f = self.scry._final_draft_settings(
-            {"max_tool_calls": 8},
-            {"final_timeout_scale": 1, "final_tool_call_scale": 1})
-        self.assertEqual(f["max_tool_calls"], 8)
-
-    def test_missing_cap_is_not_invented(self):
-        f = self.scry._final_draft_settings({}, {"final_tool_call_scale": 3})
-        self.assertNotIn("max_tool_calls", f)
-
-    def test_defaults_to_triple_when_unset(self):
-        # An empty plan-settings dict still applies the built-in 3x default.
-        f = self.scry._final_draft_settings({"max_tool_calls": 8}, {})
-        self.assertEqual(f["max_tool_calls"], 24)
-
-    def test_does_not_mutate_input(self):
-        base = {"max_tool_calls": 8}
-        self.scry._final_draft_settings(base, {"final_tool_call_scale": 3})
-        self.assertEqual(base, {"max_tool_calls": 8})
 
 
 class RenderPlanDiagnosticsTest(unittest.TestCase):
@@ -824,9 +891,14 @@ class RenderPlanDiagnosticsTest(unittest.TestCase):
         }
         self.cfg = {"panel": [{"label": "claude-opus"}, {"label": "codex-gpt"}],
                     "judge": {"provider": "claude", "model": "opus"},
-                    "aggregator": {"provider": "claude", "model": "opus"}}
-        self.settings = {"max_tool_calls": 8, "web_tools": True, "effort": None}
-        self.plan_settings = {"final_timeout_scale": 3, "final_tool_call_scale": 3}
+                    "aggregator": {"provider": "claude", "model": "opus"},
+                    "phases": {"panel": {}, "judge": {},
+                               "synthesis": {"web_tools": False},
+                               "interview": {"web_tools": False},
+                               "final": {"max_tool_calls": 24, "timeout": 2100}}}
+        self.settings = {"max_tool_calls": 8, "web_tools": True, "timeout": 420,
+                         "effort": None}
+        self.plan_settings = {"max_rounds": 6, "repo_context": True}
 
     def _render(self):
         return self.scry.render_plan_diagnostics(
@@ -848,10 +920,12 @@ class RenderPlanDiagnosticsTest(unittest.TestCase):
     def test_ok_model_listed(self):
         self.assertIn("codex-gpt", self._render())
 
-    def test_settings_show_base_and_scaled_cap(self):
+    def test_settings_show_resolved_phase_budgets(self):
         md = self._render()
-        self.assertIn("final draft: 24", md)        # 8 * 3
-        self.assertIn("final_tool_call_scale", md)
+        self.assertIn("final draft", md)
+        self.assertIn("24", md)            # phases.final max_tool_calls, layered on the draft
+        self.assertIn("2100", md)          # phases.final timeout
+        self.assertIn("interview phase", md)
 
     def test_consensus_map_rendered(self):
         md = self._render()

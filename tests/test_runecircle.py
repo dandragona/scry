@@ -1,5 +1,5 @@
 """Tests for the `scry init` welcome sigil: RuneCircle, _welcome_lines,
-_compose_welcome, show_init_welcome (scry lines 831-996).
+_compose_welcome, show_init_welcome (scry lines ~1134-1300).
 
 Mirrors and extends the smoke.sh RuneCircle block. No model CLI is ever invoked;
 the only "side effect" is writing a static splash to a fake stderr stream.

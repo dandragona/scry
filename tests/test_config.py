@@ -461,7 +461,7 @@ class TestLoadConfigPhases(unittest.TestCase):
         self.assertEqual(set(ph), set(scry.DEFAULT_PHASES))
         self.assertIs(ph["synthesis"]["web_tools"], False)
         self.assertIs(ph["interview"]["web_tools"], False)
-        self.assertEqual(ph["final"]["max_tool_calls"], 24)
+        self.assertNotIn("max_tool_calls", ph["final"])   # uncapped by default
         self.assertEqual(ph["final"]["timeout"], 2100)
 
     def test_partial_phase_override_keeps_sibling_defaults(self):
@@ -469,7 +469,7 @@ class TestLoadConfigPhases(unittest.TestCase):
         p = self._write({"phases": {"judge": {"web_tools": False}}})
         ph = scry.load_config(p)["phases"]
         self.assertIs(ph["judge"]["web_tools"], False)          # overridden
-        self.assertEqual(ph["final"]["max_tool_calls"], 24)     # sibling default kept
+        self.assertEqual(ph["final"]["timeout"], 2100)          # sibling default kept
         self.assertEqual(ph["synthesis"], {"web_tools": False})
 
     def test_non_dict_phase_value_ignored(self):

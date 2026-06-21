@@ -51,7 +51,7 @@ class TestDryRun(unittest.TestCase):
         self.assertIn("[dry-run]", header)
         self.assertIn("mode=fusion", header)
         self.assertIn("web_tools=True", header)
-        self.assertIn("max_tool_calls=8", header)
+        self.assertIn("max_tool_calls=uncapped", header)   # uncapped by default
 
     def test_claude_proposer_json_output_format(self):
         out = _dry(self.cfg, "fusion", self.cfg["settings"])

@@ -4,9 +4,9 @@
   "mode": "fusion",
 
   "settings": {
-    "_note": "Global default Fusion knobs; each pipeline phase can override them in the `phases` block below. web_tools enables web_search+web_fetch (the panel/judge default; synthesis is web-off via phases, mirroring OpenRouter Fusion). timeout is the per-call timeout in seconds (the default for every phase; `scry plan`'s final draft raises it via phases.final). effort/max_output_tokens/max_tool_calls applied only where a CLI supports them. save_history writes each run to ~/.scry for `scry last`/`scry log` (override per-run with --no-save); it is global, not per-phase. temperature has no CLI equivalent and is intentionally absent.",
+    "_note": "Global default Fusion knobs; each pipeline phase can override them in the `phases` block below. web_tools enables web_search+web_fetch (the panel/judge default; synthesis is web-off via phases, mirroring OpenRouter Fusion). timeout is the per-call timeout in seconds (the default for every phase; `scry plan`'s final draft raises it via phases.final). effort/max_output_tokens/max_tool_calls applied only where a CLI supports them (max_tool_calls null = uncapped by default; set N to cap claude's --max-turns). save_history writes each run to ~/.scry for `scry last`/`scry log` (override per-run with --no-save); it is global, not per-phase. temperature has no CLI equivalent and is intentionally absent.",
     "web_tools": true,
-    "max_tool_calls": 8,
+    "max_tool_calls": null,
     "effort": null,
     "max_output_tokens": null,
     "timeout": 420,
@@ -19,7 +19,7 @@
     "judge": {},
     "synthesis": {"web_tools": false},
     "interview": {"web_tools": false},
-    "final": {"max_tool_calls": 24, "timeout": 2100}
+    "final": {"timeout": 2100}
   },
 
   "providers": {

@@ -54,7 +54,7 @@ Everything else is matched:
 | `web_search` + `web_fetch` on panel **and** judge, **off** for synthesis | ✅ claude (`WebSearch`/`WebFetch`) + codex (`web_search=live`) + kimi (`SearchWeb`/`FetchURL`, toggled via the generated agent file — honors `--no-web`) + agy (Gemini grounding, on by default; can't be force-disabled) |
 | Judge compares → 5-field JSON (consensus/contradictions/partial_coverage/unique_insights/blind_spots) | ✅ |
 | Judge defaults to the outer (synthesis) model | ✅ |
-| `max_tool_calls` cap (default 8) | ✅ claude (`--max-turns`); ⚠️ no codex equivalent |
+| `max_tool_calls` cap (Fusion default 8) | ⚠️ claude (`--max-turns`) when set; scry defaults to **uncapped** (bounded by `timeout`); no codex equivalent |
 | Reasoning effort | ✅ claude (`--effort`) + codex (`model_reasoning_effort`) |
 | `{status, analysis, responses}` output + `failure_reason` enum | ✅ `--json` |
 | Degraded success when judge fails (responses kept, analysis omitted) | ✅ |
@@ -233,9 +233,9 @@ Note this sends repo contents to your panel models — the same exposure as runn
 repo directly.
 
 **Patient final draft.** The interview rounds stay fast (web-off, fail-fast via `phases.interview`), but the
-final web-researched draft gets its own budget via `phases.final` (default `max_tool_calls: 24`,
-`timeout: 2100`): that draft is web-on and reads your repo, so the base cap of 8 turns is often too few — a
-model can exhaust it mid-research and fail (claude surfaces this as `model error: exit 1`). The `final`
+final web-researched draft gets a longer timeout ceiling via `phases.final` (default `timeout: 2100`): it's
+web-on and reads your repo, so it can run long. Tool-call turns are **uncapped by default**, so a deep draft
+can't be cut off mid-research (claude would otherwise surface that as `model error: exit 1`). The `final`
 budget applies only to the final draft (layered across its panel/judge/synthesis) and never slows the fast
 interview calls. Both are plain ceilings, so they don't slow a call that finishes early.
 
@@ -273,7 +273,8 @@ auto-loaded by name — pass it with `--config ./config.json` to use it directly
   only what it lists. Stages: `panel`, `judge`, `synthesis` (a normal run); `interview`, `final` (plan).
   Resolution per call (later wins): `settings` → `phases[stage]` → the `final` overlay (plan draft only) →
   explicit CLI flags. Defaults reproduce scry's built-in behavior (synthesis/interview web-off; `final`
-  gets `max_tool_calls: 24`, `timeout: 2100`). e.g. `"judge": {"web_tools": false, "max_tool_calls": 4}`.
+  gets `timeout: 2100`). `max_tool_calls` is **uncapped by default** — set it on any phase to cap claude's
+  `--max-turns`. e.g. `"judge": {"web_tools": false, "max_tool_calls": 4}`.
 - **`providers`** — how to drive each CLI: base `cmd`, `model_flag`, capture (`json`+`result_path`,
   `outfile`+`-o`, or `text`), `system_flag`, `env_unset`, and a **`caps`** block mapping each
   Fusion knob to that CLI's flags (`web_on`/`web_off`, `tool_cap`, `effort`, `max_tokens_env`). A

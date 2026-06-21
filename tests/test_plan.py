@@ -837,6 +837,24 @@ class PlanStepSubprocessTest(unittest.TestCase):
         rec = json.loads(cp.stdout)
         self.assertEqual(rec["status"], "error")
 
+    # ----- the --step draft hands the drafter prompt to the panel ----------- #
+    def test_step_draft_panel_receives_drafter_system(self):
+        scry = h.load_scry()
+        d = tempfile.mkdtemp(prefix="scry-step-sysdump-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        dump = os.path.join(d, "sys.txt")
+        out = tempfile.mkdtemp(prefix="scry-step-out-")
+        self.addCleanup(shutil.rmtree, out, ignore_errors=True)
+        env = self._env(h.claude_plan(rounds_before_ready=1))
+        env["SCRY_SYSDUMP"] = dump
+        rec, _ = self._run(self._start_args(), json.dumps({"done": True}),
+                           env, cwd=out)
+        self.assertEqual(rec["status"], "done")
+        with open(dump) as f:
+            seen = f.read()
+        # The panel proposers must be reframed as plan AUTHORS, not executors.
+        self.assertIn(scry.PLAN_DRAFTER_SYSTEM, seen)
+
 
 # --------------------------------------------------------------------------- #
 # Pure helpers for the default-output + diagnostics feature:

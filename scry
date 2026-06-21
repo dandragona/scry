@@ -2878,7 +2878,8 @@ def _plan_step_finalize(cfg: dict, request: str, transcript: list, settings: dic
             cfg, render_plan_prompt(request, transcript), "fusion",
             settings, lambda _m: None,
             aggregator_system=PLAN_SYNTH_SYSTEM, cwd=repo_cwd,
-            run_overlay=cfg["phases"].get("final"), cli_overrides=cli_overrides))
+            run_overlay=cfg["phases"].get("final"), cli_overrides=cli_overrides,
+            panel_system=PLAN_DRAFTER_SYSTEM))
     except AllPanelsFailed as e:
         print(json.dumps({"status": "error", "error": str(e),
                           "responses": [{"model": r["label"], "ok": r["ok"],

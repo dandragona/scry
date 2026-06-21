@@ -344,12 +344,11 @@ billing off the subscription). Install it with `curl -LsSf https://code.kimi.com
   excludes `SearchWeb`/`FetchURL`. So **unlike agy, kimi honors `--no-web`** (web off for synthesis, per
   Fusion). The file is written to a temp path per call and removed afterward.
 
-### DeepSeek — the API-key exception (testing only)
+### DeepSeek — the API-key exception
 
-scry is built to avoid API keys, but DeepSeek has **no subscription CLI** — only its API. For
-*testing* (e.g. recreating OpenRouter's budget-panel DRACO result), scry ships a small stdlib
-adapter, **`scry-deepseek`**, that calls DeepSeek's OpenAI-compatible API. It is the **one provider
-that needs an API key**:
+scry is built to avoid API keys, but DeepSeek has **no subscription CLI** — only its API. scry ships
+a small stdlib adapter, **`scry-deepseek`**, that calls DeepSeek's OpenAI-compatible API. It is the
+**one provider that needs an API key** and is in the default panel at top tier:
 
 ```sh
 cp .env.example .env && $EDITOR .env                 # add DEEPSEEK_API_KEY=sk-… (gitignored; recommended)

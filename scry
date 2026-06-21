@@ -296,11 +296,11 @@ DEFAULT_CONFIG = {
             },
             "caps": {},
         },
-        # DeepSeek — the API-key EXCEPTION. No subscription CLI exists, so the
-        # `scry-deepseek` adapter (a sibling script, resolved next to scry) calls
-        # DeepSeek's OpenAI-compatible API and needs DEEPSEEK_API_KEY. For TESTING /
-        # recreating OpenRouter's budget-panel DRACO result only — deliberately NOT
-        # in the default panel. Knowledge-only (the raw API has no web search).
+        # DeepSeek — the API-key EXCEPTION and default-panel member. No subscription
+        # CLI exists, so the `scry-deepseek` adapter (a sibling script, resolved next
+        # to scry) calls DeepSeek's OpenAI-compatible API and needs DEEPSEEK_API_KEY.
+        # Default panel member at top tier (deepseek-v4-pro); bills per token (not a
+        # flat subscription). Knowledge-only (the raw API has no web search).
         "deepseek": {
             "cmd": ["scry-deepseek"],
             "model": "deepseek-v4-pro",
@@ -1281,10 +1281,11 @@ def do_dry_run(cfg: dict, mode: str, settings: dict,
 # only defines its own; pin one (e.g. `kimi:kimi-k2.6`, OpenRouter's near-Fable
 # Budget-panel member) only if your account actually exposes it.
 INIT_SUGGEST = {
-    "claude": ("opus", "claude-opus"),
-    "codex":  ("", "codex-gpt"),
-    "agy":    ("Gemini 3.1 Pro (High)", "gemini-pro"),
-    "kimi":   ("", "kimi"),
+    "claude":    ("opus", "claude-opus"),
+    "codex":     ("gpt-5.5", "codex-gpt"),
+    "agy":       ("Gemini 3.1 Pro (High)", "gemini-pro"),
+    "deepseek":  ("deepseek-v4-pro", "deepseek"),
+    "kimi":      ("K2.7", "kimi"),
 }
 
 

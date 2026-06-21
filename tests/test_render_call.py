@@ -137,6 +137,7 @@ class TestClaude(_Base):
         # buffered json output flag ABSENT (stream replaces it)
         self.assertFalse(_contains_seq(argv, ["--output-format", "json"]))
 
+
 # --------------------------------------------------------------------------- #
 # codex
 # --------------------------------------------------------------------------- #

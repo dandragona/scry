@@ -365,7 +365,8 @@ scry --check --panel "...,deepseek:deepseek-chat"    # shows: ✓ deepseek insta
   belong in `config.json`. See [SECURITY.md](SECURITY.md).
 - The adapter **resolves automatically as a sibling of `scry`** — scry now resolves a provider command
   by PATH → next-to-scry → cwd, so no install/symlink is needed even though proposers run in a temp cwd.
-- **Not in the default panel** — opt in via `--panel` or `config.json`.
+- **In the default panel at top tier (`deepseek-v4-pro`)** — requires `DEEPSEEK_API_KEY`; drop it
+  with `--panel` or `config.json` if you haven't set a key.
 - **Knowledge-only:** the raw chat API has no web search, so this member is handicapped on web-research
   tasks like DRACO. Defaults to the top-tier `deepseek-v4-pro` via the provider `model` field; the
   legacy `deepseek-chat`/`deepseek-reasoner` aliases route to V4-Flash. Base URL overridable via
@@ -373,7 +374,7 @@ scry --check --panel "...,deepseek:deepseek-chat"    # shows: ✓ deepseek insta
 - **No silent truncation:** the adapter requests the model's documented max output (V4: 384K tokens),
   so long answers are never cut short at the API's 4096-token default. Override with `--max-tokens`.
 - This deliberately **breaks the no-API-key rule** — it bills per token, not against a flat
-  subscription. Keep it for testing; drop it from the panel for normal use.
+  subscription.
 
 ## Robustness
 

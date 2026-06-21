@@ -711,6 +711,31 @@ def resolve_command(cmd0: str):
     return None
 
 
+def _provider_repo_safe(p: dict) -> bool:
+    """True iff this provider enforces read-only (cannot mutate files) and so may
+    run in the user's real repo cwd during `scry plan`. Three mechanisms qualify,
+    one per sandboxed panel CLI:
+
+      * claude — `--disallowedTools Bash Edit Write …`  (caps.mutator_disallow)
+      * codex  — `--sandbox read-only` baked into its cmd
+      * kimi   — a generated agent file that excludes the mutating tools
+
+    An explicit `repo_safe` config key overrides the inference. Anything else —
+    e.g. agy/Antigravity, which has NO flag to deny its file-write tool — is
+    treated as unsafe and isolated from the repo. Fail closed: an unrecognized
+    provider never gets repo access."""
+    if "repo_safe" in p:
+        return bool(p["repo_safe"])
+    if (p.get("caps") or {}).get("mutator_disallow"):
+        return True
+    cmd = p.get("cmd") or []
+    if "--sandbox" in cmd and "read-only" in cmd:
+        return True
+    if p.get("agent_file"):
+        return True
+    return False
+
+
 async def call_cli(cfg: dict, provider_name: str, model: str, system: str | None,
                    user: str, cwd: str, depth: int, web: bool, settings: dict,
                    meta: dict | None = None) -> str:
@@ -725,6 +750,20 @@ async def call_cli(cfg: dict, provider_name: str, model: str, system: str | None
     user_text = user
     if system and not p.get("system_flag"):  # fold system into prompt (e.g. codex)
         user_text = system + "\n\n" + user
+
+    # TODO(read-only-hardening): this cwd-isolation is a *temporary* safety measure.
+    # A provider with no read-only enforcement (notably agy/Gemini, which auto-
+    # approves file writes in headless `-p` mode) is run in a throwaway cwd instead
+    # of the user's repo, so it can't read or mutate the project — but it loses repo
+    # grounding entirely. The proper fix is to restrict such providers to read-only
+    # tools and re-enable repo access. Blocked upstream: agy has no headless tool-
+    # restriction yet (google-antigravity/antigravity-cli#45). When it ships:
+    # restrict agy's tools + drop the isolation for it. Also still to do: scrub
+    # $PWD/$OLDPWD from the child env so the repo path can't leak via the environment.
+    iso_cwd = None
+    if not _provider_repo_safe(p):
+        iso_cwd = tempfile.mkdtemp(prefix="scry-iso-")
+        cwd = iso_cwd
 
     outfile = ""
     if p.get("capture") == "outfile":
@@ -811,6 +850,8 @@ async def call_cli(cfg: dict, provider_name: str, model: str, system: str | None
                     os.remove(tmp)
                 except OSError:
                     pass
+        if iso_cwd:
+            shutil.rmtree(iso_cwd, ignore_errors=True)
 
 
 def _stream_extract(obj: dict, fmt: str) -> tuple:
@@ -862,52 +903,64 @@ async def stream_call(cfg: dict, provider_name: str, model: str, system: str | N
     env.update(env_over)
     env["SCRY_DEPTH"] = str(depth + 1)
 
-    proc = await asyncio.create_subprocess_exec(
-        *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE, env=env, cwd=cwd)
+    # Same read-only gate as call_cli (see the TODO there): a provider with no
+    # read-only enforcement must not stream in the caller's repo cwd — give it a
+    # throwaway cwd instead. (kimi, the only agent_file provider, is already
+    # refused above, so the remaining unsafe streamer is agy.)
+    iso_cwd = None
+    if not _provider_repo_safe(p):
+        iso_cwd = tempfile.mkdtemp(prefix="scry-iso-")
+        cwd = iso_cwd
     try:
-        proc.stdin.write(user_text.encode())
-        await proc.stdin.drain()
-        proc.stdin.close()
-    except (BrokenPipeError, ConnectionResetError, OSError):
-        pass
+        proc = await asyncio.create_subprocess_exec(
+            *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, env=env, cwd=cwd)
+        try:
+            proc.stdin.write(user_text.encode())
+            await proc.stdin.drain()
+            proc.stdin.close()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass  # child already closed stdin / exited — nothing to send; read its output
 
-    timeout = _effective_timeout(settings)
-    acc: list = []
-    final_text = ""
-    streamed_any = False
-    meta: dict = {}
-    try:
-        while True:
-            line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
-            if not line:
-                break
-            s = line.decode(errors="replace").strip()
-            if not s:
-                continue
-            try:
-                obj = json.loads(s)
-            except ValueError:
-                continue
-            meta.update(extract_usage(obj, p))  # populated only by the `result` event
-            delta, fin = _stream_extract(obj, fmt)
-            if delta:
-                sink(delta)
-                acc.append(delta)
-                streamed_any = True
-            if fin:
-                final_text = fin
-        await proc.wait()
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        if not streamed_any:
-            raise ProviderError(f"stream timeout after {int(timeout)}s")
+        timeout = _effective_timeout(settings)
+        acc: list = []
+        final_text = ""
+        streamed_any = False
+        meta: dict = {}
+        try:
+            while True:
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
+                if not line:
+                    break
+                s = line.decode(errors="replace").strip()
+                if not s:
+                    continue
+                try:
+                    obj = json.loads(s)
+                except ValueError:
+                    continue
+                meta.update(extract_usage(obj, p))  # populated only by the `result` event
+                delta, fin = _stream_extract(obj, fmt)
+                if delta:
+                    sink(delta)
+                    acc.append(delta)
+                    streamed_any = True
+                if fin:
+                    final_text = fin
+            await proc.wait()
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            if not streamed_any:
+                raise ProviderError(f"stream timeout after {int(timeout)}s")
 
-    text = final_text or "".join(acc)
-    if not text:
-        raise ProviderError("empty stream output")
-    return {"text": text, "streamed": streamed_any, "meta": meta}
+        text = final_text or "".join(acc)
+        if not text:
+            raise ProviderError("empty stream output")
+        return {"text": text, "streamed": streamed_any, "meta": meta}
+    finally:
+        if iso_cwd:
+            shutil.rmtree(iso_cwd, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #

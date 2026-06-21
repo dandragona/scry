@@ -40,8 +40,8 @@ class TestDryRun(unittest.TestCase):
     # ---- fusion mode, default panel ------------------------------------- #
     def test_fusion_default_panel_structure(self):
         out = _dry(self.cfg, "fusion", self.cfg["settings"])
-        # 3 proposers (claude/codex/agy), exactly one judge, one aggregator.
-        self.assertEqual(len(_lines(out, "PROPOSER")), 3, out)
+        # 5 proposers (claude/codex/agy/deepseek/kimi), one judge, one aggregator.
+        self.assertEqual(len(_lines(out, "PROPOSER")), 5, out)
         self.assertEqual(len(_lines(out, "JUDGE")), 1, out)
         self.assertEqual(len(_lines(out, "AGGREGATOR")), 1, out)
 
@@ -84,7 +84,7 @@ class TestDryRun(unittest.TestCase):
     def test_synthesize_mode_omits_judge(self):
         out = _dry(self.cfg, "synthesize", self.cfg["settings"])
         self.assertEqual(len(_lines(out, "JUDGE")), 0, out)
-        self.assertEqual(len(_lines(out, "PROPOSER")), 3, out)
+        self.assertEqual(len(_lines(out, "PROPOSER")), 5, out)
         self.assertEqual(len(_lines(out, "AGGREGATOR")), 1, out)
         self.assertIn("mode=synthesize", out.splitlines()[0])
 

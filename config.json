@@ -156,7 +156,9 @@
   "panel": [
     {"provider": "claude", "label": "claude-opus"},
     {"provider": "codex",  "label": "codex-gpt"},
-    {"provider": "agy",    "label": "gemini-pro"}
+    {"provider": "agy",    "label": "gemini-pro"},
+    {"provider": "deepseek", "label": "deepseek"},
+    {"provider": "kimi",   "label": "kimi"}
   ],
 
   "judge":      {"provider": "claude"},

@@ -24,14 +24,33 @@ import urllib.error
 import urllib.request
 
 
-def _load_env_file() -> None:
-    """Load KEY=VALUE lines from a `.env` next to this script into the process
-    environment, WITHOUT overriding variables already set (so an explicit
-    `export` or a CI secret always wins). Looked up by this script's own path,
-    not cwd, since scry runs providers from a throwaway temp dir. Keeps scry
-    zero-dependency — no python-dotenv. When the key lives only in `.env`, it
-    never enters scry's other subprocesses (claude/codex/agy) — only this one."""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+def _config_dir() -> str:
+    """scry's per-user config home — same as scry core's _global_config_path
+    (~/.config/scry). Like it, we do NOT honor XDG_CONFIG_HOME, so this .env sits
+    beside scry's own config.json."""
+    return os.path.join(os.path.expanduser("~"), ".config", "scry")
+
+
+def _env_file_candidates(script_path: str) -> list:
+    """The .env files to try, in precedence order (first to define a key wins).
+    A real environment variable still beats all of these (see _apply_env_file)."""
+    cands = []
+    override = os.environ.get("SCRY_ENV_FILE")
+    if override:
+        cands.append(override)
+    d_abs = os.path.dirname(os.path.abspath(script_path))
+    cands.append(os.path.join(d_abs, ".env"))
+    d_real = os.path.dirname(os.path.realpath(script_path))
+    if d_real != d_abs:
+        cands.append(os.path.join(d_real, ".env"))
+    cands.append(os.path.join(_config_dir(), ".env"))
+    return cands
+
+
+def _apply_env_file(path: str) -> None:
+    """Load KEY=VALUE lines from `path` into os.environ WITHOUT overriding keys
+    already set, so an explicit export / CI secret / higher-priority .env wins.
+    A missing or unreadable file is a no-op."""
     try:
         with open(path) as f:
             lines = f.readlines()
@@ -46,6 +65,17 @@ def _load_env_file() -> None:
         val = val.strip().strip('"').strip("'")
         if key and key not in os.environ:
             os.environ[key] = val
+
+
+def _load_env_file(script_path: str = __file__) -> None:
+    """Populate os.environ from the .env candidates that exist, in precedence
+    order: $SCRY_ENV_FILE, then a `.env` next to this script (and its realpath,
+    for symlinked installs), then ~/.config/scry/.env. Looked up by the script's
+    own path / config dir, never cwd, since scry runs providers from a throwaway
+    temp dir. Keeps scry zero-dependency — no python-dotenv. The key lives only in
+    this process — it never enters scry's other subprocesses (claude/codex/agy/kimi)."""
+    for path in _env_file_candidates(script_path):
+        _apply_env_file(path)
 
 
 def main() -> int:

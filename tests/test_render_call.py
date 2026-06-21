@@ -137,13 +137,6 @@ class TestClaude(_Base):
         # buffered json output flag ABSENT (stream replaces it)
         self.assertFalse(_contains_seq(argv, ["--output-format", "json"]))
 
-    def test_empty_model_no_model_flag(self):
-        p = self.prov("claude")
-        argv, _ = self.scry.render_call(
-            p, "", None, True, self.settings(), "/tmp/out")
-        self.assertNotIn("--model", argv)
-
-
 # --------------------------------------------------------------------------- #
 # codex
 # --------------------------------------------------------------------------- #
@@ -261,6 +254,38 @@ class TestKimi(_Base):
         self.assertNotIn("--allowedTools", argv)
         self.assertNotIn("--disallowedTools", argv)
         self.assertNotIn("--max-turns", argv)
+
+
+# --------------------------------------------------------------------------- #
+# per-provider model resolution: member model -> provider model -> CLI default
+# --------------------------------------------------------------------------- #
+class TestModelResolution(_Base):
+    def test_empty_member_inherits_provider_model(self):
+        # config.json gives claude a default model "opus"; an empty member model
+        # inherits it instead of omitting the flag.
+        p = self.prov("claude")
+        argv, _ = self.scry.render_call(
+            p, "", None, True, self.settings(), "/tmp/out")
+        self.assertTrue(_adjacent(argv, "--model", "opus"))
+
+    def test_explicit_member_model_overrides_provider(self):
+        p = self.prov("claude")  # provider default "opus"
+        argv, _ = self.scry.render_call(
+            p, "sonnet", None, True, self.settings(), "/tmp/out")
+        self.assertTrue(_adjacent(argv, "--model", "sonnet"))
+
+    def test_no_model_anywhere_omits_flag(self):
+        p = self.prov("claude")
+        p.pop("model", None)  # neither member nor provider declares a model
+        argv, _ = self.scry.render_call(
+            p, "", None, True, self.settings(), "/tmp/out")
+        self.assertNotIn("--model", argv)
+
+    def test_deepseek_provider_default_is_v4_pro(self):
+        p = self.prov("deepseek")
+        argv, _ = self.scry.render_call(
+            p, "", "SYS", True, self.settings(), "/tmp/out")
+        self.assertTrue(_adjacent(argv, "--model", "deepseek-v4-pro"))
 
 
 # --------------------------------------------------------------------------- #

@@ -210,6 +210,7 @@ DEFAULT_CONFIG = {
     "providers": {
         "claude": {
             "cmd": ["claude", "-p"],
+            "model": "opus",
             "model_flag": "--model",
             "capture": "json",
             "result_path": "result",
@@ -255,6 +256,7 @@ DEFAULT_CONFIG = {
         },
         "codex": {
             "cmd": ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check"],
+            "model": "gpt-5.5",
             "model_flag": "-m",
             "capture": "outfile",
             "outfile_flag": "-o",
@@ -281,6 +283,7 @@ DEFAULT_CONFIG = {
         # to toggle it, so caps is empty and `--no-web` can't disable agy's grounding.
         "agy": {
             "cmd": ["agy", "--print-timeout", "400s"],
+            "model": "Gemini 3.1 Pro (High)",
             "model_flag": "--model",
             "capture": "text",
             "system_flag": None,
@@ -300,6 +303,7 @@ DEFAULT_CONFIG = {
         # in the default panel. Knowledge-only (the raw API has no web search).
         "deepseek": {
             "cmd": ["scry-deepseek"],
+            "model": "deepseek-v4-pro",
             "model_flag": "--model",
             "capture": "text",
             "system_flag": "--system",
@@ -326,6 +330,7 @@ DEFAULT_CONFIG = {
         # KIMI_API_KEY so a stray key can't divert billing off the subscription.
         "kimi": {
             "cmd": ["kimi", "--quiet"],
+            "model": "K2.7",
             "model_flag": "--model",               # -m / --model NAME
             "capture": "text",                     # --quiet => plain final message
             "system_flag": None,                   # no system flag -> fold into prompt
@@ -359,13 +364,13 @@ DEFAULT_CONFIG = {
     # Default panel mirrors OpenRouter's "Quality" preset (claude-opus + gpt + gemini-pro).
     # We have the first two; add the gemini member below once installed for the exact preset.
     "panel": [
-        {"provider": "claude", "model": "opus", "label": "claude-opus"},
-        {"provider": "codex",  "model": "",     "label": "codex-gpt"},
-        {"provider": "agy", "model": "Gemini 3.1 Pro (High)", "label": "gemini-pro"},
+        {"provider": "claude", "label": "claude-opus"},
+        {"provider": "codex",  "label": "codex-gpt"},
+        {"provider": "agy",    "label": "gemini-pro"},
     ],
     # Judge defaults to the outer (synthesis) model, as in Fusion.
-    "judge":      {"provider": "claude", "model": "opus"},
-    "aggregator": {"provider": "claude", "model": "opus"},
+    "judge":      {"provider": "claude"},
+    "aggregator": {"provider": "claude"},
     # `scry plan` — the interactive, panel-driven planning mode. max_rounds is the
     # hard backstop on clarifying-question rounds (the real termination guarantee;
     # the per-round convergence check is LLM-driven and non-deterministic). The
@@ -497,6 +502,9 @@ def render_call(p: dict, model: str, system: str | None, web: bool,
     `agentfile` is the path to a provider-generated agent file (e.g. kimi's
     read-only tool policy); it's rendered as `--agent-file <path>` when the
     provider declares an `agent_file` record."""
+    # Per-provider default: an empty member model inherits the provider's top model
+    # (one swap-point per provider); an explicit member model still wins.
+    model = model or p.get("model", "")
     argv = list(p["cmd"])
     env_over: dict = {}
     caps = p.get("caps", {})

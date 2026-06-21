@@ -6,6 +6,7 @@ and os.environ is always restored. No network, no real DeepSeek call.
 """
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -76,6 +77,38 @@ class TestEnvResolution(unittest.TestCase):
         with h.env_vars(DEEPSEEK_API_KEY=None, SCRY_ENV_FILE=None, HOME=self.tmp):
             ds._load_env_file(self.script)
             self.assertIsNone(os.environ.get("DEEPSEEK_API_KEY"))
+
+
+class TestMissingKeyMessage(unittest.TestCase):
+    def test_message_names_locations_and_zshenv(self):
+        msg = ds.MISSING_KEY_MSG
+        self.assertIn("~/.config/scry/.env", msg)
+        self.assertIn("SCRY_ENV_FILE", msg)
+        self.assertIn("~/.zshenv", msg)
+        self.assertIn("DEEPSEEK_API_KEY", msg)
+
+    def test_subprocess_missing_key_exits_2(self):
+        # Run a COPY of the adapter (so its script-dir has no .env) with a scrubbed
+        # env and empty HOME -> no key anywhere -> exit 2 + the guidance message.
+        copydir = os.path.realpath(tempfile.mkdtemp(prefix="ds-copy-"))
+        try:
+            dest = os.path.join(copydir, "scry-deepseek")
+            shutil.copy2(h.REPO_ROOT / "scry-deepseek", dest)
+            os.chmod(dest, 0o755)
+            empty_home = os.path.join(copydir, "home")
+            os.makedirs(empty_home)
+            env = os.environ.copy()
+            env.pop("DEEPSEEK_API_KEY", None)
+            env.pop("SCRY_ENV_FILE", None)
+            env["HOME"] = empty_home
+            r = subprocess.run([sys.executable, dest, "--model", "deepseek-chat"],
+                               input="", env=env, capture_output=True, text=True,
+                               timeout=30)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("~/.config/scry/.env", r.stderr)
+            self.assertIn("~/.zshenv", r.stderr)
+        finally:
+            shutil.rmtree(copydir, ignore_errors=True)
 
 
 if __name__ == "__main__":

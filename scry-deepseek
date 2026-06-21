@@ -78,6 +78,18 @@ def _load_env_file(script_path: str = __file__) -> None:
         _apply_env_file(path)
 
 
+MISSING_KEY_MSG = (
+    "scry-deepseek: DEEPSEEK_API_KEY not set — this provider needs an API key.\n"
+    "Get one at https://platform.deepseek.com -> API Keys, then set it via any of:\n"
+    "  - ~/.config/scry/.env        (recommended; read in every shell, cron, CI, Claude Code)\n"
+    "  - $SCRY_ENV_FILE             (explicit path to a .env)\n"
+    "  - a .env next to scry-deepseek\n"
+    "  - export DEEPSEEK_API_KEY=... (note: ~/.zshrc is read ONLY by interactive shells,\n"
+    "                                 so headless `scry plan` won't see it — use ~/.zshenv)\n"
+    'See README: "DeepSeek - the API-key exception".\n'
+)
+
+
 def main() -> int:
     _load_env_file()
     ap = argparse.ArgumentParser(prog="scry-deepseek", add_help=True)
@@ -93,8 +105,7 @@ def main() -> int:
 
     key = os.environ.get("DEEPSEEK_API_KEY")
     if not key:
-        sys.stderr.write("scry-deepseek: DEEPSEEK_API_KEY not set (this provider needs an "
-                         "API key — see README 'DeepSeek — the API-key exception')\n")
+        sys.stderr.write(MISSING_KEY_MSG)
         return 2
 
     prompt = sys.stdin.read()

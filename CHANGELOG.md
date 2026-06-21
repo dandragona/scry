@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Per-provider top-tier `model` field with member-inherits resolution.** Each provider record now
+  carries a `model` field pinned to its top tier (claude `opus`, codex `gpt-5.5`, agy `Gemini 3.1
+  Pro (High)`, deepseek `deepseek-v4-pro`, kimi `K2.7`). Panel members, the judge, and the
+  aggregator that omit their own `model` inherit the provider default — one swap-point per provider
+  to upgrade the whole fleet. An explicit `model` on a panel member overrides it.
+- **Default panel expanded to all five providers at top tier.** The built-in panel now fans out to
+  claude, codex, agy, deepseek, and kimi — each at its provider-default top-tier model. Note that
+  deepseek is knowledge-only (no web search) — a voice without live grounding.
+- **DeepSeek adapter requests the model's documented max output (no more 4096 truncation).** The
+  `scry-deepseek` adapter now sends `max_tokens` equal to the model's documented ceiling (V4:
+  384K), so long answers are never silently cut short at the API's 4096-token default. Override with
+  `--max-tokens`.
+
 ### Fixed
 - **`scry plan` panel drafters now write a plan instead of trying to *do* the task.**
   The final-draft panel reuses the fusion pipeline, but each proposer was invoked with

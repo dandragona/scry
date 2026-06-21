@@ -105,7 +105,7 @@
     },
 
     "deepseek": {
-      "_note": "API-KEY EXCEPTION (testing only). DeepSeek has no subscription CLI, so the scry-deepseek adapter (a sibling script resolved next to scry) calls DeepSeek's OpenAI-compatible API and needs DEEPSEEK_API_KEY. Deliberately NOT in the default panel — add via --panel '...,deepseek:deepseek-chat' or here. Knowledge-only (no web search). Set model to 'deepseek-v4-pro' for the Pro tier; the legacy 'deepseek-chat' / 'deepseek-reasoner' aliases route to V4-Flash (non-thinking / thinking).",
+      "_note": "API-KEY EXCEPTION (testing only). DeepSeek has no subscription CLI, so the scry-deepseek adapter (a sibling script resolved next to scry) calls DeepSeek's OpenAI-compatible API and needs DEEPSEEK_API_KEY. Knowledge-only (no web search). Defaults to the top tier 'deepseek-v4-pro' via the provider `model` field; the legacy 'deepseek-chat'/'deepseek-reasoner' aliases route to V4-Flash. The adapter requests the model's documented max output (V4: 384K) so long answers are never silently truncated at the API's 4096 default; override with --max-tokens.",
       "cmd": ["scry-deepseek"],
       "model": "deepseek-v4-pro",
       "model_flag": "--model",

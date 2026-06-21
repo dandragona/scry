@@ -6,12 +6,22 @@ throwaway temp dir so outfile/agentfile temp writes land somewhere disposable.
 """
 import copy
 import os
+import shutil
 import sys
 import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
 import _harness as h  # noqa: E402
+
+# A stub that reports the working directory it actually ran in (capture='text'):
+# reads stdin (so stdin-prompt providers don't block) and prints os.getcwd().
+PWD_STUB = (
+    "#!/usr/bin/env python3\n"
+    "import os, sys\n"
+    "sys.stdin.read()\n"
+    "sys.stdout.write(os.getcwd())\n"
+)
 
 
 class TestCallCli(unittest.IsolatedAsyncioTestCase):
@@ -142,6 +152,40 @@ class TestCallCli(unittest.IsolatedAsyncioTestCase):
         # system_flag (folded form: system + "\n\n" + user).
         self.assertIn("SECRET-SYS", out)
         self.assertIn("Q", out)
+
+
+class TestCwdIsolation(unittest.IsolatedAsyncioTestCase):
+    """`scry plan` hands the panel the user's real repo cwd so drafts are
+    grounded in the code. A provider that enforces read-only (claude's
+    --disallowedTools, codex's --sandbox read-only, kimi's agent file) is safe
+    there. A provider with NO read-only mechanism (agy) is NOT — call_cli must
+    run it in an isolated throwaway cwd so it can neither read nor mutate the
+    project. These tests pin that contract."""
+
+    def setUp(self):
+        self.scry = h.load_scry()
+        self.cfg = self.scry.load_config(str(h.CONFIG_JSON))
+        self.repo = tempfile.mkdtemp(prefix="scry-fake-repo-")
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
+
+    async def _ran_in(self, provider):
+        """Return the realpath of the cwd `provider` actually executed in when
+        call_cli is asked to run it in self.repo."""
+        with h.StubBins({provider: PWD_STUB}):
+            out = await self.scry.call_cli(
+                self.cfg, provider, "m", None, "hi", self.repo, 0, False,
+                self.cfg["settings"])
+        return os.path.realpath(out.strip())
+
+    async def test_unsandboxed_provider_not_run_in_repo_cwd(self):
+        # agy has no read-only flag/policy, so it must be isolated from the repo.
+        ran_in = await self._ran_in("agy")
+        self.assertNotEqual(ran_in, os.path.realpath(self.repo))
+
+    async def test_repo_safe_provider_runs_in_repo_cwd(self):
+        # kimi enforces read-only via its agent file, so it may read the repo.
+        ran_in = await self._ran_in("kimi")
+        self.assertEqual(ran_in, os.path.realpath(self.repo))
 
 
 if __name__ == "__main__":

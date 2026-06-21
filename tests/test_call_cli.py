@@ -80,7 +80,7 @@ class TestCallCli(unittest.IsolatedAsyncioTestCase):
     # ---- timeout -------------------------------------------------------- #
     async def test_timeout(self):
         cfg = copy.deepcopy(self.cfg)
-        cfg["providers"]["claude"]["timeout"] = 1
+        cfg["settings"]["timeout"] = 1   # per-call timeout is a (phase) setting now
         with h.StubBins({"claude": h.hang(5)}):
             with self.assertRaises(self.scry.ProviderError) as ctx:
                 await self._call(cfg, "claude", "opus", None, "hi")

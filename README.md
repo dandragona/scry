@@ -121,8 +121,8 @@ installed copy — keeping it executable and forcing it world-readable (so an ol
 broken root-owned install self-heals). It won't install a truncated download or an
 older version (pass `--force` to downgrade). For a user-owned install (the default)
 no `sudo` is needed; if scry lives in a system directory it prints the exact elevated
-command. Honors the same `SCRY_REPO` / `SCRY_REF` / `SCRY_UPDATE_URL` overrides as
-the installer.
+command. Honors `SCRY_REPO` / `SCRY_REF` (shared with the installer) plus
+`SCRY_UPDATE_URL` — a full single-file URL override for the self-update only.
 
 `scry init` is optional — `scry` runs with built-in defaults — but it's the fastest way to
 compose a panel from the subscriptions you actually have (Kimi included).
@@ -222,9 +222,9 @@ human-readable **diagnostics file** alongside it (`<plan>.diagnostics.md`) — a
 models ran, their status/timing/cost, **any failures** (e.g. a panel member that errored), the settings the
 run used, and the judge's consensus map. Pass `--no-out` to skip both and print to stdout only. The
 clarifying-question rounds run with web tools **off** by default (they're about your intent, not external
-facts; configurable via `plan.interview_web`); the final plan drafting uses web per your normal settings.
-Tune defaults with the top-level `plan` config block (`max_rounds`, `interview_web`, `repo_context`,
-`final_timeout_scale`, `final_tool_call_scale`).
+facts; configurable via `phases.interview`); the final plan drafting uses web per your normal settings.
+Tune `max_rounds` / `repo_context` in the top-level `plan` block, and per-phase budgets (the interview and
+the final draft) in the `phases` block (`phases.interview`, `phases.final`).
 
 **Repo-aware by default.** Unlike a normal `scry` run (which fans out in a scrubbed temp cwd), `scry plan`
 gives the panel **read-only** access to the directory you launch it in, so the plan is grounded in your
@@ -232,12 +232,12 @@ actual code. Mutating tools stay disabled; pass `--no-repo` (or set `plan.repo_c
 Note this sends repo contents to your panel models — the same exposure as running `claude`/`codex` in the
 repo directly.
 
-**Patient final draft.** The interview rounds stay fast (web-off, fail-fast), but the final web-researched
-draft gets a longer timeout ceiling (`plan.final_timeout_scale`, default 5×) so it finishes instead of
-timing out, **and** a larger tool-call/turn budget (`plan.final_tool_call_scale`, default 3× → 24): that
-draft is web-on and reads your repo, so the base cap of 8 turns is often too few — a model can exhaust it
-mid-research and fail (claude surfaces this as `model error: exit 1`). Both scales apply only to the final
-draft and never slow the fast interview calls.
+**Patient final draft.** The interview rounds stay fast (web-off, fail-fast via `phases.interview`), but the
+final web-researched draft gets its own budget via `phases.final` (default `max_tool_calls: 24`,
+`timeout: 2100`): that draft is web-on and reads your repo, so the base cap of 8 turns is often too few — a
+model can exhaust it mid-research and fail (claude surfaces this as `model error: exit 1`). The `final`
+budget applies only to the final draft (layered across its panel/judge/synthesis) and never slows the fast
+interview calls. Both are plain ceilings, so they don't slow a call that finishes early.
 
 **Resumable.** Every plan run checkpoints its transcript after each answer; if one is interrupted (Ctrl-C,
 a crash, a failed draft), `scry plan --resume` continues it from where it stopped — replaying your answers,
@@ -266,9 +266,16 @@ overrides the global config whenever `scry` runs from that directory. Precedence
 bundled [`config.json`](config.json) for a fully-worked example (it is a reference, **not**
 auto-loaded by name — pass it with `--config ./config.json` to use it directly).
 
-- **`settings`** — the Fusion knobs (`web_tools`, `max_tool_calls`, `effort`, `max_output_tokens`).
+- **`settings`** — the global default Fusion knobs (`web_tools`, `max_tool_calls`, `effort`,
+  `max_output_tokens`, `timeout`, `save_history`). `timeout` is the per-call timeout in seconds (default
+  420). Every pipeline phase inherits these and may override them in `phases` (below).
+- **`phases`** — per-phase overrides of `settings`. Each stage inherits every global setting and overrides
+  only what it lists. Stages: `panel`, `judge`, `synthesis` (a normal run); `interview`, `final` (plan).
+  Resolution per call (later wins): `settings` → `phases[stage]` → the `final` overlay (plan draft only) →
+  explicit CLI flags. Defaults reproduce scry's built-in behavior (synthesis/interview web-off; `final`
+  gets `max_tool_calls: 24`, `timeout: 2100`). e.g. `"judge": {"web_tools": false, "max_tool_calls": 4}`.
 - **`providers`** — how to drive each CLI: base `cmd`, `model_flag`, capture (`json`+`result_path`,
-  `outfile`+`-o`, or `text`), `system_flag`, `env_unset`, `timeout`, and a **`caps`** block mapping each
+  `outfile`+`-o`, or `text`), `system_flag`, `env_unset`, and a **`caps`** block mapping each
   Fusion knob to that CLI's flags (`web_on`/`web_off`, `tool_cap`, `effort`, `max_tokens_env`). A
   provider can instead carry an **`agent_file`** block (kimi) when the CLI has no argv flags for
   tool/web control — scry then writes a temp read-only agent file per call (see "Adding Moonshot").
@@ -364,7 +371,8 @@ scry --check --panel "...,deepseek:deepseek-chat"    # shows: ✓ deepseek insta
 
 ## Robustness
 
-- **Parallel** proposers, each with its own `timeout`.
+- **Parallel** proposers, each with a configurable per-call `timeout` (`settings.timeout`, default 420s;
+  override per stage in `phases`).
 - **Partial-failure tolerant** — a failed/timed-out proposer (including a bad model id, detected via
   `is_error`) is logged to stderr and excluded; the run continues if ≥1 proposer answers. If *all*
   fail you get a Fusion-style `failure_reason` (`all_panels_failed` / `rate_limited` /
@@ -482,8 +490,10 @@ stays meaningful.
 
 **Two honest caveats.** (1) *Contamination* — DRACO tasks are web-research and models can find the
 rubric online; OpenRouter blocked the hosting domains, but `scry` only has all-or-nothing `--no-web`.
-(2) *Cost* — per task ≈ 1 scry run + ~39 grading calls (×each solo if `--grade-solos`). A 10-task
-fused-only stratified run ≈ 10 scry runs + ~400 grading calls; grading all 4 outputs ≈ ~1,600.
+(2) *Cost* — the default `--grader-mode one-shot` grades all ~39 criteria in **one** call per output,
+so a 10-task fused-only stratified run ≈ 10 scry runs + 10 grading calls (≈ 40 with `--grade-solos`,
+which grades all 4 outputs). The accuracy-leaning `--grader-mode per-criterion` makes ~39 calls/task
+instead (≈ 400 for that run, ≈ 1,600 across all 4 outputs).
 
 **Smoke result:** 1 Academic task, graded 53/53 criteria → fused **84.8/100** (single task, huge
 variance — this proves the harness, not a benchmark figure).
@@ -504,14 +514,15 @@ variance — this proves the harness, not a benchmark figure).
   Headless `-p` prints plain text and folds any system prompt into the user text (no system-prompt
   flag). **Web search works via Gemini grounding, on by default** — but there's no flag to toggle it, so
   `--no-web` can't disable agy's grounding (the panel's other members do honor it). `--sandbox` is
-  available if you want terminal restrictions. Default `--print-timeout` is 5m; `scry` sets 400s under a
-  420s provider timeout.
+  available if you want terminal restrictions. Default `--print-timeout` is 5m; `scry` sets 400s under
+  the shared 420s `settings.timeout`.
 - **Moonshot (`kimi`).** Auth is `kimi login` (Kimi Code OAuth — reuses your membership, no API key);
   `KIMI_API_KEY` is unset so a stray key can't divert billing off the subscription. Print mode
   auto-approves tool calls (`--afk`), so scry constrains it to **read-only** via a generated
   `--agent-file` (no `Shell`/`WriteFile`/`StrReplaceFile`/`Agent`); that same file is how `--no-web` is
   honored (it also drops `SearchWeb`/`FetchURL`). `kimi --version` only confirms the binary — login isn't
-  cheaply verifiable, so `scry --check` reports "installed & runnable", not "logged in". 420s timeout.
+  cheaply verifiable, so `scry --check` reports "installed & runnable", not "logged in". Uses the shared
+  `settings.timeout` (default 420s) like every other provider.
 - **`ANTHROPIC_API_KEY`** is unset for `claude` calls so it never silently bills the Console API.
   Don't run `claude` here under `--bare` (that path requires a key).
 - **Cost** ≈ sum of every panel member + judge + synthesis call (like real Fusion), plus web-search

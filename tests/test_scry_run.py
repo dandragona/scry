@@ -372,28 +372,66 @@ class ScryRunCwdTest(unittest.IsolatedAsyncioTestCase):
 
 
 class EffectiveTimeoutTest(unittest.TestCase):
-    """call_cli's per-provider timeout, scaled by settings['timeout_scale'] — plan
-    mode raises the scale for the slow final draft (a ceiling, so fast calls are
-    unaffected) while interviews stay fail-fast."""
+    """call_cli's per-call timeout, read straight from a call's resolved (phase) settings;
+    falls back to DEFAULT_TIMEOUT when unset/zero. No scaling, no per-provider override —
+    the value is whatever the phase resolved to (e.g. phases.final raises it for the draft)."""
 
     def setUp(self):
         self.scry = h.load_scry()
 
-    def test_default_scale_is_provider_timeout(self):
-        self.assertEqual(self.scry._effective_timeout({"timeout": 360}, {}), 360.0)
+    def test_reads_timeout_from_settings(self):
+        self.assertEqual(self.scry._effective_timeout({"timeout": 360}), 360.0)
 
-    def test_missing_provider_timeout_defaults_300(self):
-        self.assertEqual(self.scry._effective_timeout({}, {}), 300.0)
+    def test_missing_falls_back_to_default(self):
+        self.assertEqual(self.scry._effective_timeout({}),
+                         float(self.scry.DEFAULT_TIMEOUT))
 
-    def test_scale_multiplies(self):
-        self.assertEqual(
-            self.scry._effective_timeout({"timeout": 360}, {"timeout_scale": 3}), 1080.0)
+    def test_zero_or_none_falls_back_to_default(self):
+        self.assertEqual(self.scry._effective_timeout({"timeout": 0}),
+                         float(self.scry.DEFAULT_TIMEOUT))
+        self.assertEqual(self.scry._effective_timeout({"timeout": None}),
+                         float(self.scry.DEFAULT_TIMEOUT))
 
-    def test_zero_or_none_scale_falls_back_to_one(self):
-        self.assertEqual(
-            self.scry._effective_timeout({"timeout": 100}, {"timeout_scale": 0}), 100.0)
-        self.assertEqual(
-            self.scry._effective_timeout({"timeout": 100}, {"timeout_scale": None}), 100.0)
+
+class PhaseSettingsTest(unittest.TestCase):
+    """_phase_settings merges base settings -> phases[phase] -> run overlay (phases.final,
+    plan draft) -> CLI overrides, later wins. The resolution backbone for per-phase config."""
+
+    def setUp(self):
+        self.scry = h.load_scry()
+
+    def test_inherits_base_when_phase_empty(self):
+        s = {"web_tools": True, "max_tool_calls": 8, "timeout": 420}
+        self.assertEqual(self.scry._phase_settings(s, {"panel": {}}, "panel"), s)
+
+    def test_phase_overrides_only_its_keys(self):
+        s = {"web_tools": True, "max_tool_calls": 8}
+        eff = self.scry._phase_settings(s, {"judge": {"web_tools": False}}, "judge")
+        self.assertFalse(eff["web_tools"])
+        self.assertEqual(eff["max_tool_calls"], 8)   # untouched key still inherited
+
+    def test_unknown_phase_returns_base(self):
+        s = {"web_tools": True}
+        self.assertEqual(self.scry._phase_settings(s, {}, "nope"), s)
+
+    def test_run_overlay_beats_phase(self):
+        s = {"max_tool_calls": 8}
+        eff = self.scry._phase_settings(
+            s, {"panel": {"max_tool_calls": 10}}, "panel",
+            run_overlay={"max_tool_calls": 24})
+        self.assertEqual(eff["max_tool_calls"], 24)
+
+    def test_cli_overrides_beat_everything(self):
+        s = {"max_tool_calls": 8}
+        eff = self.scry._phase_settings(
+            s, {"panel": {"max_tool_calls": 10}}, "panel",
+            run_overlay={"max_tool_calls": 24}, cli_overrides={"max_tool_calls": 5})
+        self.assertEqual(eff["max_tool_calls"], 5)
+
+    def test_does_not_mutate_base(self):
+        s = {"max_tool_calls": 8}
+        self.scry._phase_settings(s, {"panel": {"max_tool_calls": 24}}, "panel")
+        self.assertEqual(s, {"max_tool_calls": 8})
 
 
 if __name__ == "__main__":

@@ -8,12 +8,14 @@
 # sudo — by default ~/.local/bin, like rustup / uv / pipx — so install, update, and
 # run all work without elevation. Override the source or destination if you like:
 #
-#   REPO=youruser/scry INSTALL_DIR=~/bin sh install.sh
+#   SCRY_REPO=youruser/scry INSTALL_DIR=~/bin sh install.sh
 #
 set -eu
 
-REPO="${REPO:-dandragona/scry}"
-REF="${REF:-main}"
+# SCRY_REPO / SCRY_REF are the canonical names (shared with `scry update`); the bare
+# REPO / REF are kept as fallbacks for backward compatibility.
+REPO="${SCRY_REPO:-${REPO:-dandragona/scry}}"
+REF="${SCRY_REF:-${REF:-main}}"
 # User-owned by default — never a system dir. A root-owned CLI is exactly what makes
 # you reach for sudo just to install/update/run it, so we don't go there.
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"

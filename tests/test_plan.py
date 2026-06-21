@@ -796,8 +796,9 @@ class PlanStepSubprocessTest(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 # Pure helpers for the default-output + diagnostics feature:
 #   _diag_path             — derive the diagnostics path from the plan path
-#   _final_draft_settings  — scale max_tool_calls + timeout for the final draft
 #   render_plan_diagnostics — the human-readable .diagnostics.md body
+# (The plan final draft's budget now comes from phases.final via _phase_settings;
+#  see test_scry_run.PhaseSettingsTest for the resolution tests.)
 # --------------------------------------------------------------------------- #
 class DiagPathTest(unittest.TestCase):
     def setUp(self):
@@ -816,38 +817,6 @@ class DiagPathTest(unittest.TestCase):
     def test_default_id_filename(self):
         self.assertEqual(self.scry._diag_path("scry-plan-123.md"),
                          "scry-plan-123.diagnostics.md")
-
-
-class FinalDraftSettingsTest(unittest.TestCase):
-    def setUp(self):
-        self.scry = h.load_scry()
-
-    def test_scales_cap_and_sets_timeout(self):
-        f = self.scry._final_draft_settings(
-            {"max_tool_calls": 8},
-            {"final_timeout_scale": 3, "final_tool_call_scale": 3})
-        self.assertEqual(f["max_tool_calls"], 24)
-        self.assertEqual(f["timeout_scale"], 3)
-
-    def test_scale_of_one_leaves_cap_unchanged(self):
-        f = self.scry._final_draft_settings(
-            {"max_tool_calls": 8},
-            {"final_timeout_scale": 1, "final_tool_call_scale": 1})
-        self.assertEqual(f["max_tool_calls"], 8)
-
-    def test_missing_cap_is_not_invented(self):
-        f = self.scry._final_draft_settings({}, {"final_tool_call_scale": 3})
-        self.assertNotIn("max_tool_calls", f)
-
-    def test_defaults_to_triple_when_unset(self):
-        # An empty plan-settings dict still applies the built-in 3x default.
-        f = self.scry._final_draft_settings({"max_tool_calls": 8}, {})
-        self.assertEqual(f["max_tool_calls"], 24)
-
-    def test_does_not_mutate_input(self):
-        base = {"max_tool_calls": 8}
-        self.scry._final_draft_settings(base, {"final_tool_call_scale": 3})
-        self.assertEqual(base, {"max_tool_calls": 8})
 
 
 class RenderPlanDiagnosticsTest(unittest.TestCase):
@@ -877,9 +846,14 @@ class RenderPlanDiagnosticsTest(unittest.TestCase):
         }
         self.cfg = {"panel": [{"label": "claude-opus"}, {"label": "codex-gpt"}],
                     "judge": {"provider": "claude", "model": "opus"},
-                    "aggregator": {"provider": "claude", "model": "opus"}}
-        self.settings = {"max_tool_calls": 8, "web_tools": True, "effort": None}
-        self.plan_settings = {"final_timeout_scale": 3, "final_tool_call_scale": 3}
+                    "aggregator": {"provider": "claude", "model": "opus"},
+                    "phases": {"panel": {}, "judge": {},
+                               "synthesis": {"web_tools": False},
+                               "interview": {"web_tools": False},
+                               "final": {"max_tool_calls": 24, "timeout": 2100}}}
+        self.settings = {"max_tool_calls": 8, "web_tools": True, "timeout": 420,
+                         "effort": None}
+        self.plan_settings = {"max_rounds": 6, "repo_context": True}
 
     def _render(self):
         return self.scry.render_plan_diagnostics(
@@ -901,10 +875,12 @@ class RenderPlanDiagnosticsTest(unittest.TestCase):
     def test_ok_model_listed(self):
         self.assertIn("codex-gpt", self._render())
 
-    def test_settings_show_base_and_scaled_cap(self):
+    def test_settings_show_resolved_phase_budgets(self):
         md = self._render()
-        self.assertIn("final draft: 24", md)        # 8 * 3
-        self.assertIn("final_tool_call_scale", md)
+        self.assertIn("final draft", md)
+        self.assertIn("24", md)            # phases.final max_tool_calls, layered on the draft
+        self.assertIn("2100", md)          # phases.final timeout
+        self.assertIn("interview phase", md)
 
     def test_consensus_map_rendered(self):
         md = self._render()

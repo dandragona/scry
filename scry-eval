@@ -809,7 +809,11 @@ def report_draco(results, grade_solos):
             for m, xs in solo_agg.items():
                 print(f"mean {m}:  {sum(xs)/len(xs):.1f}")
             if total_cmp:
-                verdict = ("fused ≥ best-solo overall" if beats + ties >= total_cmp - beats
+                # "never worse" == zero strict losses == beats + ties covers every
+                # comparison. (The old `beats + ties >= total_cmp - beats` reduced to
+                # `beats >= losses`, which wrongly passed whenever fused merely won more
+                # often than it lost — even with real losses present.)
+                verdict = ("fused ≥ best-solo overall" if beats + ties == total_cmp
                            else "fused sometimes < best-solo")
                 print(f"\nper-task: fused beat best-solo on {beats}/{total_cmp} "
                       f"({ties} ties)  →  {verdict}")

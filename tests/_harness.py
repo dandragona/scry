@@ -161,6 +161,11 @@ def claude_plan(rounds_before_ready: int = 1, questions=None,
         "for i, a in enumerate(argv):\n"
         "    if a == '--append-system-prompt' and i + 1 < len(argv):\n"
         "        sp = argv[i + 1]\n"
+        # SCRY_SYSDUMP (test hook): append every system prompt this stub is invoked
+        # with, so a test can assert which stage got which prompt (e.g. the final-draft
+        # panel proposer must receive PLAN_DRAFTER_SYSTEM).
+        "if os.environ.get('SCRY_SYSDUMP'):\n"
+        "    open(os.environ['SCRY_SYSDUMP'], 'a').write(sp + '\\n===SCRY-SYS-END===\\n')\n"
         "data = sys.stdin.read()\n"
         f"qs = {questions!r}\n"
         f"need = {int(rounds_before_ready)}\n"

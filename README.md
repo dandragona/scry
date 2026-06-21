@@ -207,7 +207,7 @@ Verification / Risks`).
 scry plan "add rate limiting to my API"     # interactive: answer questions one at a time
 scry plan "..." --out plan.md               # write the plan to a chosen path (default: ./scry-plan-<id>.md)
 scry plan "..." --no-out                    # don't write any files; print to stdout only
-scry plan "..." --max-rounds 3              # cap the clarifying rounds (default 6)
+scry plan "..." --max-rounds 3              # cap the clarifying rounds (default 5)
 scry plan "..." --json                      # {mode:"plan", transcript, rounds, final, ...}
 scry plan --resume                          # continue the most recent interrupted session
 scry plan --resume=<id>                     # continue a specific session by id
@@ -247,7 +247,7 @@ the round it reached, how many questions you answered, and the original request.
 
 | Flag | Effect (with `plan`) |
 |---|---|
-| `--max-rounds N` | cap interactive clarifying rounds (default 6; the hard backstop on cost) |
+| `--max-rounds N` | cap interactive clarifying rounds (default 5; the hard backstop on cost) |
 | `--out PATH` | write the Markdown plan to `PATH` (default `./scry-plan-<id>.md`); a `<plan>.diagnostics.md` is written alongside |
 | `--no-out` | don't write the plan or diagnostics files; print to stdout only |
 | `--resume[=<id>]` | continue the most recent (or a specific) unfinished planning session |

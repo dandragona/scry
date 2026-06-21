@@ -7,6 +7,25 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **`scry plan` panel drafters now write a plan instead of trying to *do* the task.**
+  The final-draft panel reuses the fusion pipeline, but each proposer was invoked with
+  no system prompt — so an agentic coding CLI handed a bare task plus read-only repo +
+  web access behaved like a coding agent: it tried to implement the work rather than
+  describe it. The result was a half-strength panel (claude/opus churning tool calls to
+  a 0-token timeout, codex/kimi wasting turns on blocked writes, and the unsandboxed
+  agy/gemini member able to mutate the working tree). A new `PLAN_DRAFTER_SYSTEM` is now
+  threaded to every proposer via `scry_run(..., panel_system=...)`, telling them their
+  answer IS the plan, to read-only-ground it (no file writes, no mutating commands), and
+  to treat the answered questions as binding. Normal `scry` runs are unchanged
+  (`panel_system` defaults to `None`). This also restores the read-only invariant *by
+  instruction* for the agy member, which has no argv sandbox flag to enforce it.
+- **`scry plan` multiple-choice answers record the chosen option text, not bare
+  numbers.** Answering a clarifying question with several option numbers (e.g.
+  `1,3,4,5`) now resolves to the option labels in the transcript the drafting models
+  see; previously only a single-digit answer was mapped, so a multi-select was stored
+  verbatim as `1,3,4,5` and the plan referenced option numbers whose meanings it never
+  knew. Comma- or space-separated selections are both accepted; anything that isn't a
+  clean list of in-range numbers is still kept as free text.
 - **`scry` installed unreadable → `[Errno 13] Permission denied` / "needs sudo to run".**
   `install.sh` set the binary's mode with `chmod +x` on a `mktemp` (0600) file, yielding
   **711**. For a root-owned install in `/usr/local/bin` (the default, which needs sudo to
@@ -15,15 +34,12 @@ All notable changes to this project are documented here. The format follows
   `sudo scry` worked. `install.sh` now installs **755**, and `scry update` forces read bits
   (`| 0o444`) on the swapped-in file so an existing broken install **self-heals** on the next
   `scry update`.
-- **`scry plan` no longer intermittently fails its claude/opus draft with
-  `model error: exit 1`.** The final plan draft is web-on and reads the repo, so it
-  runs as an agentic tool-use loop; the base cap of 8 tool calls (claude's
-  `--max-turns`) was often too few — opus would exhaust it mid-research and Claude
-  Code returned `is_error`/`error_max_turns` with no result. The final draft now gets
-  a scaled tool-call budget (`plan.final_tool_call_scale`, default 3× → 24), mirroring
-  the existing `final_timeout_scale`. Interview rounds (web-off) are unaffected.
 
 ### Changed
+- **`scry plan` clarifying-round cap lowered to 5** (was 6). The interview was
+  drifting toward the cap, so the default is now shorter; raise it back per-run with
+  `--max-rounds N` or permanently via `plan.max_rounds` in config. Type `done` at any
+  prompt to stop early regardless of the cap.
 - **Per-phase settings — every pipeline stage is now independently configurable** via a new top-level
   `phases` block. Each stage (`panel`, `judge`, `synthesis` for a run; `interview`, `final` for `scry
   plan`) inherits the global `settings` and overrides only what it lists — `web_tools`, `max_tool_calls`,

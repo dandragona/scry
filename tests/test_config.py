@@ -37,16 +37,30 @@ def _isolated_config_env():
 
 
 class TestLoadConfigDefaults(unittest.TestCase):
+    """load_config(None) must reflect DEFAULT_CONFIG. It probes ./scry.config.json and
+    ~/.config/scry/config.json, so these tests point HOME + cwd at empty temp dirs —
+    otherwise the developer's real global config (a customized panel / plan block)
+    bleeds in and the default-behavior assertions fail non-hermetically."""
+
     def setUp(self):
-        # load_config(None) reads the machine's global/local config, so isolate to an
-        # empty HOME + cwd; otherwise a configured dev box fails these default checks.
-        iso = _isolated_config_env()
-        iso.__enter__()
-        self.addCleanup(iso.__exit__, None, None, None)
+        self.scry = h.load_scry()
+        self.home = tempfile.mkdtemp(prefix="scry-home-")
+        self.addCleanup(_rmtree, self.home)
+        self.cwd = tempfile.mkdtemp(prefix="scry-cwd-")
+        self.addCleanup(_rmtree, self.cwd)
+
+    def _load_none(self):
+        saved_cwd = os.getcwd()
+        with h.env_vars(HOME=self.home):
+            try:
+                os.chdir(self.cwd)
+                return self.scry.load_config(None)
+            finally:
+                os.chdir(saved_cwd)
 
     def test_none_returns_deepcopy_of_default_config(self):
-        scry = h.load_scry()
-        cfg = scry.load_config(None)
+        scry = self.scry
+        cfg = self._load_none()
         # Same content as DEFAULT_CONFIG...
         self.assertEqual(cfg["mode"], scry.DEFAULT_CONFIG["mode"])
         self.assertEqual(cfg["providers"].keys(), scry.DEFAULT_CONFIG["providers"].keys())
@@ -60,20 +74,20 @@ class TestLoadConfigDefaults(unittest.TestCase):
         self.assertEqual(scry.DEFAULT_CONFIG["mode"], "fusion")
         self.assertEqual(
             len(scry.DEFAULT_CONFIG["panel"]),
-            len(scry.load_config(None)["panel"]),
+            len(self._load_none()["panel"]),
         )
 
     def test_none_backfills_settings_from_default_settings(self):
-        scry = h.load_scry()
-        cfg = scry.load_config(None)
+        scry = self.scry
+        cfg = self._load_none()
         # Every DEFAULT_SETTINGS key is present.
         for k, v in scry.DEFAULT_SETTINGS.items():
             self.assertIn(k, cfg["settings"])
             self.assertEqual(cfg["settings"][k], v)
 
     def test_none_settings_is_a_distinct_dict(self):
-        scry = h.load_scry()
-        cfg = scry.load_config(None)
+        scry = self.scry
+        cfg = self._load_none()
         # settings is rebuilt ({**DEFAULT_SETTINGS, ...}) so it's not the global.
         self.assertIsNot(cfg["settings"], scry.DEFAULT_SETTINGS)
         cfg["settings"]["effort"] = "ultra"
@@ -364,12 +378,13 @@ class TestLoadConfigPlanBlock(unittest.TestCase):
     DEFAULT_CONFIG['plan'] like it does for settings, so old configs still work."""
 
     def setUp(self):
-        # test_none_has_plan_defaults calls load_config(None); isolate HOME + cwd so a
-        # configured dev box can't override the plan defaults this asserts. (Harmless
-        # for the explicit-path tests here, which read absolute temp paths.)
-        iso = _isolated_config_env()
-        iso.__enter__()
-        self.addCleanup(iso.__exit__, None, None, None)
+        self.scry = h.load_scry()
+        # Isolate HOME + cwd so load_config(None) can't read the developer's real
+        # global config (which may set its own plan block).
+        self.home = tempfile.mkdtemp(prefix="scry-home-")
+        self.addCleanup(_rmtree, self.home)
+        self.cwd = tempfile.mkdtemp(prefix="scry-cwd-")
+        self.addCleanup(_rmtree, self.cwd)
 
     def _write(self, obj) -> str:
         d = tempfile.mkdtemp(prefix="scry-cfg-")
@@ -379,10 +394,18 @@ class TestLoadConfigPlanBlock(unittest.TestCase):
             f.write(json.dumps(obj))
         return p
 
+    def _load_none(self):
+        saved_cwd = os.getcwd()
+        with h.env_vars(HOME=self.home):
+            try:
+                os.chdir(self.cwd)
+                return self.scry.load_config(None)
+            finally:
+                os.chdir(saved_cwd)
+
     def test_none_has_plan_defaults(self):
-        scry = h.load_scry()
-        cfg = scry.load_config(None)
-        self.assertEqual(cfg["plan"]["max_rounds"], 6)
+        cfg = self._load_none()
+        self.assertEqual(cfg["plan"]["max_rounds"], 5)
         self.assertIs(cfg["plan"]["repo_context"], True)      # panel reads the repo
 
     def test_partial_plan_override_keeps_other_new_keys(self):
@@ -390,13 +413,13 @@ class TestLoadConfigPlanBlock(unittest.TestCase):
         p = self._write({"plan": {"repo_context": False}})
         cfg = scry.load_config(p)
         self.assertIs(cfg["plan"]["repo_context"], False)        # overridden
-        self.assertEqual(cfg["plan"]["max_rounds"], 6)           # backfilled
+        self.assertEqual(cfg["plan"]["max_rounds"], 5)           # backfilled
 
     def test_config_without_plan_key_is_backfilled(self):
         scry = h.load_scry()
         p = self._write({"mode": "fusion"})  # no "plan" key at all
         cfg = scry.load_config(p)
-        self.assertEqual(cfg["plan"]["max_rounds"], 6)
+        self.assertEqual(cfg["plan"]["max_rounds"], 5)
         self.assertIs(cfg["plan"]["repo_context"], True)
 
     def test_partial_plan_override_backfills_missing_keys(self):

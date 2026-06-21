@@ -349,17 +349,25 @@ adapter, **`scry-deepseek`**, that calls DeepSeek's OpenAI-compatible API. It is
 that needs an API key**:
 
 ```sh
-cp .env.example .env && $EDITOR .env                 # add DEEPSEEK_API_KEY=sk-… (gitignored; recommended)
-# …or, equivalently, export it in your shell:
+# Recommended: keep the key in scry's config dir (a sibling of config.json) — read
+# by every shell, cron job, CI run, and Claude Code session:
+mkdir -p ~/.config/scry
+cp .env.example ~/.config/scry/.env && chmod 600 ~/.config/scry/.env   # then add DEEPSEEK_API_KEY=sk-…
+# …or export it — but use ~/.zshenv, NOT ~/.zshrc (see "Shell-rc caveat" below):
 export DEEPSEEK_API_KEY=sk-...                        # platform.deepseek.com (metered, pay-as-you-go)
 scry --panel "claude:opus,codex,deepseek:deepseek-chat" "..."
 scry --check --panel "...,deepseek:deepseek-chat"    # shows: ✓ deepseek installed
 ```
 
-- **Key management:** put `DEEPSEEK_API_KEY` in a local **`.env`** (copy `.env.example`; it's gitignored —
-  never commit it) or `export` it. `scry-deepseek` auto-loads `.env`; real environment variables win. Using
-  `.env` keeps the key scoped to the `scry-deepseek` process — the other providers never see it. Keys never
-  belong in `config.json`. See [SECURITY.md](SECURITY.md).
+- **Key management.** `scry-deepseek` resolves `DEEPSEEK_API_KEY` in this order (first wins): the real
+  env var → `$SCRY_ENV_FILE` → a `.env` next to the adapter (handy in a cloned repo) → `~/.config/scry/.env`
+  (the recommended home — a sibling of scry's `config.json`, read regardless of shell type). It's gitignored;
+  never commit it, and keep it `chmod 600`. The key is loaded only in the `scry-deepseek` process, so the
+  other providers never see it; it never belongs in `config.json`. See [SECURITY.md](SECURITY.md).
+- **Shell-rc caveat.** A bare `export DEEPSEEK_API_KEY=…` in `~/.zshrc`/`~/.bashrc` is read **only by
+  interactive shells**, so headless runs (the `/scry` and `/scry-plan` Claude Code skills, scripts, cron)
+  won't see it. Put the export in `~/.zshenv` (zsh) / `~/.profile` (bash), or — simpler — use
+  `~/.config/scry/.env`, which sidesteps shell startup entirely.
 - The adapter **resolves automatically as a sibling of `scry`** — scry now resolves a provider command
   by PATH → next-to-scry → cwd, so no install/symlink is needed even though proposers run in a temp cwd.
 - **Not in the default panel** — opt in via `--panel` or `config.json`.

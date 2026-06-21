@@ -106,5 +106,5 @@ if [ -n "$existing" ] && [ "$existing" != "${INSTALL_DIR%/}/scry" ]; then
 fi
 
 printf '\nNext: run \033[1mscry --check\033[0m to verify your model CLIs are logged in.\n'
-printf 'For DeepSeek, also set \033[1mDEEPSEEK_API_KEY\033[0m (see .env.example).\n'
+printf 'For DeepSeek, set \033[1mDEEPSEEK_API_KEY\033[0m in \033[1m~/.config/scry/.env\033[0m (see .env.example).\n'
 printf 'In Claude Code, run \033[1m/scry <prompt>\033[0m to consult the panel, or \033[1m/scry-plan <request>\033[0m to plan.\n'

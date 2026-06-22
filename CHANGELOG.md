@@ -18,9 +18,11 @@ All notable changes to this project are documented here. The format follows
   judge and synthesis.
 - **Per-provider top-tier `model` field with member-inherits resolution.** Each provider record now
   carries a `model` field pinned to its top tier (claude `opus`, codex `gpt-5.5`, agy `Gemini 3.1
-  Pro (High)`, deepseek `deepseek-v4-pro`, kimi `K2.7`). Panel members, the judge, and the
-  aggregator that omit their own `model` inherit the provider default — one swap-point per provider
-  to upgrade the whole fleet. An explicit `model` on a panel member overrides it.
+  Pro (High)`, deepseek `deepseek-v4-pro`). kimi ships **unpinned** (`model: ""`, i.e. the account
+  `default_model`) because a fixed kimi id may not be defined in every membership (it would error
+  `LLM not set`). Panel members, the judge, and the aggregator that omit their own `model` inherit
+  the provider default — one swap-point per provider to upgrade the whole fleet. An explicit `model`
+  on a panel member overrides it.
 - **Default panel expanded to all five providers at top tier.** The built-in panel now fans out to
   claude, codex, agy, deepseek, and kimi — each at its provider-default top-tier model. Note that
   deepseek is knowledge-only (no web search) — a voice without live grounding.

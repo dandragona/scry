@@ -333,7 +333,7 @@ DEFAULT_CONFIG = {
         # KIMI_API_KEY so a stray key can't divert billing off the subscription.
         "kimi": {
             "cmd": ["kimi-cli", "--quiet"],
-            "model": "K2.7",
+            "model": "",  # account default (kimi-for-coding); a pinned id can 404 "LLM not set"
             "model_flag": "--model",               # -m / --model NAME
             "capture": "text",                     # --quiet => plain final message
             "system_flag": None,                   # no system flag -> fold into prompt
@@ -1308,7 +1308,7 @@ INIT_SUGGEST = {
     "codex":     ("gpt-5.5", "codex-gpt"),
     "agy":       ("Gemini 3.1 Pro (High)", "gemini-pro"),
     "deepseek":  ("deepseek-v4-pro", "deepseek"),
-    "kimi":      ("K2.7", "kimi"),
+    "kimi":      ("", "kimi"),  # blank: a pinned kimi id may not be in ~/.kimi/config.toml
 }
 
 

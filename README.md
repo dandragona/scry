@@ -335,12 +335,12 @@ it reuses your Kimi membership, **no API key**; we unset `KIMI_API_KEY` so a str
 billing off the subscription). Install it with `curl -LsSf https://code.kimi.com/install.sh | bash`
 (or `uv tool install --python 3.13 kimi-cli`).
 
-- **Default model:** `K2.7` — inherited from the provider's top-tier `model` field, passed as
-  `kimi-cli --model K2.7`. A model id passed to `kimi-cli --model` **must be defined in your
-  `~/.kimi/config.toml`** (run `kimi-cli info` / check that file to see what your account exposes);
-  override per-run with `--panel "...,kimi:kimi-k2.6"` — but it'll error with `LLM not set` if your
-  membership doesn't define it. (Don't have `K2.7`? Point the kimi provider `model` at one your
-  membership exposes, or set it to `""` to use your account's `default_model`.)
+- **Default model:** none — the kimi provider ships with `model: ""`, so kimi uses your account's
+  `default_model` (the Kimi Code membership configures `kimi-for-coding`). Unlike the other
+  providers, kimi is **not** pinned to a top tier: a model id passed to `kimi-cli --model` **must be
+  defined in your `~/.kimi/config.toml`** (run `kimi-cli info` to see what your account exposes), so a
+  fixed default would error `LLM not set` for memberships that lack it. Pin one yourself when it's
+  there — e.g. `--panel "...,kimi:K2.7"` or set the provider's `model`. Leaving it blank always works.
 - **How it's driven:** `kimi-cli --quiet` runs print mode (`--print --output-format text
   --final-message-only`), which prints **only the final answer as plain text** (`"capture": "text"`) and
   auto-approves tool calls (`--afk`); the prompt arrives on **stdin**. There's no per-call

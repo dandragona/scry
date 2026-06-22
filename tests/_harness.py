@@ -70,7 +70,7 @@ def load_scry_eval():
 
 
 def load_scry_deepseek():
-    """The `scry-deepseek` adapter loaded as a module (symbols only)."""
+    """The `scry-deepseek` adapter loaded as a module (symbols only; main() not run)."""
     return _load("scry_deepseek_sut", SCRY_DEEPSEEK)
 
 
@@ -279,7 +279,7 @@ def default_stubs() -> dict:
         "claude": claude_json("CLAUDE ANSWER"),
         "codex": codex_outfile("CODEX ANSWER"),
         "agy": agy_text("GEMINI ANSWER"),
-        "kimi": kimi_text("KIMI ANSWER"),
+        "kimi-cli": kimi_text("KIMI ANSWER"),
         "scry-deepseek": deepseek_text("DEEPSEEK ANSWER"),
     }
 

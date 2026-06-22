@@ -28,7 +28,7 @@ def _stub_env():
     not-found, which is fine — do_init still adds them if selected."""
     return h.StubBins({
         "claude": h.claude_json("CLAUDE"),
-        "kimi": h.kimi_text("KIMI"),
+        "kimi-cli": h.kimi_text("KIMI"),
     })
 
 
@@ -81,7 +81,7 @@ class InitWizardSubprocessTest(unittest.TestCase):
         self.assertIs(cfg["settings"]["web_tools"], True)
         # mode is fusion + the canonical settings keys are present
         self.assertEqual(cfg["mode"], "fusion")
-        for k in ("web_tools", "max_tool_calls", "effort", "max_output_tokens"):
+        for k in ("web_tools", "effort", "max_output_tokens"):
             self.assertIn(k, cfg["settings"])
 
     # ----- repeated members get unique labels ------------------------------- #

@@ -837,6 +837,50 @@ class PlanStepSubprocessTest(unittest.TestCase):
         rec = json.loads(cp.stdout)
         self.assertEqual(rec["status"], "error")
 
+    # ----- the --step draft hands the drafter prompt to the panel ----------- #
+    def test_step_draft_panel_receives_drafter_system(self):
+        scry = h.load_scry()
+        d = tempfile.mkdtemp(prefix="scry-step-sysdump-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        dump = os.path.join(d, "sys.txt")
+        out = tempfile.mkdtemp(prefix="scry-step-out-")
+        self.addCleanup(shutil.rmtree, out, ignore_errors=True)
+        env = self._env(h.claude_plan(rounds_before_ready=1))
+        env["SCRY_SYSDUMP"] = dump
+        rec, _ = self._run(self._start_args(), json.dumps({"done": True}),
+                           env, cwd=out)
+        self.assertEqual(rec["status"], "done")
+        with open(dump) as f:
+            seen = f.read()
+        # The panel proposers must be reframed as plan AUTHORS, not executors.
+        self.assertIn(scry.PLAN_DRAFTER_SYSTEM, seen)
+        # Guard the invariant the assertion relies on: the drafter prompt is a
+        # distinct prompt from the synth one (mirrors the interactive analog).
+        self.assertNotEqual(scry.PLAN_DRAFTER_SYSTEM, scry.PLAN_SYNTH_SYSTEM)
+
+    # ----- the draft streams pipeline progress to stderr -------------------- #
+    def test_done_draft_emits_progress_to_stderr(self):
+        d = tempfile.mkdtemp(prefix="scry-step-prog-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        env = self._env(h.claude_plan(rounds_before_ready=1))
+        rec, cp = self._run(self._start_args(), json.dumps({"done": True}),
+                            env, cwd=d)
+        self.assertEqual(rec["status"], "done")
+        # Pipeline progress lands on stderr…
+        self.assertIn("panel", cp.stderr)
+        self.assertIn("synthesis", cp.stderr)
+        # …and never pollutes stdout, which stays exactly one JSON envelope.
+        self.assertNotIn("▸", cp.stdout)              # the ▸ stage marker
+        self.assertEqual(cp.stdout.strip().count("\n"), 0)  # single line
+
+    # ----- each interview round shows panel/judge activity on stderr -------- #
+    def test_question_round_emits_progress_to_stderr(self):
+        env = self._env(h.claude_plan(rounds_before_ready=1))
+        rec, cp = self._run(self._start_args(), "", env)
+        self.assertEqual(rec["status"], "questions")
+        self.assertIn("gathering clarifying questions", cp.stderr)
+        self.assertIn("deduplicating", cp.stderr)
+
 
 # --------------------------------------------------------------------------- #
 # Pure helpers for the default-output + diagnostics feature:

@@ -67,7 +67,7 @@ class TestCallCli(unittest.IsolatedAsyncioTestCase):
 
     # ---- kimi: text capture + temp agent file written/cleaned ---------- #
     async def test_kimi_text_with_agent_file(self):
-        with h.StubBins({"kimi": h.kimi_text("KMI")}):
+        with h.StubBins({"kimi-cli": h.kimi_text("KMI")}):
             out = await self._call(self.cfg, "kimi", "k2", None, "hi")
         self.assertEqual(out, "KMI")
 
@@ -171,7 +171,8 @@ class TestCwdIsolation(unittest.IsolatedAsyncioTestCase):
     async def _ran_in(self, provider):
         """Return the realpath of the cwd `provider` actually executed in when
         call_cli is asked to run it in self.repo."""
-        with h.StubBins({provider: PWD_STUB}):
+        binary = self.cfg["providers"][provider]["cmd"][0]
+        with h.StubBins({binary: PWD_STUB}):
             out = await self.scry.call_cli(
                 self.cfg, provider, "m", None, "hi", self.repo, 0, False,
                 self.cfg["settings"])

@@ -54,7 +54,7 @@ Everything else is matched:
 | `web_search` + `web_fetch` on panel **and** judge, **off** for synthesis | ✅ claude (`WebSearch`/`WebFetch`) + codex (`web_search=live`) + kimi (`SearchWeb`/`FetchURL`, toggled via the generated agent file — honors `--no-web`) + agy (Gemini grounding, on by default; can't be force-disabled) |
 | Judge compares → 5-field JSON (consensus/contradictions/partial_coverage/unique_insights/blind_spots) | ✅ |
 | Judge defaults to the outer (synthesis) model | ✅ |
-| `max_tool_calls` cap (default 8) | ✅ claude (`--max-turns`); ⚠️ no codex equivalent |
+| `max_tool_calls` cap (Fusion default 8) | ⚠️ claude (`--max-turns`) when set; scry defaults to **uncapped** (bounded by `timeout`); no codex equivalent |
 | Reasoning effort | ✅ claude (`--effort`) + codex (`model_reasoning_effort`) |
 | `{status, analysis, responses}` output + `failure_reason` enum | ✅ `--json` |
 | Degraded success when judge fails (responses kept, analysis omitted) | ✅ |
@@ -69,8 +69,8 @@ Everything else is matched:
   - **Google Antigravity** (`agy`) — Gemini panel member. Headless via `agy -p "<prompt>"`. Wired in by
     default (`Gemini 3.1 Pro (High)`). See "Adding Google" to change the model. **Live web search works**
     via Gemini grounding (on by default — verified).
-  - **Moonshot Kimi** (`kimi`) — `kimi login` (Kimi Code OAuth — reuses your membership, **no API key**).
-    Headless via `kimi --quiet`. Uses your account's default model (the Kimi Code membership exposes
+  - **Moonshot Kimi** (`kimi-cli`) — `kimi-cli login` (Kimi Code OAuth — reuses your membership, **no API key**).
+    Headless via `kimi-cli --quiet`. Uses your account's default model (the Kimi Code membership exposes
     `kimi-for-coding`). Web via `SearchWeb`/`FetchURL`. See "Adding Moonshot" below.
 
 > New? Run **`scry init`** — an interactive setup wizard that detects which of these CLIs you have and
@@ -233,9 +233,9 @@ Note this sends repo contents to your panel models — the same exposure as runn
 repo directly.
 
 **Patient final draft.** The interview rounds stay fast (web-off, fail-fast via `phases.interview`), but the
-final web-researched draft gets its own budget via `phases.final` (default `max_tool_calls: 24`,
-`timeout: 2100`): that draft is web-on and reads your repo, so the base cap of 8 turns is often too few — a
-model can exhaust it mid-research and fail (claude surfaces this as `model error: exit 1`). The `final`
+final web-researched draft gets a longer timeout ceiling via `phases.final` (default `timeout: 2100`): it's
+web-on and reads your repo, so it can run long. Tool-call turns are **uncapped by default**, so a deep draft
+can't be cut off mid-research (claude would otherwise surface that as `model error: exit 1`). The `final`
 budget applies only to the final draft (layered across its panel/judge/synthesis) and never slows the fast
 interview calls. Both are plain ceilings, so they don't slow a call that finishes early.
 
@@ -273,7 +273,8 @@ auto-loaded by name — pass it with `--config ./config.json` to use it directly
   only what it lists. Stages: `panel`, `judge`, `synthesis` (a normal run); `interview`, `final` (plan).
   Resolution per call (later wins): `settings` → `phases[stage]` → the `final` overlay (plan draft only) →
   explicit CLI flags. Defaults reproduce scry's built-in behavior (synthesis/interview web-off; `final`
-  gets `max_tool_calls: 24`, `timeout: 2100`). e.g. `"judge": {"web_tools": false, "max_tool_calls": 4}`.
+  gets `timeout: 2100`). `max_tool_calls` is **uncapped by default** — set it on any phase to cap claude's
+  `--max-turns`. e.g. `"judge": {"web_tools": false, "max_tool_calls": 4}`.
 - **`providers`** — how to drive each CLI: base `cmd`, `model_flag`, capture (`json`+`result_path`,
   `outfile`+`-o`, or `text`), `system_flag`, `env_unset`, and a **`caps`** block mapping each
   Fusion knob to that CLI's flags (`web_on`/`web_off`, `tool_cap`, `effort`, `max_tokens_env`). A
@@ -327,19 +328,20 @@ no API key. The default panel uses `Gemini 3.1 Pro (High)` (inherited from the p
   `agy` returns live, post-cutoff data with `vertexaisearch…/grounding-api-redirect` citations). There's
   no flag to force or disable it, so `--no-web` does *not* suppress agy's grounding (see Caveats).
 
-### Moonshot (Kimi / `kimi`)
+### Moonshot (Kimi / `kimi-cli`)
 
-Moonshot is wired in via the **Kimi CLI** (`kimi`), authenticated with `kimi login` (Kimi Code OAuth —
+Moonshot is wired in via the **Kimi CLI** (`kimi-cli`), authenticated with `kimi-cli login` (Kimi Code OAuth —
 it reuses your Kimi membership, **no API key**; we unset `KIMI_API_KEY` so a stray key can't divert
 billing off the subscription). Install it with `curl -LsSf https://code.kimi.com/install.sh | bash`
 (or `uv tool install --python 3.13 kimi-cli`).
 
 - **Default model:** `K2.7` — inherited from the provider's top-tier `model` field, passed as
-  `kimi --model K2.7`. A model id passed to `kimi --model` **must be defined in your
-  `~/.kimi/config.toml`** (run `kimi info` / check that file to see what your account exposes);
+  `kimi-cli --model K2.7`. A model id passed to `kimi-cli --model` **must be defined in your
+  `~/.kimi/config.toml`** (run `kimi-cli info` / check that file to see what your account exposes);
   override per-run with `--panel "...,kimi:kimi-k2.6"` — but it'll error with `LLM not set` if your
-  membership doesn't define it.
-- **How it's driven:** `kimi --quiet` runs print mode (`--print --output-format text
+  membership doesn't define it. (Don't have `K2.7`? Point the kimi provider `model` at one your
+  membership exposes, or set it to `""` to use your account's `default_model`.)
+- **How it's driven:** `kimi-cli --quiet` runs print mode (`--print --output-format text
   --final-message-only`), which prints **only the final answer as plain text** (`"capture": "text"`) and
   auto-approves tool calls (`--afk`); the prompt arrives on **stdin**. There's no per-call
   system-prompt flag, so (like codex/agy) the system prompt is folded into the prompt.
@@ -357,17 +359,25 @@ a small stdlib adapter, **`scry-deepseek`**, that calls DeepSeek's OpenAI-compat
 **one provider that needs an API key** and is in the default panel at top tier:
 
 ```sh
-cp .env.example .env && $EDITOR .env                 # add DEEPSEEK_API_KEY=sk-… (gitignored; recommended)
-# …or, equivalently, export it in your shell:
+# Recommended: keep the key in scry's config dir (a sibling of config.json) — read
+# by every shell, cron job, CI run, and Claude Code session:
+mkdir -p ~/.config/scry
+cp .env.example ~/.config/scry/.env && chmod 600 ~/.config/scry/.env   # then add DEEPSEEK_API_KEY=sk-…
+# …or export it — but use ~/.zshenv, NOT ~/.zshrc (see "Shell-rc caveat" below):
 export DEEPSEEK_API_KEY=sk-...                        # platform.deepseek.com (metered, pay-as-you-go)
 scry --panel "claude:opus,codex,deepseek" "..."     # deepseek inherits the top-tier default (deepseek-v4-pro)
 scry --check --panel "...,deepseek"                  # shows: ✓ deepseek installed
 ```
 
-- **Key management:** put `DEEPSEEK_API_KEY` in a local **`.env`** (copy `.env.example`; it's gitignored —
-  never commit it) or `export` it. `scry-deepseek` auto-loads `.env`; real environment variables win. Using
-  `.env` keeps the key scoped to the `scry-deepseek` process — the other providers never see it. Keys never
-  belong in `config.json`. See [SECURITY.md](SECURITY.md).
+- **Key management.** `scry-deepseek` resolves `DEEPSEEK_API_KEY` in this order (first wins): the real
+  env var → `$SCRY_ENV_FILE` → a `.env` next to the adapter (handy in a cloned repo) → `~/.config/scry/.env`
+  (the recommended home — a sibling of scry's `config.json`, read regardless of shell type). It's gitignored;
+  never commit it, and keep it `chmod 600`. The key is loaded only in the `scry-deepseek` process, so the
+  other providers never see it; it never belongs in `config.json`. See [SECURITY.md](SECURITY.md).
+- **Shell-rc caveat.** A bare `export DEEPSEEK_API_KEY=…` in `~/.zshrc`/`~/.bashrc` is read **only by
+  interactive shells**, so headless runs (the `/scry` and `/scry-plan` Claude Code skills, scripts, cron)
+  won't see it. Put the export in `~/.zshenv` (zsh) / `~/.profile` (bash), or — simpler — use
+  `~/.config/scry/.env`, which sidesteps shell startup entirely.
 - The adapter **resolves automatically as a sibling of `scry`** — scry now resolves a provider command
   by PATH → next-to-scry → cwd, so no install/symlink is needed even though proposers run in a temp cwd.
 - **In the default panel at top tier (`deepseek-v4-pro`)** — requires `DEEPSEEK_API_KEY`; drop it
@@ -528,11 +538,11 @@ variance — this proves the harness, not a benchmark figure).
   `--no-web` can't disable agy's grounding (the panel's other members do honor it). `--sandbox` is
   available if you want terminal restrictions. Default `--print-timeout` is 5m; `scry` sets 400s under
   the shared 420s `settings.timeout`.
-- **Moonshot (`kimi`).** Auth is `kimi login` (Kimi Code OAuth — reuses your membership, no API key);
+- **Moonshot (`kimi-cli`).** Auth is `kimi-cli login` (Kimi Code OAuth — reuses your membership, no API key);
   `KIMI_API_KEY` is unset so a stray key can't divert billing off the subscription. Print mode
   auto-approves tool calls (`--afk`), so scry constrains it to **read-only** via a generated
   `--agent-file` (no `Shell`/`WriteFile`/`StrReplaceFile`/`Agent`); that same file is how `--no-web` is
-  honored (it also drops `SearchWeb`/`FetchURL`). `kimi --version` only confirms the binary — login isn't
+  honored (it also drops `SearchWeb`/`FetchURL`). `kimi-cli --version` only confirms the binary — login isn't
   cheaply verifiable, so `scry --check` reports "installed & runnable", not "logged in". Uses the shared
   `settings.timeout` (default 420s) like every other provider.
 - **`ANTHROPIC_API_KEY`** is unset for `claude` calls so it never silently bills the Console API.

@@ -51,7 +51,7 @@ class TestDryRun(unittest.TestCase):
         self.assertIn("[dry-run]", header)
         self.assertIn("mode=fusion", header)
         self.assertIn("web_tools=True", header)
-        self.assertIn("max_tool_calls=8", header)
+        self.assertIn("max_tool_calls=uncapped", header)   # uncapped by default
 
     def test_claude_proposer_json_output_format(self):
         out = _dry(self.cfg, "fusion", self.cfg["settings"])
@@ -105,7 +105,7 @@ class TestDryRun(unittest.TestCase):
         )
         out = _dry(cfg, "fusion", cfg["settings"])
         kimi_line = next(ln for ln in _lines(out, "PROPOSER") if "kimi" in ln)
-        self.assertIn("kimi --quiet", kimi_line)
+        self.assertIn("kimi-cli --quiet", kimi_line)
         self.assertIn("--agent-file", kimi_line)
         # The generated agent-file path is shown as the {AGENTFILE} placeholder.
         self.assertIn("{AGENTFILE}", kimi_line)

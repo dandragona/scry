@@ -32,7 +32,8 @@ is carried between calls by scry itself (resume checkpoints) — you just pass t
      SCRY_ANSWERS
      ```
      Repeat from step 2 with the new envelope.
-   - **`ready`** → the panel is confident. Draft the plan:
+   - **`ready`** → the panel is confident. Draft the plan — run this call **in the
+     background** and relay its stderr progress to the user (see *Show progress* in Notes):
      ```bash
      scry plan --resume=<id> --step --json --no-anim <<'SCRY_DONE'
      {"done":true}
@@ -70,6 +71,15 @@ of a heredoc.
 
 - **`--no-anim` is mandatory on every call** — the scrying-orb animation emits hundreds of
   cursor/redraw escapes that burn tokens for nothing when captured into a tool result.
+- **Show progress during the long draft.** stdout carries exactly one JSON envelope;
+  scry streams human-readable pipeline progress to **stderr** (`▸ panel: …`,
+  `✓ claude-opus (180s)` as each model lands, `▸ judge: …`, `▸ synthesis: …`). A
+  *foreground* call returns nothing until it exits, so run the `{"done":true}` draft
+  **in the background**, then periodically read the shell's **stderr** and relay a short
+  one-line note to the user as each stage/model lands (paraphrase the `▸`/`✓` lines —
+  don't dump raw output). When the process exits, parse the final **stdout** JSON
+  envelope exactly as before. (The interview-round calls also emit stderr progress, but
+  they're fast enough to run foreground.)
 - **Run every call from the user's project directory** so the panel gets read-only repo
   access and the plan/diagnostics files land next to their code. Add `--no-repo` only if the
   user asks not to share repo contents with the panel.

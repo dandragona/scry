@@ -4,7 +4,7 @@
   "mode": "fusion",
 
   "settings": {
-    "_note": "Global default Fusion knobs; each pipeline phase can override them in the `phases` block below. web_tools enables web_search+web_fetch (the panel/judge default; synthesis is web-off via phases, mirroring OpenRouter Fusion). timeout is the per-call timeout in seconds (the default for every phase; `scry plan`'s final draft raises it via phases.final). effort/max_output_tokens/max_tool_calls applied only where a CLI supports them. save_history writes each run to ~/.scry for `scry last`/`scry log` (override per-run with --no-save); it is global, not per-phase. temperature has no CLI equivalent and is intentionally absent.",
+    "_note": "Global default Fusion knobs; each pipeline phase can override them in the `phases` block below. web_tools enables web_search+web_fetch (the panel/judge default; synthesis is web-off via phases, mirroring OpenRouter Fusion). timeout is the per-call timeout in seconds (the default for every phase; `scry plan`'s final draft raises it via phases.final). effort/max_output_tokens/max_tool_calls applied only where a CLI supports them. save_history writes each run to ~/.scry for `scry last`/`scry log` (override per-run with --no-save); it is global, not per-phase. temperature has no CLI equivalent and is intentionally absent. Each provider may also declare its own top-tier `effort` default (claude: max, codex: xhigh, deepseek: max) — all phases inherit it; an explicit --effort flag or phases[stage].effort override still wins.",
     "web_tools": true,
     "max_tool_calls": 8,
     "effort": null,
@@ -107,7 +107,7 @@
     },
 
     "deepseek": {
-      "_note": "API-KEY EXCEPTION (testing only). DeepSeek has no subscription CLI, so the scry-deepseek adapter (a sibling script resolved next to scry) calls DeepSeek's OpenAI-compatible API and needs DEEPSEEK_API_KEY. Knowledge-only (no web search). Defaults to the top tier 'deepseek-v4-pro' via the provider `model` field; the legacy 'deepseek-chat'/'deepseek-reasoner' aliases route to V4-Flash. The adapter requests the model's documented max output (V4: 384K) so long answers are never silently truncated at the API's 4096 default; override with --max-tokens.",
+      "_note": "API-KEY EXCEPTION (testing only). DeepSeek has no subscription CLI, so the scry-deepseek adapter (a sibling script resolved next to scry) calls DeepSeek's OpenAI-compatible API and needs DEEPSEEK_API_KEY. Knowledge-only (no web search). Defaults to the top tier 'deepseek-v4-pro' via the provider `model` field; the legacy 'deepseek-chat'/'deepseek-reasoner' aliases route to V4-Flash. The adapter requests the model's documented max output (V4: 384K) so long answers are never silently truncated at the API's 4096 default; override with --max-tokens. Per-provider effort default is 'max' — rendered as --reasoning-effort and translated by scry-deepseek into top-level `reasoning_effort` + `thinking: {type: enabled}` in the API request body (gated off for non-thinking models like deepseek-chat).",
       "cmd": ["scry-deepseek"],
       "model": "deepseek-v4-pro",
       "effort": "max",

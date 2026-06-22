@@ -282,7 +282,13 @@ auto-loaded by name — pass it with `--config ./config.json` to use it directly
   Each provider record also carries a top-tier **`model`** field (e.g. `"model": "opus"` for claude).
   Panel members, the judge, and the aggregator that omit their own `model` inherit this provider
   default — one swap-point per provider to upgrade the whole fleet. An explicit `model` on a panel
-  member always overrides the provider default.
+  member always overrides the provider default. Each provider can also declare a top-tier **`effort`**
+  that all phases inherit (panel, judge, and synthesis) — an explicit `--effort` flag or a
+  `phases[stage].effort` override still wins. Pinned defaults: claude `max`, codex `xhigh`, deepseek
+  `max` (sent to the API as `reasoning_effort` + `thinking` by the `scry-deepseek` adapter). agy is
+  already maxed via its model name (`Gemini 3.1 Pro (High)`) and kimi runs thinking-on by default
+  (can't be disabled on K2.7), so neither has an `effort` field. **Note:** per-provider max effort
+  raises latency and cost on every call, including judge and synthesis.
 - **`panel`** — `{provider, model, label}` proposers. Repeats are allowed (self-pairing still helps).
   The built-in default runs all five providers at top tier: claude (`opus`), codex (`gpt-5.5`), agy
   (`Gemini 3.1 Pro (High)`), deepseek (`deepseek-v4-pro`), and kimi (`K2.7`). Note that deepseek is

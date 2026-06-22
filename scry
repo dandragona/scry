@@ -1237,7 +1237,7 @@ def do_dry_run(cfg: dict, mode: str, settings: dict,
     synth_set = _phase_settings(settings, phases, "synthesis", None, cli_overrides)
     print(f"[dry-run] mode={mode}  web_tools={bool(panel_set.get('web_tools'))}"
           f"  max_tool_calls={panel_set.get('max_tool_calls')}"
-          f"  effort={panel_set.get('effort')}"
+          f"  effort={panel_set.get('effort') or 'per-provider'}"
           f"  max_output_tokens={panel_set.get('max_output_tokens')}"
           f"  (per-phase resolved; judge/synthesis may differ)\n")
     for m in cfg.get("panel", []):
@@ -2533,11 +2533,16 @@ def render_plan_diagnostics(result: dict, cfg: dict, settings: dict,
                 f"max_tool_calls {s.get('max_tool_calls')}, "
                 f"timeout {int(_effective_timeout(s))}s")
 
+    def _member_effort(m: dict) -> str:
+        # Effort is per-provider: a global/CLI effort wins, else the provider's own.
+        prov = cfg.get("providers", {}).get(m.get("provider"), {})
+        return settings.get("effort") or prov.get("effort") or "default"
+
     lines += ["## settings", "",
               f"- **panel:** {', '.join(_member(m) for m in cfg.get('panel', []))}",
               f"- **judge:** {_member(cfg.get('judge'))}",
               f"- **aggregator:** {_member(cfg.get('aggregator'))}",
-              f"- **effort:** {settings.get('effort') or 'default'}",
+              f"- **effort:** {', '.join(f'{_member(m)}={_member_effort(m)}' for m in cfg.get('panel', [])) or (settings.get('effort') or 'default')}",
               f"- **interview phase:** {_phase_summary('interview')}",
               f"- **final draft:** {_phase_summary('panel', phases.get('final'))}",
               ""]

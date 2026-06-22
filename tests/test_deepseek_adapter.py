@@ -57,6 +57,9 @@ class ThinkingPayloadTest(unittest.TestCase):
     def test_no_effort_returns_empty(self):
         self.assertEqual(self.ds.thinking_payload("deepseek-v4-pro", None), {})
 
+    def test_empty_string_effort_returns_empty(self):
+        self.assertEqual(self.ds.thinking_payload("deepseek-v4-pro", ""), {})
+
 
 if __name__ == "__main__":
     unittest.main()

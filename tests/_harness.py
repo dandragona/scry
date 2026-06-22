@@ -240,6 +240,13 @@ def kimi_text(result: str = "KIMI ANSWER") -> str:
     return _py("import sys\n" "sys.stdin.read()\n" f"sys.stdout.write({result!r} + '\\n')\n")
 
 
+def deepseek_text(result: str = "DEEPSEEK ANSWER") -> str:
+    """scry-deepseek: read stdin, print the assistant message as plain text
+    (capture='text'). The stub ignores --model/--system/--max-tokens flags."""
+    return _py("import sys\n" "sys.stdin.read()\n"
+               f"sys.stdout.write({result!r} + '\\n')\n")
+
+
 def version_stub(line: str = "stub 0.0.0") -> str:
     """A trivial `--version`/`--help` style probe target: print a line, exit 0."""
     return _py("import sys\n" f"sys.stdout.write({line!r} + '\\n')\n")
@@ -266,13 +273,14 @@ def echo_argv() -> str:
     return _py("import sys, json\n" "print(json.dumps(sys.argv[1:]))\n")
 
 
-# Convenience: a default set of well-behaved stubs covering all four providers.
+# Convenience: a default set of well-behaved stubs covering all five providers.
 def default_stubs() -> dict:
     return {
         "claude": claude_json("CLAUDE ANSWER"),
         "codex": codex_outfile("CODEX ANSWER"),
         "agy": agy_text("GEMINI ANSWER"),
         "kimi-cli": kimi_text("KIMI ANSWER"),
+        "scry-deepseek": deepseek_text("DEEPSEEK ANSWER"),
     }
 
 

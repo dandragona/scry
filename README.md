@@ -280,9 +280,21 @@ auto-loaded by name — pass it with `--config ./config.json` to use it directly
   Fusion knob to that CLI's flags (`web_on`/`web_off`, `tool_cap`, `effort`, `max_tokens_env`). A
   provider can instead carry an **`agent_file`** block (kimi) when the CLI has no argv flags for
   tool/web control — scry then writes a temp read-only agent file per call (see "Adding Moonshot").
+  Each provider record also carries a top-tier **`model`** field (e.g. `"model": "opus"` for claude).
+  Panel members, the judge, and the aggregator that omit their own `model` inherit this provider
+  default — one swap-point per provider to upgrade the whole fleet. An explicit `model` on a panel
+  member always overrides the provider default. Each provider can also declare a top-tier **`effort`**
+  that all phases inherit (panel, judge, and synthesis) — an explicit `--effort` flag or a
+  `phases[stage].effort` override still wins. Pinned defaults: claude `max`, codex `xhigh`, deepseek
+  `max` (sent to the API as `reasoning_effort` + `thinking` by the `scry-deepseek` adapter). agy is
+  already maxed via its model name (`Gemini 3.1 Pro (High)`) and kimi runs thinking-on by default
+  (can't be disabled on K2.7), so neither has an `effort` field. **Note:** per-provider max effort
+  raises latency and cost on every call, including judge and synthesis.
 - **`panel`** — `{provider, model, label}` proposers. Repeats are allowed (self-pairing still helps).
-  Built-in default mirrors OpenRouter's "Quality" preset shape (claude-opus + gpt + gemini-pro); the
-  best panel is an empirical question, so compose your own with **`scry init`** or `--panel`.
+  The built-in default runs all five providers at top tier: claude (`opus`), codex (`gpt-5.5`), agy
+  (`Gemini 3.1 Pro (High)`), deepseek (`deepseek-v4-pro`), and kimi (`K2.7`). Note that deepseek is
+  **knowledge-only** (no web search) — a voice without live grounding. Compose your own panel with
+  **`scry init`** or `--panel`.
 - **`judge`**, **`aggregator`** — `{provider, model}` per stage (default `claude:opus`).
 
 ### Setup wizard (`scry init`)
@@ -302,8 +314,8 @@ The splash honors `--no-anim` / `NO_COLOR` / non-TTY (static frame, no keypress 
 ### Google (Antigravity / `agy`)
 
 Google is wired in via the **Antigravity CLI** (`agy`), already logged into your Google subscription —
-no API key. The default panel uses `Gemini 3.1 Pro (High)`, completing the 3-model Quality preset
-(Claude Opus + GPT + Gemini Pro).
+no API key. The default panel uses `Gemini 3.1 Pro (High)` (inherited from the provider's top-tier
+`model` field).
 
 - **Pick a different Gemini model:** run `agy models` to list them (e.g. `Gemini 3.5 Flash (High)`,
   `Gemini 3.1 Pro (Low)`), then set the `model` on the `agy` panel member in `config.json` to the exact
@@ -323,14 +335,12 @@ it reuses your Kimi membership, **no API key**; we unset `KIMI_API_KEY` so a str
 billing off the subscription). Install it with `curl -LsSf https://code.kimi.com/install.sh | bash`
 (or `uv tool install --python 3.13 kimi-cli`).
 
-- **Default model:** none — scry passes no `--model`, so kimi uses your account's `default_model`.
-  The Kimi Code membership configures `kimi-for-coding` at `kimi-cli login`. A model id passed to
-  `kimi-cli --model` **must be defined in your `~/.kimi/config.toml`** (run `kimi-cli info` / check that file to
-  see what your account exposes), so pin one only if it's there — e.g.
-  `scry --panel "claude:opus,codex,kimi:kimi-k2.6" "..."`, where `kimi-k2.6` is the Kimi member of
-  OpenRouter's **Budget** Fusion panel (Gemini 3 Flash + Kimi K2.6 + DeepSeek V4 Pro, within ~1% of
-  Fable 5) — but it'll error with `LLM not set` if your membership doesn't define it. Leaving the model
-  blank (the default) always works.
+- **Default model:** none — the kimi provider ships with `model: ""`, so kimi uses your account's
+  `default_model` (the Kimi Code membership configures `kimi-for-coding`). Unlike the other
+  providers, kimi is **not** pinned to a top tier: a model id passed to `kimi-cli --model` **must be
+  defined in your `~/.kimi/config.toml`** (run `kimi-cli info` to see what your account exposes), so a
+  fixed default would error `LLM not set` for memberships that lack it. Pin one yourself when it's
+  there — e.g. `--panel "...,kimi:K2.7"` or set the provider's `model`. Leaving it blank always works.
 - **How it's driven:** `kimi-cli --quiet` runs print mode (`--print --output-format text
   --final-message-only`), which prints **only the final answer as plain text** (`"capture": "text"`) and
   auto-approves tool calls (`--afk`); the prompt arrives on **stdin**. There's no per-call
@@ -342,12 +352,11 @@ billing off the subscription). Install it with `curl -LsSf https://code.kimi.com
   excludes `SearchWeb`/`FetchURL`. So **unlike agy, kimi honors `--no-web`** (web off for synthesis, per
   Fusion). The file is written to a temp path per call and removed afterward.
 
-### DeepSeek — the API-key exception (testing only)
+### DeepSeek — the API-key exception
 
-scry is built to avoid API keys, but DeepSeek has **no subscription CLI** — only its API. For
-*testing* (e.g. recreating OpenRouter's budget-panel DRACO result), scry ships a small stdlib
-adapter, **`scry-deepseek`**, that calls DeepSeek's OpenAI-compatible API. It is the **one provider
-that needs an API key**:
+scry is built to avoid API keys, but DeepSeek has **no subscription CLI** — only its API. scry ships
+a small stdlib adapter, **`scry-deepseek`**, that calls DeepSeek's OpenAI-compatible API. It is the
+**one provider that needs an API key** and is in the default panel at top tier:
 
 ```sh
 # Recommended: keep the key in scry's config dir (a sibling of config.json) — read
@@ -356,8 +365,8 @@ mkdir -p ~/.config/scry
 cp .env.example ~/.config/scry/.env && chmod 600 ~/.config/scry/.env   # then add DEEPSEEK_API_KEY=sk-…
 # …or export it — but use ~/.zshenv, NOT ~/.zshrc (see "Shell-rc caveat" below):
 export DEEPSEEK_API_KEY=sk-...                        # platform.deepseek.com (metered, pay-as-you-go)
-scry --panel "claude:opus,codex,deepseek:deepseek-chat" "..."
-scry --check --panel "...,deepseek:deepseek-chat"    # shows: ✓ deepseek installed
+scry --panel "claude:opus,codex,deepseek" "..."     # deepseek inherits the top-tier default (deepseek-v4-pro)
+scry --check --panel "...,deepseek"                  # shows: ✓ deepseek installed
 ```
 
 - **Key management.** `scry-deepseek` resolves `DEEPSEEK_API_KEY` in this order (first wins): the real
@@ -371,12 +380,16 @@ scry --check --panel "...,deepseek:deepseek-chat"    # shows: ✓ deepseek insta
   `~/.config/scry/.env`, which sidesteps shell startup entirely.
 - The adapter **resolves automatically as a sibling of `scry`** — scry now resolves a provider command
   by PATH → next-to-scry → cwd, so no install/symlink is needed even though proposers run in a temp cwd.
-- **Not in the default panel** — opt in via `--panel` or `config.json`.
+- **In the default panel at top tier (`deepseek-v4-pro`)** — requires `DEEPSEEK_API_KEY`; drop it
+  with `--panel` or `config.json` if you haven't set a key.
 - **Knowledge-only:** the raw chat API has no web search, so this member is handicapped on web-research
-  tasks like DRACO. Set the model to your target id (`deepseek-chat`, `deepseek-reasoner`, or the V4 Pro
-  id); base URL overridable via `DEEPSEEK_BASE_URL`.
+  tasks like DRACO. Defaults to the top-tier `deepseek-v4-pro` via the provider `model` field; the
+  legacy `deepseek-chat`/`deepseek-reasoner` aliases route to V4-Flash. Base URL overridable via
+  `DEEPSEEK_BASE_URL`.
+- **No silent truncation:** the adapter requests the model's documented max output (V4: 384K tokens),
+  so long answers are never cut short at the API's 4096-token default. Override with `--max-tokens`.
 - This deliberately **breaks the no-API-key rule** — it bills per token, not against a flat
-  subscription. Keep it for testing; drop it from the panel for normal use.
+  subscription.
 
 ## Robustness
 

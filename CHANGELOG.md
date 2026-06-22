@@ -7,6 +7,29 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Per-provider max reasoning effort (all phases).** Each provider record now carries an `effort`
+  default that panel, judge, and synthesis all inherit — an explicit `--effort` flag or a
+  `phases[stage].effort` override still wins. Pinned: claude `max`, codex `xhigh`, deepseek `max`.
+  agy is already maxed via its model name (`Gemini 3.1 Pro (High)`) and kimi runs thinking-on by
+  default (can't be disabled on K2.7), so neither has an `effort` field. The `scry-deepseek`
+  adapter maps the `max` effort to `--reasoning-effort` and writes `reasoning_effort` + `thinking:
+  {type: enabled}` into the API request body; this is gated off for non-thinking models (e.g.
+  `deepseek-chat`). Note: per-provider max effort raises latency and cost on every call, including
+  judge and synthesis.
+- **Per-provider top-tier `model` field with member-inherits resolution.** Each provider record now
+  carries a `model` field pinned to its top tier (claude `opus`, codex `gpt-5.5`, agy `Gemini 3.1
+  Pro (High)`, deepseek `deepseek-v4-pro`). kimi ships **unpinned** (`model: ""`, i.e. the account
+  `default_model`) because a fixed kimi id may not be defined in every membership (it would error
+  `LLM not set`). Panel members, the judge, and the aggregator that omit their own `model` inherit
+  the provider default — one swap-point per provider to upgrade the whole fleet. An explicit `model`
+  on a panel member overrides it.
+- **Default panel expanded to all five providers at top tier.** The built-in panel now fans out to
+  claude, codex, agy, deepseek, and kimi — each at its provider-default top-tier model. Note that
+  deepseek is knowledge-only (no web search) — a voice without live grounding.
+- **DeepSeek adapter requests the model's documented max output (no more 4096 truncation).** The
+  `scry-deepseek` adapter now sends `max_tokens` equal to the model's documented ceiling (V4:
+  384K), so long answers are never silently cut short at the API's 4096-token default. Override with
+  `--max-tokens`.
 - **`SCRY_NO_TIMEOUT` / a negative `--timeout` disables the per-call timeout** (no kill —
   the call runs to completion, however long it takes). The per-call timeout is a hard
   `SIGKILL` that **discards the subprocess's work**, so a slow-but-progressing web-heavy

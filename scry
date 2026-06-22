@@ -210,6 +210,8 @@ DEFAULT_CONFIG = {
     "providers": {
         "claude": {
             "cmd": ["claude", "-p"],
+            "model": "opus",
+            "effort": "max",
             "model_flag": "--model",
             "capture": "json",
             "result_path": "result",
@@ -255,6 +257,8 @@ DEFAULT_CONFIG = {
         },
         "codex": {
             "cmd": ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check"],
+            "model": "gpt-5.5",
+            "effort": "xhigh",
             "model_flag": "-m",
             "capture": "outfile",
             "outfile_flag": "-o",
@@ -281,6 +285,7 @@ DEFAULT_CONFIG = {
         # to toggle it, so caps is empty and `--no-web` can't disable agy's grounding.
         "agy": {
             "cmd": ["agy", "--print-timeout", "400s"],
+            "model": "Gemini 3.1 Pro (High)",
             "model_flag": "--model",
             "capture": "text",
             "system_flag": None,
@@ -293,13 +298,15 @@ DEFAULT_CONFIG = {
             },
             "caps": {},
         },
-        # DeepSeek — the API-key EXCEPTION. No subscription CLI exists, so the
-        # `scry-deepseek` adapter (a sibling script, resolved next to scry) calls
-        # DeepSeek's OpenAI-compatible API and needs DEEPSEEK_API_KEY. For TESTING /
-        # recreating OpenRouter's budget-panel DRACO result only — deliberately NOT
-        # in the default panel. Knowledge-only (the raw API has no web search).
+        # DeepSeek — the API-key EXCEPTION and default-panel member. No subscription
+        # CLI exists, so the `scry-deepseek` adapter (a sibling script, resolved next
+        # to scry) calls DeepSeek's OpenAI-compatible API and needs DEEPSEEK_API_KEY.
+        # Default panel member at top tier (deepseek-v4-pro); bills per token (not a
+        # flat subscription). Knowledge-only (the raw API has no web search).
         "deepseek": {
             "cmd": ["scry-deepseek"],
+            "model": "deepseek-v4-pro",
+            "effort": "max",
             "model_flag": "--model",
             "capture": "text",
             "system_flag": "--system",
@@ -309,7 +316,7 @@ DEFAULT_CONFIG = {
                 "note": "the one API-key provider — set DEEPSEEK_API_KEY; knowledge-only (no web)",
                 "install": "ships with scry as ./scry-deepseek; export DEEPSEEK_API_KEY",
             },
-            "caps": {},
+            "caps": {"effort": ["--reasoning-effort", "{effort}"]},
         },
         # Moonshot via the Kimi CLI (`kimi-cli`). Headless: `kimi-cli --quiet` runs print
         # mode (`--print --output-format text --final-message-only`), which prints
@@ -326,6 +333,7 @@ DEFAULT_CONFIG = {
         # KIMI_API_KEY so a stray key can't divert billing off the subscription.
         "kimi": {
             "cmd": ["kimi-cli", "--quiet"],
+            "model": "",  # account default (kimi-for-coding); a pinned id can 404 "LLM not set"
             "model_flag": "--model",               # -m / --model NAME
             "capture": "text",                     # --quiet => plain final message
             "system_flag": None,                   # no system flag -> fold into prompt
@@ -356,16 +364,18 @@ DEFAULT_CONFIG = {
             "caps": {},                            # nothing to render into argv
         },
     },
-    # Default panel mirrors OpenRouter's "Quality" preset (claude-opus + gpt + gemini-pro).
-    # We have the first two; add the gemini member below once installed for the exact preset.
+    # Default panel: all five providers at top tier (models inherited from provider records).
     "panel": [
-        {"provider": "claude", "model": "opus", "label": "claude-opus"},
-        {"provider": "codex",  "model": "",     "label": "codex-gpt"},
-        {"provider": "agy", "model": "Gemini 3.1 Pro (High)", "label": "gemini-pro"},
+        {"provider": "claude", "label": "claude-opus"},
+        {"provider": "codex",  "label": "codex-gpt"},
+        {"provider": "agy",    "label": "gemini-pro"},
+        # deepseek is knowledge-only (no web search) — a voice without live grounding.
+        {"provider": "deepseek", "label": "deepseek"},
+        {"provider": "kimi",   "label": "kimi"},
     ],
     # Judge defaults to the outer (synthesis) model, as in Fusion.
-    "judge":      {"provider": "claude", "model": "opus"},
-    "aggregator": {"provider": "claude", "model": "opus"},
+    "judge":      {"provider": "claude"},
+    "aggregator": {"provider": "claude"},
     # `scry plan` — the interactive, panel-driven planning mode. max_rounds is the
     # hard backstop on clarifying-question rounds (the real termination guarantee;
     # the per-round convergence check is LLM-driven and non-deterministic). The
@@ -497,6 +507,9 @@ def render_call(p: dict, model: str, system: str | None, web: bool,
     `agentfile` is the path to a provider-generated agent file (e.g. kimi's
     read-only tool policy); it's rendered as `--agent-file <path>` when the
     provider declares an `agent_file` record."""
+    # Per-provider default: an empty member model inherits the provider's top model
+    # (one swap-point per provider); an explicit member model still wins.
+    model = model or p.get("model", "")
     argv = list(p["cmd"])
     env_over: dict = {}
     caps = p.get("caps", {})
@@ -522,7 +535,9 @@ def render_call(p: dict, model: str, system: str | None, web: bool,
     if web and mtc and caps.get("tool_cap"):
         argv += [t.replace("{max_tool_calls}", str(mtc)) for t in caps["tool_cap"]]
 
-    eff = settings.get("effort")
+    # Per-provider default: a provider's effort applies unless a global/phase/--effort
+    # setting overrides it (parallel to the model fallback above).
+    eff = settings.get("effort") or p.get("effort")
     if eff and caps.get("effort"):
         argv += [t.replace("{effort}", str(eff)) for t in caps["effort"]]
 
@@ -1240,7 +1255,7 @@ def do_dry_run(cfg: dict, mode: str, settings: dict,
     synth_set = _phase_settings(settings, phases, "synthesis", None, cli_overrides)
     print(f"[dry-run] mode={mode}  web_tools={bool(panel_set.get('web_tools'))}"
           f"  max_tool_calls={panel_set.get('max_tool_calls') or 'uncapped'}"
-          f"  effort={panel_set.get('effort')}"
+          f"  effort={panel_set.get('effort') or 'per-provider'}"
           f"  max_output_tokens={panel_set.get('max_output_tokens')}"
           f"  (per-phase resolved; judge/synthesis may differ)\n")
     for m in cfg.get("panel", []):
@@ -1289,10 +1304,11 @@ def do_dry_run(cfg: dict, mode: str, settings: dict,
 # only defines its own; pin one (e.g. `kimi:kimi-k2.6`, OpenRouter's near-Fable
 # Budget-panel member) only if your account actually exposes it.
 INIT_SUGGEST = {
-    "claude": ("opus", "claude-opus"),
-    "codex":  ("", "codex-gpt"),
-    "agy":    ("Gemini 3.1 Pro (High)", "gemini-pro"),
-    "kimi":   ("", "kimi"),
+    "claude":    ("opus", "claude-opus"),
+    "codex":     ("gpt-5.5", "codex-gpt"),
+    "agy":       ("Gemini 3.1 Pro (High)", "gemini-pro"),
+    "deepseek":  ("deepseek-v4-pro", "deepseek"),
+    "kimi":      ("", "kimi"),  # blank: a pinned kimi id may not be in ~/.kimi/config.toml
 }
 
 
@@ -2535,11 +2551,16 @@ def render_plan_diagnostics(result: dict, cfg: dict, settings: dict,
                 f"max_tool_calls {s.get('max_tool_calls')}, "
                 f"timeout {'off' if t is None else f'{int(t)}s'}")
 
+    def _member_effort(m: dict) -> str:
+        # Effort is per-provider: a global/CLI effort wins, else the provider's own.
+        prov = cfg.get("providers", {}).get(m.get("provider"), {})
+        return settings.get("effort") or prov.get("effort") or "default"
+
     lines += ["## settings", "",
               f"- **panel:** {', '.join(_member(m) for m in cfg.get('panel', []))}",
               f"- **judge:** {_member(cfg.get('judge'))}",
               f"- **aggregator:** {_member(cfg.get('aggregator'))}",
-              f"- **effort:** {settings.get('effort') or 'default'}",
+              f"- **effort:** {', '.join(f'{_member(m)}={_member_effort(m)}' for m in cfg.get('panel', [])) or (settings.get('effort') or 'default')}",
               f"- **interview phase:** {_phase_summary('interview')}",
               f"- **final draft:** {_phase_summary('panel', phases.get('final'))}",
               ""]

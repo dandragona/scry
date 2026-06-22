@@ -44,6 +44,8 @@ class TestDoCheck(unittest.TestCase):
             # with this line -> "logged in".
             "codex": h.version_stub("Logged in as a@b"),
             "agy": h.version_stub("agy x"),
+            "kimi-cli": h.version_stub("kimi x"),
+            "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         with h.StubBins(stubs):
             rc, out = _run_check(self.cfg, "fusion", self.settings)
@@ -101,6 +103,8 @@ class TestDoCheck(unittest.TestCase):
             "claude": h.version_stub("claude x"),
             "codex": h.fail(1),
             "agy": h.version_stub("agy x"),
+            "kimi-cli": h.version_stub("kimi x"),
+            "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         with h.StubBins(stubs):
             rc, out = _run_check(self.cfg, "fusion", self.settings)
@@ -117,6 +121,8 @@ class TestDoCheck(unittest.TestCase):
             "claude": h.version_stub("claude x"),
             "codex": h.version_stub("Logged in as a@b"),
             "agy": h.version_stub("agy x"),
+            "kimi-cli": h.version_stub("kimi x"),
+            "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         with h.StubBins(stubs):
             rc, out = _run_check(self.cfg, "fusion", self.settings)
@@ -131,6 +137,8 @@ class TestDoCheck(unittest.TestCase):
             "claude": h.version_stub("claude x"),
             "codex": h.version_stub("Logged in as a@b"),
             "agy": h.version_stub("agy x"),
+            "kimi-cli": h.version_stub("kimi x"),
+            "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         with h.StubBins(stubs):
             rc, out = _run_check(self.cfg, "fusion", self.settings)
@@ -147,6 +155,8 @@ class TestDoCheck(unittest.TestCase):
             "claude": h.version_stub("claude x"),
             "codex": h.version_stub("Logged in as a@b"),
             "agy": h.version_stub("agy x"),
+            "kimi-cli": h.version_stub("kimi x"),
+            "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         with h.StubBins(stubs):
             rc, out = _run_check(self.cfg, "fusion", self.settings)
@@ -166,6 +176,8 @@ class TestDoCheck(unittest.TestCase):
             "claude": h.version_stub("claude x"),
             "codex": h.version_stub("Logged in as a@b"),
             "agy": h.version_stub("agy x"),
+            "kimi-cli": h.version_stub("kimi x"),
+            "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         with h.StubBins(stubs):
             rc, out = _run_check(self.cfg, "synthesize", self.settings)
@@ -187,6 +199,8 @@ class TestDoCheck(unittest.TestCase):
             "claude": h.version_stub("claude x"),
             "codex": h.version_stub("Logged in as a@b"),
             "agy": h.version_stub("agy x"),
+            "kimi-cli": h.version_stub("kimi x"),
+            "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         with h.StubBins(stubs):
             rc, out = _run_check(self.cfg, "synthesize", self.settings)
@@ -215,6 +229,8 @@ class TestDoCheck(unittest.TestCase):
             "claude": h.version_stub("claude x"),
             "codex": h.version_stub("Logged in as a@b"),
             "agy": h.version_stub("agy x"),
+            "kimi-cli": h.version_stub("kimi x"),
+            "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         with h.StubBins(stubs):
             rc, out = _run_check(self.cfg, "fusion", self.settings)
@@ -235,6 +251,8 @@ class TestDoCheck(unittest.TestCase):
             "claude": h.version_stub("claude x"),
             "codex": h.version_stub("Logged in as a@b"),
             "agy": h.version_stub("agy x"),
+            "kimi-cli": h.version_stub("kimi x"),
+            "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         with h.StubBins(stubs):
             rc, out = _run_check(self.cfg, "fusion", self.settings)
@@ -250,6 +268,8 @@ class TestDoCheck(unittest.TestCase):
             "claude": h.version_stub("claude x"),
             "codex": h.version_stub("Logged in as a@b"),
             "agy": h.version_stub("agy x"),
+            "kimi-cli": h.version_stub("kimi x"),
+            "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         settings_web = copy.deepcopy(self.settings)
         settings_web["web_tools"] = True

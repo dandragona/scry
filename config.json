@@ -4,7 +4,7 @@
   "mode": "fusion",
 
   "settings": {
-    "_note": "Global default Fusion knobs; each pipeline phase can override them in the `phases` block below. web_tools enables web_search+web_fetch (the panel/judge default; synthesis is web-off via phases, mirroring OpenRouter Fusion). timeout is the per-call timeout in seconds (the default for every phase; `scry plan`'s final draft raises it via phases.final). effort/max_output_tokens/max_tool_calls applied only where a CLI supports them (max_tool_calls null = uncapped by default; set N to cap claude's --max-turns). save_history writes each run to ~/.scry for `scry last`/`scry log` (override per-run with --no-save); it is global, not per-phase. temperature has no CLI equivalent and is intentionally absent.",
+    "_note": "Global default Fusion knobs; each pipeline phase can override them in the `phases` block below. web_tools enables web_search+web_fetch (the panel/judge default; synthesis is web-off via phases, mirroring OpenRouter Fusion). timeout is the per-call timeout in seconds (the default for every phase; `scry plan`'s final draft raises it via phases.final). effort/max_output_tokens/max_tool_calls applied only where a CLI supports them (max_tool_calls null = uncapped by default; set N to cap claude's --max-turns). save_history writes each run to ~/.scry for `scry last`/`scry log` (override per-run with --no-save); it is global, not per-phase. temperature has no CLI equivalent and is intentionally absent. Each provider may also declare its own top-tier `effort` default (claude: max, codex: xhigh, deepseek: max) — all phases inherit it; an explicit --effort flag or phases[stage].effort override still wins.",
     "web_tools": true,
     "max_tool_calls": null,
     "effort": null,
@@ -25,6 +25,8 @@
   "providers": {
     "claude": {
       "cmd": ["claude", "-p"],
+      "model": "opus",
+      "effort": "max",
       "model_flag": "--model",
       "capture": "json",
       "result_path": "result",
@@ -65,6 +67,8 @@
     },
     "codex": {
       "cmd": ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check"],
+      "model": "gpt-5.5",
+      "effort": "xhigh",
       "model_flag": "-m",
       "capture": "outfile",
       "outfile_flag": "-o",
@@ -87,6 +91,7 @@
     "agy": {
       "_note": "Google via the Antigravity CLI. Headless `agy -p \"<prompt>\"` takes the prompt as an ARG (prompt:arg + prompt_flag -p), not stdin, and prints plain text (capture:text). No system-prompt flag (folded into the prompt) and no effort flag. Web search works via Gemini grounding, ON BY DEFAULT (verified live) — there is no flag to toggle it, so caps is empty and --no-web cannot disable agy's grounding. Model is the full name from `agy models`, e.g. 'Gemini 3.1 Pro (High)'.",
       "cmd": ["agy", "--print-timeout", "400s"],
+      "model": "Gemini 3.1 Pro (High)",
       "model_flag": "--model",
       "capture": "text",
       "system_flag": null,
@@ -102,8 +107,10 @@
     },
 
     "deepseek": {
-      "_note": "API-KEY EXCEPTION (testing only). DeepSeek has no subscription CLI, so the scry-deepseek adapter (a sibling script resolved next to scry) calls DeepSeek's OpenAI-compatible API and needs DEEPSEEK_API_KEY. Deliberately NOT in the default panel — add via --panel '...,deepseek:deepseek-chat' or here. Knowledge-only (no web search). Set model to 'deepseek-v4-pro' for the Pro tier; the legacy 'deepseek-chat' / 'deepseek-reasoner' aliases route to V4-Flash (non-thinking / thinking).",
+      "_note": "API-KEY EXCEPTION (testing only). DeepSeek has no subscription CLI, so the scry-deepseek adapter (a sibling script resolved next to scry) calls DeepSeek's OpenAI-compatible API and needs DEEPSEEK_API_KEY. Knowledge-only (no web search). Defaults to the top tier 'deepseek-v4-pro' via the provider `model` field; the legacy 'deepseek-chat'/'deepseek-reasoner' aliases route to V4-Flash. The adapter requests the model's documented max output (V4: 384K) so long answers are never silently truncated at the API's 4096 default; override with --max-tokens. Per-provider effort default is 'max' — rendered as --reasoning-effort and translated by scry-deepseek into top-level `reasoning_effort` + `thinking: {type: enabled}` in the API request body (gated off for non-thinking models like deepseek-chat).",
       "cmd": ["scry-deepseek"],
+      "model": "deepseek-v4-pro",
+      "effort": "max",
       "model_flag": "--model",
       "capture": "text",
       "system_flag": "--system",
@@ -113,12 +120,13 @@
         "note": "the one API-key provider — set DEEPSEEK_API_KEY; knowledge-only (no web)",
         "install": "ships with scry as ./scry-deepseek; export DEEPSEEK_API_KEY"
       },
-      "caps": {}
+      "caps": { "effort": ["--reasoning-effort", "{effort}"] }
     },
 
     "kimi": {
       "_note": "Moonshot via the Kimi CLI (`kimi-cli`). Headless `kimi-cli --quiet` runs print mode (text, final-message-only, auto-approve) and prints the final answer as plain text (capture:text); the prompt is on stdin. No per-call system flag (folded into the prompt) and no argv flag to allow/deny tools or toggle web — so scry hands kimi a generated read-only agent file (--agent-file) that inherits the built-in `default` agent minus the mutating tools, and (when web is off) minus the SearchWeb+FetchURL tools too. That makes kimi read-only like the other panels AND able to honor --no-web (unlike agy). Auth is `kimi-cli login` (Kimi Code OAuth — reuses your membership, no API key); KIMI_API_KEY is unset so a stray key can't divert billing off the subscription.",
       "cmd": ["kimi-cli", "--quiet"],
+      "model": "",
       "model_flag": "--model",
       "capture": "text",
       "system_flag": null,
@@ -149,11 +157,13 @@
   },
 
   "panel": [
-    {"provider": "claude", "model": "opus", "label": "claude-opus"},
-    {"provider": "codex",  "model": "",     "label": "codex-gpt"},
-    {"provider": "agy",    "model": "Gemini 3.1 Pro (High)", "label": "gemini-pro"}
+    {"provider": "claude", "label": "claude-opus"},
+    {"provider": "codex",  "label": "codex-gpt"},
+    {"provider": "agy",    "label": "gemini-pro"},
+    {"provider": "deepseek", "label": "deepseek"},
+    {"provider": "kimi",   "label": "kimi"}
   ],
 
-  "judge":      {"provider": "claude", "model": "opus"},
-  "aggregator": {"provider": "claude", "model": "opus"}
+  "judge":      {"provider": "claude"},
+  "aggregator": {"provider": "claude"}
 }

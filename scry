@@ -306,6 +306,7 @@ DEFAULT_CONFIG = {
         "deepseek": {
             "cmd": ["scry-deepseek"],
             "model": "deepseek-v4-pro",
+            "effort": "max",
             "model_flag": "--model",
             "capture": "text",
             "system_flag": "--system",
@@ -315,7 +316,7 @@ DEFAULT_CONFIG = {
                 "note": "the one API-key provider — set DEEPSEEK_API_KEY; knowledge-only (no web)",
                 "install": "ships with scry as ./scry-deepseek; export DEEPSEEK_API_KEY",
             },
-            "caps": {},
+            "caps": {"effort": ["--reasoning-effort", "{effort}"]},
         },
         # Moonshot via the Kimi CLI (`kimi`). Headless: `kimi --quiet` runs print
         # mode (`--print --output-format text --final-message-only`), which prints

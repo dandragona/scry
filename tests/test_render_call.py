@@ -318,6 +318,12 @@ class TestEffortResolution(_Base):
             self.prov("agy"), "m", None, True, self.settings(), "/tmp/out")
         self.assertNotIn("--effort", argv2)
 
+    def test_deepseek_provider_effort_renders(self):
+        p = self.prov("deepseek")  # provider effort "max" + caps.effort
+        argv, _ = self.scry.render_call(
+            p, "deepseek-v4-pro", "SYS", True, self.settings(), "/tmp/out")
+        self.assertTrue(_contains_seq(argv, ["--reasoning-effort", "max"]))
+
 
 # --------------------------------------------------------------------------- #
 # append_prompt_arg

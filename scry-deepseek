@@ -43,6 +43,20 @@ def resolve_max_tokens(explicit, model):
     return DEEPSEEK_MAX_OUTPUT.get(model, DEFAULT_MAX_OUTPUT)
 
 
+# Models that cannot accept reasoning_effort/thinking (V4-Flash non-thinking).
+NON_THINKING_MODELS = {"deepseek-chat"}
+
+
+def thinking_payload(model, effort):
+    """Reasoning fields to merge into the request body for a thinking-capable model:
+    `reasoning_effort` and `thinking` go at the TOP LEVEL of the raw body (the OpenAI
+    SDK's extra_body flattens here). Returns {} when no effort is requested or the
+    model can't think, so a non-thinking model is never sent fields it would reject."""
+    if not effort or model in NON_THINKING_MODELS:
+        return {}
+    return {"reasoning_effort": effort, "thinking": {"type": "enabled"}}
+
+
 def _load_env_file() -> None:
     """Load KEY=VALUE lines from a `.env` next to this script into the process
     environment, WITHOUT overriding variables already set (so an explicit
@@ -75,6 +89,8 @@ def main() -> int:
     ap.add_argument("--system", default=None, help="optional system prompt")
     ap.add_argument("--timeout", type=float, default=300.0)
     ap.add_argument("--max-tokens", type=int, default=None)
+    ap.add_argument("--reasoning-effort", default=None,
+                    help="DeepSeek reasoning effort for thinking models (high|max)")
     ap.add_argument("--base-url", default=os.environ.get("DEEPSEEK_BASE_URL",
                                                           "https://api.deepseek.com"),
                     help="API base (default https://api.deepseek.com or $DEEPSEEK_BASE_URL)")
@@ -96,7 +112,8 @@ def main() -> int:
         messages.append({"role": "system", "content": args.system})
     messages.append({"role": "user", "content": prompt})
     payload = {"model": args.model, "messages": messages, "stream": False,
-               "max_tokens": resolve_max_tokens(args.max_tokens, args.model)}
+               "max_tokens": resolve_max_tokens(args.max_tokens, args.model),
+               **thinking_payload(args.model, args.reasoning_effort)}
 
     url = args.base_url.rstrip("/") + "/chat/completions"
     req = urllib.request.Request(

@@ -36,5 +36,27 @@ class ResolveMaxTokensTest(unittest.TestCase):
             self.ds.resolve_max_tokens(1000, "deepseek-v4-pro"), 1000)
 
 
+class ThinkingPayloadTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.ds = h.load_scry_deepseek()
+
+    def test_v4_pro_max_enables_thinking(self):
+        self.assertEqual(
+            self.ds.thinking_payload("deepseek-v4-pro", "max"),
+            {"reasoning_effort": "max", "thinking": {"type": "enabled"}})
+
+    def test_reasoner_alias_enables_thinking(self):
+        self.assertEqual(
+            self.ds.thinking_payload("deepseek-reasoner", "max"),
+            {"reasoning_effort": "max", "thinking": {"type": "enabled"}})
+
+    def test_non_thinking_model_gated(self):
+        self.assertEqual(self.ds.thinking_payload("deepseek-chat", "max"), {})
+
+    def test_no_effort_returns_empty(self):
+        self.assertEqual(self.ds.thinking_payload("deepseek-v4-pro", None), {})
+
+
 if __name__ == "__main__":
     unittest.main()

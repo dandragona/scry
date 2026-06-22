@@ -26,6 +26,7 @@
     "claude": {
       "cmd": ["claude", "-p"],
       "model": "opus",
+      "effort": "max",
       "model_flag": "--model",
       "capture": "json",
       "result_path": "result",
@@ -67,6 +68,7 @@
     "codex": {
       "cmd": ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check"],
       "model": "gpt-5.5",
+      "effort": "xhigh",
       "model_flag": "-m",
       "capture": "outfile",
       "outfile_flag": "-o",

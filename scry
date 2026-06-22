@@ -211,6 +211,7 @@ DEFAULT_CONFIG = {
         "claude": {
             "cmd": ["claude", "-p"],
             "model": "opus",
+            "effort": "max",
             "model_flag": "--model",
             "capture": "json",
             "result_path": "result",
@@ -257,6 +258,7 @@ DEFAULT_CONFIG = {
         "codex": {
             "cmd": ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check"],
             "model": "gpt-5.5",
+            "effort": "xhigh",
             "model_flag": "-m",
             "capture": "outfile",
             "outfile_flag": "-o",
@@ -532,7 +534,9 @@ def render_call(p: dict, model: str, system: str | None, web: bool,
     if web and mtc and caps.get("tool_cap"):
         argv += [t.replace("{max_tool_calls}", str(mtc)) for t in caps["tool_cap"]]
 
-    eff = settings.get("effort")
+    # Per-provider default: a provider's effort applies unless a global/phase/--effort
+    # setting overrides it (parallel to the model fallback above).
+    eff = settings.get("effort") or p.get("effort")
     if eff and caps.get("effort"):
         argv += [t.replace("{effort}", str(eff)) for t in caps["effort"]]
 

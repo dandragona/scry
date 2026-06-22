@@ -106,12 +106,6 @@ class TestClaude(_Base):
             p, "opus", None, True, self.settings(effort="high"), "/tmp/out")
         self.assertTrue(_contains_seq(argv, ["--effort", "high"]))
 
-    def test_effort_absent_by_default(self):
-        p = self.prov("claude")
-        argv, _ = self.scry.render_call(
-            p, "opus", None, True, self.settings(), "/tmp/out")
-        self.assertNotIn("--effort", argv)
-
     def test_max_output_tokens_env_override(self):
         p = self.prov("claude")
         argv, env = self.scry.render_call(
@@ -287,6 +281,42 @@ class TestModelResolution(_Base):
         argv, _ = self.scry.render_call(
             p, "", "SYS", True, self.settings(), "/tmp/out")
         self.assertTrue(_adjacent(argv, "--model", "deepseek-v4-pro"))
+
+
+# --------------------------------------------------------------------------- #
+# per-provider effort resolution: settings effort -> provider effort -> omit
+# --------------------------------------------------------------------------- #
+class TestEffortResolution(_Base):
+    def test_claude_provider_effort_default(self):
+        p = self.prov("claude")  # provider effort "max"
+        argv, _ = self.scry.render_call(
+            p, "opus", None, True, self.settings(), "/tmp/out")
+        self.assertTrue(_contains_seq(argv, ["--effort", "max"]))
+
+    def test_codex_provider_effort_default(self):
+        p = self.prov("codex")  # provider effort "xhigh"
+        argv, _ = self.scry.render_call(
+            p, "", None, True, self.settings(), "/tmp/out.txt")
+        self.assertTrue(_contains_seq(argv, ["-c", "model_reasoning_effort=xhigh"]))
+
+    def test_settings_effort_overrides_provider(self):
+        p = self.prov("claude")  # provider effort "max"
+        argv, _ = self.scry.render_call(
+            p, "opus", None, True, self.settings(effort="low"), "/tmp/out")
+        self.assertTrue(_contains_seq(argv, ["--effort", "low"]))
+        self.assertFalse(_contains_seq(argv, ["--effort", "max"]))
+
+    def test_no_effort_anywhere_omits(self):
+        # provider has an effort cap but no effort value, and no settings effort
+        p = self.prov("claude")
+        p.pop("effort", None)
+        argv, _ = self.scry.render_call(
+            p, "opus", None, True, self.settings(), "/tmp/out")
+        self.assertNotIn("--effort", argv)
+        # a provider with no effort cap at all (agy) also renders nothing
+        argv2, _ = self.scry.render_call(
+            self.prov("agy"), "m", None, True, self.settings(), "/tmp/out")
+        self.assertNotIn("--effort", argv2)
 
 
 # --------------------------------------------------------------------------- #

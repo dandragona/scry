@@ -44,7 +44,7 @@ class TestDoCheck(unittest.TestCase):
             # with this line -> "logged in".
             "codex": h.version_stub("Logged in as a@b"),
             "agy": h.version_stub("agy x"),
-            "kimi": h.version_stub("kimi x"),
+            "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         with h.StubBins(stubs):
@@ -103,7 +103,7 @@ class TestDoCheck(unittest.TestCase):
             "claude": h.version_stub("claude x"),
             "codex": h.fail(1),
             "agy": h.version_stub("agy x"),
-            "kimi": h.version_stub("kimi x"),
+            "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         with h.StubBins(stubs):
@@ -121,7 +121,7 @@ class TestDoCheck(unittest.TestCase):
             "claude": h.version_stub("claude x"),
             "codex": h.version_stub("Logged in as a@b"),
             "agy": h.version_stub("agy x"),
-            "kimi": h.version_stub("kimi x"),
+            "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         with h.StubBins(stubs):
@@ -137,7 +137,7 @@ class TestDoCheck(unittest.TestCase):
             "claude": h.version_stub("claude x"),
             "codex": h.version_stub("Logged in as a@b"),
             "agy": h.version_stub("agy x"),
-            "kimi": h.version_stub("kimi x"),
+            "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         with h.StubBins(stubs):
@@ -155,7 +155,7 @@ class TestDoCheck(unittest.TestCase):
             "claude": h.version_stub("claude x"),
             "codex": h.version_stub("Logged in as a@b"),
             "agy": h.version_stub("agy x"),
-            "kimi": h.version_stub("kimi x"),
+            "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         with h.StubBins(stubs):
@@ -176,7 +176,7 @@ class TestDoCheck(unittest.TestCase):
             "claude": h.version_stub("claude x"),
             "codex": h.version_stub("Logged in as a@b"),
             "agy": h.version_stub("agy x"),
-            "kimi": h.version_stub("kimi x"),
+            "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         with h.StubBins(stubs):
@@ -199,7 +199,7 @@ class TestDoCheck(unittest.TestCase):
             "claude": h.version_stub("claude x"),
             "codex": h.version_stub("Logged in as a@b"),
             "agy": h.version_stub("agy x"),
-            "kimi": h.version_stub("kimi x"),
+            "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         with h.StubBins(stubs):
@@ -229,7 +229,7 @@ class TestDoCheck(unittest.TestCase):
             "claude": h.version_stub("claude x"),
             "codex": h.version_stub("Logged in as a@b"),
             "agy": h.version_stub("agy x"),
-            "kimi": h.version_stub("kimi x"),
+            "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         with h.StubBins(stubs):
@@ -251,7 +251,7 @@ class TestDoCheck(unittest.TestCase):
             "claude": h.version_stub("claude x"),
             "codex": h.version_stub("Logged in as a@b"),
             "agy": h.version_stub("agy x"),
-            "kimi": h.version_stub("kimi x"),
+            "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         with h.StubBins(stubs):
@@ -268,7 +268,7 @@ class TestDoCheck(unittest.TestCase):
             "claude": h.version_stub("claude x"),
             "codex": h.version_stub("Logged in as a@b"),
             "agy": h.version_stub("agy x"),
-            "kimi": h.version_stub("kimi x"),
+            "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
         }
         settings_web = copy.deepcopy(self.settings)

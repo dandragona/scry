@@ -45,7 +45,7 @@ class TestHarness(unittest.TestCase):
             "claude": h.version_stub("claude 0.0.0"),
             "codex": h.version_stub("Logged in as ci@example.com"),
             "agy": h.version_stub("agy 0.0.0"),
-            "kimi": h.version_stub("kimi 0.0.0"),
+            "kimi-cli": h.version_stub("kimi 0.0.0"),
             "scry-deepseek": h.version_stub("scry-deepseek 0.0.0"),
         }):
             with contextlib.redirect_stdout(io.StringIO()):

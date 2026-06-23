@@ -80,6 +80,22 @@ printf '\nInstalling the /scry + /scry-plan Claude Code skills\n'
 install_skill scry
 install_skill scry-plan
 
+# The optional local web UI (`scry web`) needs a few third-party Python packages.
+# Per the project's default, install them up front (best-effort, never fatal) so the
+# UI works out of the box; the core CLI stays stdlib-only and runs even if this fails.
+# Skip with SCRY_NO_WEB=1.
+install_web_deps() {
+  [ "${SCRY_NO_WEB:-0}" = "1" ] && { note "SCRY_NO_WEB=1 — skipping web UI deps."; return 0; }
+  printf '\nInstalling the optional web UI dependencies (FastAPI + uvicorn)\n'
+  if python3 -m pip install --user --quiet \
+      "fastapi>=0.110" "uvicorn[standard]>=0.29" "python-multipart>=0.0.9" 2>/dev/null; then
+    printf '  -> fastapi, uvicorn, python-multipart\n'
+  else
+    note "could not install web UI deps automatically — run \`scry web\` to see the install hint, or \`pip install 'scry[web]'\`."
+  fi
+}
+install_web_deps
+
 printf '\n\033[32m✓ installed\033[0m %s\n' "$("${INSTALL_DIR%/}/scry" --version 2>/dev/null || echo scry)"
 
 # PATH guidance — we PRINT the line to add and never touch your shell files.
@@ -108,3 +124,4 @@ fi
 printf '\nNext: run \033[1mscry --check\033[0m to verify your model CLIs are logged in.\n'
 printf 'For DeepSeek, set \033[1mDEEPSEEK_API_KEY\033[0m in \033[1m~/.config/scry/.env\033[0m (see .env.example).\n'
 printf 'In Claude Code, run \033[1m/scry <prompt>\033[0m to consult the panel, or \033[1m/scry-plan <request>\033[0m to plan.\n'
+printf 'Local web UI: run \033[1mscry web\033[0m from a repo clone (or \033[1mpip install -e \047.[web]\047\033[0m) to launch the sleek browser UI.\n'

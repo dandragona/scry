@@ -71,10 +71,11 @@ install_skill() {
 
 printf 'Installing scry from %s\n' "$REPO@$REF"
 install_file scry
-# The DeepSeek provider has no subscription CLI; scry shells out to this API-key
-# adapter, which it resolves *next to the scry binary*. Install it alongside or
-# DeepSeek shows up as "not found" even with DEEPSEEK_API_KEY set.
+# DeepSeek and GLM have no subscription CLI; scry shells out to these API-key
+# adapters, which it resolves *next to the scry binary*. Install them alongside or
+# the provider shows up as "not found" even with its API key set.
 install_file scry-deepseek
+install_file scry-glm
 
 printf '\nInstalling the /scry + /scry-plan Claude Code skills\n'
 install_skill scry
@@ -106,5 +107,5 @@ if [ -n "$existing" ] && [ "$existing" != "${INSTALL_DIR%/}/scry" ]; then
 fi
 
 printf '\nNext: run \033[1mscry --check\033[0m to verify your model CLIs are logged in.\n'
-printf 'For DeepSeek, set \033[1mDEEPSEEK_API_KEY\033[0m in \033[1m~/.config/scry/.env\033[0m (see .env.example).\n'
+printf 'For the API-key providers, set \033[1mDEEPSEEK_API_KEY\033[0m / \033[1mGLM_API_KEY\033[0m in \033[1m~/.config/scry/.env\033[0m (see .env.example).\n'
 printf 'In Claude Code, run \033[1m/scry <prompt>\033[0m to consult the panel, or \033[1m/scry-plan <request>\033[0m to plan.\n'

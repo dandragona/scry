@@ -259,6 +259,42 @@ class TestKimi(_Base):
 
 
 # --------------------------------------------------------------------------- #
+# glm (Zhipu / Z.ai) — OpenAI-compatible API-key adapter; web toggled via --web
+# --------------------------------------------------------------------------- #
+class TestGlm(_Base):
+    def test_default_model_is_glm_5_2(self):
+        p = self.prov("glm")
+        argv, _ = self.scry.render_call(
+            p, "", "SYS", True, self.settings(), "/tmp/out")
+        self.assertTrue(_adjacent(argv, "--model", "glm-5.2"))
+
+    def test_web_on_renders_web_flag(self):
+        # GLM has a built-in web_search tool; scry's web-on cap passes --web.
+        p = self.prov("glm")
+        argv, _ = self.scry.render_call(
+            p, "", None, True, self.settings(), "/tmp/out")
+        self.assertIn("--web", argv)
+
+    def test_web_off_omits_web_flag(self):
+        p = self.prov("glm")
+        argv, _ = self.scry.render_call(
+            p, "", None, False, self.settings(), "/tmp/out")
+        self.assertNotIn("--web", argv)
+
+    def test_provider_effort_renders_reasoning_effort(self):
+        p = self.prov("glm")  # provider effort "max" + caps.effort
+        argv, _ = self.scry.render_call(
+            p, "", "SYS", True, self.settings(), "/tmp/out")
+        self.assertTrue(_contains_seq(argv, ["--reasoning-effort", "max"]))
+
+    def test_system_flag_pair(self):
+        p = self.prov("glm")
+        argv, _ = self.scry.render_call(
+            p, "", "SYSTEM", True, self.settings(), "/tmp/out")
+        self.assertTrue(_adjacent(argv, "--system", "SYSTEM"))
+
+
+# --------------------------------------------------------------------------- #
 # per-provider model resolution: member model -> provider model -> CLI default
 # --------------------------------------------------------------------------- #
 class TestModelResolution(_Base):

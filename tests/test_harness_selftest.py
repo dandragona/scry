@@ -47,6 +47,7 @@ class TestHarness(unittest.TestCase):
             "agy": h.version_stub("agy 0.0.0"),
             "kimi-cli": h.version_stub("kimi 0.0.0"),
             "scry-deepseek": h.version_stub("scry-deepseek 0.0.0"),
+            "scry-glm": h.version_stub("scry-glm 0.0.0"),
         }):
             with contextlib.redirect_stdout(io.StringIO()):
                 rc = scry.do_check(cfg, "fusion", cfg["settings"])

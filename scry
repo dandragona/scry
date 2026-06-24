@@ -1771,6 +1771,132 @@ def _ver_tuple(v: str) -> tuple:
     return tuple(int(n) for n in re.findall(r"\d+", v))
 
 
+def _aux_atomic_write(dest: Path, data: bytes, mode: int) -> bool:
+    """Write `data` to `dest` atomically (temp in the same dir + os.replace) with the
+    given mode. Creates parent dirs. Returns True on success; never raises."""
+    tmp = None
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(dest.parent), prefix=".scry-aux-")
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.chmod(tmp, mode)
+        os.replace(tmp, dest)
+        return True
+    except OSError:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        return False
+
+
+def _aux_replace_tree(src: Path, dest: Path) -> bool:
+    """Replace directory `dest` with a fresh copy of `src` (best-effort: copy into a
+    sibling temp dir, drop the old tree, rename into place). Returns True on success."""
+    tmp = dest.parent / (dest.name + ".scry-new")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.copytree(src, tmp)
+        shutil.rmtree(dest, ignore_errors=True)
+        os.replace(tmp, dest)
+        return True
+    except OSError:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return False
+
+
+def _aux_safe_extract(tf, dest: Path) -> None:
+    """Extract a tar into `dest`, skipping any member that would escape it (absolute
+    paths, `..` traversal) or that is a link — we only need the regular files/dirs.
+    Guards the downloaded-tarball extraction against path-traversal entries."""
+    base = dest.resolve()
+    for m in tf.getmembers():
+        if m.issym() or m.islnk():
+            continue
+        target = (base / m.name).resolve()
+        if target != base and base not in target.parents:
+            continue
+        tf.extract(m, str(dest))
+
+
+def _aux_find_root(dest: Path) -> "Path | None":
+    """The repo root inside an extracted archive. A GitHub tarball wraps everything in
+    one `<repo>-<ref>/` dir; a bare tarball (the tests') extracts at the top. Return
+    whichever dir actually holds the scry payload, or None."""
+    def looks_like_root(d: Path) -> bool:
+        return (d / "scry_web").exists() or (d / "scry").is_file()
+    if looks_like_root(dest):
+        return dest
+    try:
+        for child in sorted(dest.iterdir()):
+            if child.is_dir() and looks_like_root(child):
+                return child
+    except OSError:
+        return None
+    return None
+
+
+def _update_aux(install_dir: Path, repo: str, ref: str) -> None:
+    """Best-effort refresh of everything in the install that drifts ALONGSIDE the core
+    `scry` binary — the sibling API-key adapters (scry-deepseek, scry-glm), the web UI
+    package (scry_web/), and the Claude skills — lifted from ONE repo tarball. This is
+    what makes `scry update` keep the WHOLE install current, so reinstalling is never
+    needed. Only refreshes artifacts that ALREADY exist (keeps what you have current;
+    never installs something new). Prints a one-line summary. Never raises — a failed
+    aux refresh leaves the already-updated core binary in place.
+
+    SCRY_WEB_TARBALL overrides the source (a file:// tarball keeps the tests hermetic)."""
+    import io
+    import tarfile
+    adapters = [n for n in ("scry-deepseek", "scry-glm")
+                if (install_dir / n).is_file()]
+    want_web = (install_dir / "scry_web" / "__init__.py").is_file()
+    skills_root = Path(os.environ.get("CLAUDE_CONFIG_DIR")
+                       or (Path.home() / ".claude")) / "skills"
+    skills = [n for n in ("scry", "scry-plan")
+              if (skills_root / n / "SKILL.md").is_file()]
+    if not (adapters or want_web or skills):
+        return
+    tb = os.environ.get("SCRY_WEB_TARBALL",
+                        f"https://github.com/{repo}/archive/{ref}.tar.gz")
+    refreshed = []
+    try:
+        req = urllib.request.Request(tb, headers={"User-Agent": f"scry/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read()
+        with tempfile.TemporaryDirectory(prefix="scry-aux-") as td:
+            tdp = Path(td)
+            with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tf:
+                _aux_safe_extract(tf, tdp)
+            root = _aux_find_root(tdp)
+            if root is None:
+                return
+            for name in adapters:
+                src = root / name
+                if src.is_file() and _aux_atomic_write(
+                        install_dir / name, src.read_bytes(), 0o755):
+                    refreshed.append(name)
+            if want_web and (root / "scry_web" / "__init__.py").is_file():
+                if _aux_replace_tree(root / "scry_web", install_dir / "scry_web"):
+                    refreshed.append("web UI")
+            got_skills = [n for n in skills
+                          if (root / ".claude" / "skills" / n / "SKILL.md").is_file()
+                          and _aux_atomic_write(
+                              skills_root / n / "SKILL.md",
+                              (root / ".claude" / "skills" / n / "SKILL.md").read_bytes(),
+                              0o644)]
+            if got_skills:
+                refreshed.append("skills")
+    except (urllib.error.URLError, urllib.error.HTTPError, http.client.HTTPException,
+            tarfile.TarError, OSError, ValueError):
+        return  # best-effort: never let an aux refresh fail the core update
+    if refreshed:
+        print("  also refreshed: " + ", ".join(refreshed))
+
+
 def do_update(force: bool = False) -> int:
     """Replace the running scry with the latest single-file build from GitHub.
 
@@ -1852,6 +1978,9 @@ def do_update(force: bool = False) -> int:
 
     if data == target.read_bytes():
         print(c("✓ already up to date", "32") + f"  (scry {VERSION})")
+        # The core binary is current, but the rest of the install (adapters, the
+        # scry_web package, skills) can still have drifted — keep them current too.
+        _update_aux(target.parent, repo, ref)
         return 0
     if _ver_tuple(new_ver) < _ver_tuple(VERSION) and not force:
         print(c(f"note: remote scry {new_ver} is older than installed {VERSION}.", "33"))
@@ -1899,6 +2028,8 @@ def do_update(force: bool = False) -> int:
     else:
         print(c("✓ updated", "32") + f"  scry {VERSION} → {new_ver}")
     print(f"  {target}")
+    # Keep the rest of the install in lockstep with the freshly-swapped binary.
+    _update_aux(target.parent, repo, ref)
     print("\nRun " + c("scry --version", "1") + " to confirm.")
     return 0
 

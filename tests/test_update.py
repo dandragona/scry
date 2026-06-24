@@ -5,9 +5,11 @@ Every test points env SCRY_UPDATE_URL at a localhost FileServer serving a fixed
 byte payload (no network, no GitHub). Payloads are derived from the real scry
 source so they pass / fail do_update's validation as intended.
 """
+import io
 import os
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 
@@ -15,13 +17,38 @@ sys.path.insert(0, os.path.dirname(__file__))
 import _harness as h  # noqa: E402
 
 
-def _run_update(copy, url, *extra, cwd=None, link=None, timeout=60):
-    """Run `<copy|link> update [extra...]` with SCRY_UPDATE_URL=url."""
+def _run_update(copy, url, *extra, cwd=None, link=None, timeout=60, env_extra=None):
+    """Run `<copy|link> update [extra...]` with SCRY_UPDATE_URL=url.
+
+    By default the post-swap aux refresh (do_update's _update_aux) is neutered so it
+    can't reach the real ~/.claude skills or the network: CLAUDE_CONFIG_DIR points at
+    an empty dir and SCRY_WEB_TARBALL at a nonexistent file. Aux tests pass env_extra
+    with a sandboxed CLAUDE_CONFIG_DIR + a real file:// tarball to exercise it."""
     target = str(link) if link is not None else str(copy)
     env = dict(os.environ, SCRY_UPDATE_URL=url)
+    env["CLAUDE_CONFIG_DIR"] = os.path.join(os.path.dirname(str(copy)), ".no-claude")
+    env["SCRY_WEB_TARBALL"] = "file:///nonexistent-scry-aux.tar.gz"
+    if env_extra:
+        env.update(env_extra)
     return subprocess.run(
         [target, "update", *extra], env=env, cwd=cwd or os.path.dirname(str(copy)),
         capture_output=True, text=True, timeout=timeout)
+
+
+def _read(path):
+    with open(path) as f:
+        return f.read()
+
+
+def _make_aux_tarball(path, files: dict):
+    """Build a gzip tarball mimicking GitHub's archive: every entry under one wrapper
+    dir (`pkg/`). `files` maps a repo-relative path to its bytes."""
+    with tarfile.open(path, "w:gz") as tf:
+        for rel, data in files.items():
+            ti = tarfile.TarInfo("pkg/" + rel)
+            ti.size = len(data)
+            ti.mode = 0o644
+            tf.addfile(ti, io.BytesIO(data))
 
 
 class TestUpdate(unittest.TestCase):
@@ -174,6 +201,89 @@ class TestUpdate(unittest.TestCase):
         # Sanity guard for the whole module: the real ./scry is byte-identical to
         # the snapshot taken at module import (no test ever wrote to it).
         self.assertEqual(h.SCRY.read_text(), self.src)
+
+    # ----- the aux refresh: keep the WHOLE install current ------------------ #
+    def test_update_refreshes_aux_artifacts(self):
+        # After swapping the binary, `scry update` refreshes the OTHER install
+        # artifacts that drift (adapters, the scry_web package, the skills) from the
+        # repo tarball — only the ones already present.
+        install_dir = os.path.dirname(str(self.copy))
+        deepseek = os.path.join(install_dir, "scry-deepseek")
+        with open(deepseek, "w") as f:
+            f.write("OLD-DEEPSEEK\n")
+        os.makedirs(os.path.join(install_dir, "scry_web"))
+        web_init = os.path.join(install_dir, "scry_web", "__init__.py")
+        with open(web_init, "w") as f:
+            f.write("# OLD-WEB\n")
+        claude = os.path.join(self.tmp, "claude-cfg")
+        skill_md = os.path.join(claude, "skills", "scry", "SKILL.md")
+        os.makedirs(os.path.dirname(skill_md))
+        with open(skill_md, "w") as f:
+            f.write("OLD-SKILL\n")
+
+        tarball = os.path.join(self.tmp, "aux.tar.gz")
+        _make_aux_tarball(tarball, {
+            "scry-deepseek": b"NEW-DEEPSEEK\n",
+            "scry_web/__init__.py": b"# NEW-WEB\n",
+            "scry_web/static/index.html": b"<html>new</html>\n",
+            ".claude/skills/scry/SKILL.md": b"NEW-SKILL\n",
+        })
+        payload = self._bump("99.0.0")
+        with h.FileServer(payload) as srv:
+            r = _run_update(self.copy, srv.url, env_extra={
+                "SCRY_WEB_TARBALL": f"file://{tarball}",
+                "CLAUDE_CONFIG_DIR": claude,
+            })
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("also refreshed", r.stdout)
+        self.assertEqual(_read(deepseek), "NEW-DEEPSEEK\n")
+        self.assertEqual(_read(web_init), "# NEW-WEB\n")
+        self.assertTrue(os.path.exists(
+            os.path.join(install_dir, "scry_web", "static", "index.html")))
+        self.assertEqual(_read(skill_md), "NEW-SKILL\n")
+
+    def test_update_does_not_add_absent_web_package(self):
+        # Refresh-if-present: a pure-CLI install (no scry_web next to the binary) must
+        # NOT suddenly gain the web package on update — only existing pieces refresh.
+        install_dir = os.path.dirname(str(self.copy))
+        deepseek = os.path.join(install_dir, "scry-deepseek")
+        with open(deepseek, "w") as f:
+            f.write("OLD\n")
+        tarball = os.path.join(self.tmp, "aux.tar.gz")
+        _make_aux_tarball(tarball, {
+            "scry-deepseek": b"NEW\n",
+            "scry_web/__init__.py": b"# web\n",
+        })
+        payload = self._bump("99.0.0")
+        with h.FileServer(payload) as srv:
+            r = _run_update(self.copy, srv.url, env_extra={
+                "SCRY_WEB_TARBALL": f"file://{tarball}",
+                "CLAUDE_CONFIG_DIR": os.path.join(self.tmp, "claude-empty"),
+            })
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(_read(deepseek), "NEW\n")          # present → refreshed
+        self.assertFalse(os.path.exists(os.path.join(install_dir, "scry_web")))  # absent → stays absent
+
+    def test_already_up_to_date_still_refreshes_aux(self):
+        # A scry_web-only change doesn't bump the binary's VERSION, so the no-op
+        # "already up to date" path must still refresh the aux artifacts.
+        install_dir = os.path.dirname(str(self.copy))
+        os.makedirs(os.path.join(install_dir, "scry_web"))
+        web_init = os.path.join(install_dir, "scry_web", "__init__.py")
+        with open(web_init, "w") as f:
+            f.write("# OLD-WEB\n")
+        tarball = os.path.join(self.tmp, "aux.tar.gz")
+        _make_aux_tarball(tarball, {"scry_web/__init__.py": b"# NEW-WEB\n"})
+        payload = self.copy.read_bytes()  # byte-identical → "already up to date"
+        with h.FileServer(payload) as srv:
+            r = _run_update(self.copy, srv.url, env_extra={
+                "SCRY_WEB_TARBALL": f"file://{tarball}",
+                "CLAUDE_CONFIG_DIR": os.path.join(self.tmp, "claude-empty"),
+            })
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("already up to date", r.stdout)
+        self.assertEqual(_read(web_init), "# NEW-WEB\n")
+        self.assertEqual(self.copy.read_bytes(), self.orig_bytes)  # binary untouched
 
 
 if __name__ == "__main__":

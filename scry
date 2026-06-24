@@ -1771,12 +1771,17 @@ def _ver_tuple(v: str) -> tuple:
     return tuple(int(n) for n in re.findall(r"\d+", v))
 
 
-def _aux_atomic_write(dest: Path, data: bytes, mode: int) -> bool:
-    """Write `data` to `dest` atomically (temp in the same dir + os.replace) with the
-    given mode. Creates parent dirs. Returns True on success; never raises."""
+def _aux_refresh_file(dest: Path, data: bytes) -> bool:
+    """Atomically replace the contents of an EXISTING file `dest` (temp in the same dir
+    + os.replace), PRESERVING its current permissions — we only ever refresh artifacts
+    that are already installed, so we keep whatever mode the installer gave them
+    (executable adapters, plain skill files) rather than imposing our own. Returns True
+    on success; never raises. No-op (False) if `dest` doesn't exist."""
+    if not dest.is_file():
+        return False
     tmp = None
     try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        mode = os.stat(dest).st_mode          # keep the installed file's permissions
         fd, tmp = tempfile.mkstemp(dir=str(dest.parent), prefix=".scry-aux-")
         with os.fdopen(fd, "wb") as f:
             f.write(data)
@@ -1788,7 +1793,7 @@ def _aux_atomic_write(dest: Path, data: bytes, mode: int) -> bool:
             try:
                 os.unlink(tmp)
             except OSError:
-                pass
+                pass  # temp cleanup is best-effort; the refresh already failed
         return False
 
 
@@ -1876,18 +1881,17 @@ def _update_aux(install_dir: Path, repo: str, ref: str) -> None:
                 return
             for name in adapters:
                 src = root / name
-                if src.is_file() and _aux_atomic_write(
-                        install_dir / name, src.read_bytes(), 0o755):
+                if src.is_file() and _aux_refresh_file(
+                        install_dir / name, src.read_bytes()):
                     refreshed.append(name)
             if want_web and (root / "scry_web" / "__init__.py").is_file():
                 if _aux_replace_tree(root / "scry_web", install_dir / "scry_web"):
                     refreshed.append("web UI")
             got_skills = [n for n in skills
                           if (root / ".claude" / "skills" / n / "SKILL.md").is_file()
-                          and _aux_atomic_write(
+                          and _aux_refresh_file(
                               skills_root / n / "SKILL.md",
-                              (root / ".claude" / "skills" / n / "SKILL.md").read_bytes(),
-                              0o644)]
+                              (root / ".claude" / "skills" / n / "SKILL.md").read_bytes())]
             if got_skills:
                 refreshed.append("skills")
     except (urllib.error.URLError, urllib.error.HTTPError, http.client.HTTPException,

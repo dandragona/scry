@@ -19,10 +19,11 @@ _TEXT_EXT = {
 
 
 def attach_dir(location: dict, conversation_id: str) -> Path:
+    conv = paths.safe_segment(conversation_id, fallback="conv")  # no path traversal
     if location.get("type") in ("project", "workspace") and location.get("root_path"):
-        d = Path(location["root_path"]) / ".scry" / "web" / "attachments" / conversation_id
+        d = Path(location["root_path"]) / ".scry" / "web" / "attachments" / conv
     else:
-        d = paths.web_dir() / "attachments" / conversation_id
+        d = paths.web_dir() / "attachments" / conv
     d.mkdir(parents=True, exist_ok=True)
     return d
 

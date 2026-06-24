@@ -15,7 +15,20 @@ A workspace or opened project keeps its OWN history DB + attachments under its
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+
+_UNSAFE_SEGMENT = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def safe_segment(value: str, fallback: str = "x") -> str:
+    """Reduce an id to a single, traversal-safe path component before it is joined
+    onto a storage directory. Strips any directory part (``Path(...).name``), keeps
+    only ``[A-Za-z0-9._-]``, and drops leading dots so ``..``/dotfiles can't escape
+    or hide. Conversation/run ids are server-generated hex, so this is a no-op for
+    legitimate values — it only neutralizes a crafted id reaching the filesystem."""
+    name = _UNSAFE_SEGMENT.sub("", Path(value or "").name).lstrip(".")
+    return name or fallback
 
 
 def web_base() -> Path:

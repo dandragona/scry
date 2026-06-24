@@ -92,5 +92,5 @@ def serve(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True,
     try:
         uvicorn.run(app, host=host, port=port, log_level="warning")
     except KeyboardInterrupt:
-        pass
+        pass  # Ctrl-C is the documented way to stop the server — exit cleanly
     return 0

@@ -96,7 +96,7 @@ class LocationManager:
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                timeout=15)
             except (OSError, subprocess.SubprocessError):
-                pass
+                pass  # no git on PATH (or it failed) — the workspace is still valid
         # Seed scry.config.json from the user's global config so the panel matches.
         cfg_dest = root / "scry.config.json"
         written_config = None
@@ -175,11 +175,11 @@ class LocationManager:
             try:
                 if att.get("path") and Path(att["path"]).exists():
                     from . import attachments as att_mod
-                    dest = att_mod.attach_dir(location, conversation_id) / Path(att["path"]).name
+                    dest = att_mod.attach_dir(location, conv["id"]) / Path(att["path"]).name
                     shutil.copy2(att["path"], str(dest))
                     new_path = str(dest)
             except OSError:
-                pass
+                pass  # unreadable source — keep the original path, don't block promote
             rec = dict(att)
             rec["path"] = new_path
             dst.insert_attachment_row(rec)
@@ -196,7 +196,7 @@ class LocationManager:
                         shutil.copy2(ap, str(dest))
                         np = str(dest)
                 except OSError:
-                    pass
+                    pass  # unreadable artifact — keep its original path
                 new_artifacts.append(np)
             run = dict(run)
             run["artifact_paths"] = new_artifacts or run.get("artifact_paths")
@@ -226,7 +226,7 @@ class LocationManager:
                     f"Promoted from a scry web scratchpad session.\n\n"
                     f"## Original request\n\n{first_user.get('content', '')}\n")
             except OSError:
-                pass
+                pass  # README is a nicety — never fail the promote over it
 
         # Move semantics: the conversation now lives in the project, so drop the
         # original rows from the contextless registry (its artifact files are left

@@ -7,7 +7,6 @@ walk the clarifying-question interview.
 """
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -121,7 +120,8 @@ def add_routes(app, appstate) -> None:
         if not conv:
             raise HTTPException(404, "conversation not found")
         data = await file.read()
-        rec = _save_attachment(L, loc, conversation_id, file.filename or "file", data)
+        # Use the DB-sourced id (not the raw route param) for on-disk storage.
+        rec = _save_attachment(L, loc, conv["id"], file.filename or "file", data)
         att = store.add_attachment(conversation_id, rec["filename"], rec["path"],
                                    rec["size"], rec["is_text"])
         return {"attachment": att}
@@ -174,13 +174,21 @@ def add_routes(app, appstate) -> None:
         return FileResponse(str(p), filename=p.name, media_type="text/markdown")
 
     # -- reveal (macOS) ---------------------------------------------------- #
-    @router.post("/reveal")
-    async def reveal(request: Request):
-        body = await _json(request)
-        path = (body.get("path") or "").strip()
-        p = Path(path)
-        if not path or not p.exists():
-            raise HTTPException(404, "path not found")
+    @router.post("/runs/{run_id}/reveal")
+    async def reveal_artifact(run_id: str, index: int = 0):
+        # Reveal a run artifact by (run_id, index) — never an arbitrary client path.
+        # The path comes from the run record (server-written, under managed storage),
+        # so the unauthenticated localhost server can't be steered to `open -R` files
+        # outside what scry produced.
+        run = R.get_run(run_id)
+        if not run:
+            raise HTTPException(404, "run not found")
+        artifacts = run.get("artifact_paths") or []
+        if index < 0 or index >= len(artifacts):
+            raise HTTPException(404, "no such artifact")
+        p = Path(artifacts[index])
+        if not p.exists():
+            raise HTTPException(404, "artifact file missing")
         if sys.platform == "darwin":
             try:
                 subprocess.run(["open", "-R", str(p)], timeout=10,

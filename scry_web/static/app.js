@@ -377,7 +377,7 @@ function artifactBar(run, arts) {
       (p, i) => `<span class="artifact">
         <span class="afile" title="${esc(p)}">${esc(p.split("/").pop())}</span>
         <a class="mini" href="${api.downloadUrl(run.id, i)}" download>download</a>
-        <button class="mini" data-action="reveal" data-path="${esc(p)}">reveal</button>
+        <button class="mini" data-action="reveal" data-run="${esc(run.id)}" data-index="${i}">reveal</button>
       </span>`
     )
     .join("")}</div>`;
@@ -402,7 +402,7 @@ function wireRunControls(root) {
   root.querySelectorAll('[data-action="reveal"]').forEach((b) =>
     b.addEventListener("click", async () => {
       try {
-        await api.reveal(b.dataset.path);
+        await api.reveal(b.dataset.run, b.dataset.index);
       } catch (e) {
         alert("Reveal failed: " + e.message);
       }

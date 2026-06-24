@@ -36,7 +36,8 @@ export const api = {
     req("POST", `/api/conversations/${cid}/messages`, payload),
   getRun: (id) => req("GET", `/api/runs/${id}`),
   answerRun: (id, payload) => req("POST", `/api/runs/${id}/answers`, payload),
-  reveal: (path) => req("POST", "/api/reveal", { path }),
+  reveal: (runId, index) =>
+    req("POST", `/api/runs/${runId}/reveal?index=${index}`),
 
   async uploadAttachment(cid, file) {
     const fd = new FormData();

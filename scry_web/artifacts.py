@@ -17,7 +17,7 @@ def artifact_dir(location: dict, conversation_id: str) -> Path:
     if location.get("type") in ("project", "workspace") and location.get("root_path"):
         d = Path(location["root_path"])
     else:
-        d = paths.runs_dir() / conversation_id
+        d = paths.runs_dir() / paths.safe_segment(conversation_id, fallback="conv")
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -25,18 +25,21 @@ def artifact_dir(location: dict, conversation_id: str) -> Path:
 def plan_out_path(location: dict, conversation_id: str, run_id: str) -> str:
     """The plan file path handed to scry's plan_step (`scry-plan-<id>.md`); its
     diagnostics file is written alongside it automatically."""
-    return str(artifact_dir(location, conversation_id) / f"scry-plan-{run_id}.md")
+    rid = paths.safe_segment(run_id, fallback="run")
+    return str(artifact_dir(location, conversation_id) / f"scry-plan-{rid}.md")
 
 
 def write_research(location: dict, conversation_id: str, run_id: str,
                    request: str, final: str) -> str | None:
-    return _write(artifact_dir(location, conversation_id) / f"scry-research-{run_id}.md",
+    rid = paths.safe_segment(run_id, fallback="run")
+    return _write(artifact_dir(location, conversation_id) / f"scry-research-{rid}.md",
                   _framed("Deep research report", request, final))
 
 
 def write_chat(location: dict, conversation_id: str, run_id: str,
                request: str, final: str) -> str | None:
-    return _write(artifact_dir(location, conversation_id) / f"scry-chat-{run_id}.md",
+    rid = paths.safe_segment(run_id, fallback="run")
+    return _write(artifact_dir(location, conversation_id) / f"scry-chat-{rid}.md",
                   _framed("scry answer", request, final))
 
 

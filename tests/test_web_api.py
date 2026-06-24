@@ -164,6 +164,37 @@ class WebApiTest(unittest.TestCase):
     def test_run_not_found_404(self):
         self.assertEqual(self.c.get("/api/runs/nope").status_code, 404)
 
+    # -- reveal (by run artifact, never an arbitrary path) ----------------- #
+    def _research_run(self):
+        conv = self._conv()
+        run = self.c.post(f"/api/conversations/{conv['id']}/messages",
+                          json={"capability": "research", "content": "study X"}
+                          ).json()["run"]
+        done = self._poll(run["id"], ("done", "error"))
+        self.assertTrue(done["artifact_paths"])
+        return done
+
+    def test_reveal_unknown_run_returns_404(self):
+        self.assertEqual(self.c.post("/api/runs/nope/reveal").status_code, 404)
+
+    def test_reveal_out_of_range_index_returns_404(self):
+        done = self._research_run()
+        r = self.c.post(f"/api/runs/{done['id']}/reveal?index=99")
+        self.assertEqual(r.status_code, 404)
+
+    def test_reveal_opens_only_the_runs_own_artifact(self):
+        # The path is taken from the run record, never from the client — so reveal
+        # can't be steered to an arbitrary file. Patch the macOS `open` so the test
+        # never pops Finder; assert it targets exactly the recorded artifact.
+        from unittest import mock
+        done = self._research_run()
+        art = done["artifact_paths"][0]
+        with mock.patch("scry_web.api.subprocess.run") as m:
+            r = self.c.post(f"/api/runs/{done['id']}/reveal?index=0")
+        self.assertEqual(r.status_code, 200)
+        if m.called:  # darwin only; elsewhere the endpoint no-ops with ok:False
+            self.assertIn(art, m.call_args[0][0])
+
 
 if __name__ == "__main__":
     unittest.main()

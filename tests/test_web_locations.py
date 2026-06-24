@@ -79,7 +79,7 @@ class LocationsTest(unittest.TestCase):
         conv = store.create_conversation("contextless", "build a rate limiter")
         store.add_message(conv["id"], "user", "build a rate limiter", capability="scry")
         # a finished run with an artifact on disk
-        run = store.create_run("r9", conv["id"], "scry", "done", "build", {})
+        store.create_run("r9", conv["id"], "scry", "done", "build", {})
         from scry_web import artifacts
         ap = artifacts.write_chat(lm.get("contextless"), conv["id"], "r9",
                                   "build", "the answer")

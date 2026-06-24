@@ -1,14 +1,17 @@
 """scry_web.store — SQLite schema, migrations, JSON round-trips, per-location
 isolation. Stdlib only (no FastAPI required)."""
 import os
+import shutil
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from scry_web.store import Store, new_id  # noqa: E402
+from scry_web import attachments, paths  # noqa: E402
+from scry_web.store import Store  # noqa: E402
 
 
 class StoreSchemaTest(unittest.TestCase):
@@ -100,7 +103,7 @@ class StoreIsolationTest(unittest.TestCase):
         b = Store(os.path.join(d, "b.db"))
         a.upsert_location({"id": "L", "type": "contextless", "name": "n", "db_path": "x"})
         c = a.create_conversation("L", "t")
-        run = a.create_run("rid", c["id"], "plan", "done", "p", {"mode": "fusion"})
+        a.create_run("rid", c["id"], "plan", "done", "p", {"mode": "fusion"})
         a.update_run("rid", final="F", responses=[{"label": "y"}])
         # copy the run row verbatim into b
         b.insert_conversation_row({"id": c["id"], "location_id": "L2", "title": "t",
@@ -110,6 +113,49 @@ class StoreIsolationTest(unittest.TestCase):
         self.assertEqual(copied["id"], "rid")
         self.assertEqual(copied["final"], "F")
         self.assertEqual(copied["responses"][0]["label"], "y")
+
+
+class PathSafetyTest(unittest.TestCase):
+    """Crafted conversation/run ids and filenames must never escape managed storage
+    (the web server is unauthenticated localhost; treat every id as untrusted)."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix="scry-web-pathsafe-")
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+        self._saved = os.environ.get("SCRY_WEB_HOME")
+        os.environ["SCRY_WEB_HOME"] = self.home
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("SCRY_WEB_HOME", None)
+        else:
+            os.environ["SCRY_WEB_HOME"] = self._saved
+
+    def test_safe_segment_neutralizes_traversal(self):
+        self.assertEqual(paths.safe_segment("abc123DEF"), "abc123DEF")
+        for evil in ["../../etc", "..", "/etc/passwd", "a/b/c", "....//x", "", None,
+                     "..\\..\\win"]:
+            seg = paths.safe_segment(evil, fallback="conv")
+            self.assertNotIn("/", seg)
+            self.assertNotIn("\\", seg)
+            self.assertNotEqual(seg, "..")
+            self.assertFalse(seg.startswith("."))  # no dotfile / parent-ref
+            self.assertTrue(seg)                    # never empty — falls back
+
+    def test_attach_dir_stays_within_base_for_crafted_id(self):
+        base = (paths.web_dir() / "attachments").resolve()
+        d = attachments.attach_dir({"type": "contextless"},
+                                   "../../../../tmp/escape").resolve()
+        self.assertEqual(os.path.commonpath([str(d), str(base)]), str(base))
+
+    def test_save_upload_filename_cannot_traverse(self):
+        rec = attachments.save_upload({"type": "contextless"}, "conv1",
+                                      "../../evil.sh", b"payload")
+        dest = Path(rec["path"]).resolve()
+        base = (paths.web_dir() / "attachments" / "conv1").resolve()
+        self.assertEqual(os.path.commonpath([str(dest), str(base)]), str(base))
+        self.assertEqual(Path(rec["filename"]).name, rec["filename"])  # no separators
+        self.assertTrue(dest.exists())
 
 
 if __name__ == "__main__":

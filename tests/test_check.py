@@ -46,6 +46,7 @@ class TestDoCheck(unittest.TestCase):
             "agy": h.version_stub("agy x"),
             "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
+            "scry-glm": h.version_stub("scry-glm x"),
         }
         with h.StubBins(stubs):
             rc, out = _run_check(self.cfg, "fusion", self.settings)
@@ -105,6 +106,7 @@ class TestDoCheck(unittest.TestCase):
             "agy": h.version_stub("agy x"),
             "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
+            "scry-glm": h.version_stub("scry-glm x"),
         }
         with h.StubBins(stubs):
             rc, out = _run_check(self.cfg, "fusion", self.settings)
@@ -123,6 +125,7 @@ class TestDoCheck(unittest.TestCase):
             "agy": h.version_stub("agy x"),
             "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
+            "scry-glm": h.version_stub("scry-glm x"),
         }
         with h.StubBins(stubs):
             rc, out = _run_check(self.cfg, "fusion", self.settings)
@@ -139,6 +142,7 @@ class TestDoCheck(unittest.TestCase):
             "agy": h.version_stub("agy x"),
             "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
+            "scry-glm": h.version_stub("scry-glm x"),
         }
         with h.StubBins(stubs):
             rc, out = _run_check(self.cfg, "fusion", self.settings)
@@ -157,6 +161,7 @@ class TestDoCheck(unittest.TestCase):
             "agy": h.version_stub("agy x"),
             "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
+            "scry-glm": h.version_stub("scry-glm x"),
         }
         with h.StubBins(stubs):
             rc, out = _run_check(self.cfg, "fusion", self.settings)
@@ -178,6 +183,7 @@ class TestDoCheck(unittest.TestCase):
             "agy": h.version_stub("agy x"),
             "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
+            "scry-glm": h.version_stub("scry-glm x"),
         }
         with h.StubBins(stubs):
             rc, out = _run_check(self.cfg, "synthesize", self.settings)
@@ -201,6 +207,7 @@ class TestDoCheck(unittest.TestCase):
             "agy": h.version_stub("agy x"),
             "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
+            "scry-glm": h.version_stub("scry-glm x"),
         }
         with h.StubBins(stubs):
             rc, out = _run_check(self.cfg, "synthesize", self.settings)
@@ -231,6 +238,7 @@ class TestDoCheck(unittest.TestCase):
             "agy": h.version_stub("agy x"),
             "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
+            "scry-glm": h.version_stub("scry-glm x"),
         }
         with h.StubBins(stubs):
             rc, out = _run_check(self.cfg, "fusion", self.settings)
@@ -253,6 +261,7 @@ class TestDoCheck(unittest.TestCase):
             "agy": h.version_stub("agy x"),
             "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
+            "scry-glm": h.version_stub("scry-glm x"),
         }
         with h.StubBins(stubs):
             rc, out = _run_check(self.cfg, "fusion", self.settings)
@@ -270,6 +279,7 @@ class TestDoCheck(unittest.TestCase):
             "agy": h.version_stub("agy x"),
             "kimi-cli": h.version_stub("kimi x"),
             "scry-deepseek": h.version_stub("scry-deepseek x"),
+            "scry-glm": h.version_stub("scry-glm x"),
         }
         settings_web = copy.deepcopy(self.settings)
         settings_web["web_tools"] = True

@@ -7,7 +7,7 @@ is ever invoked.
 
 Prompt order in do_init (after the welcome splash, which is non-interactive with
 --no-anim / piped stdin):
-  1. Panel members  (comma-separated numbers; 1=claude 2=codex 3=agy 4=kimi)
+  1. Panel members  (comma-separated numbers; 1=claude 2=codex 3=agy 4=deepseek 5=kimi 6=glm)
   2. Judge model    (default = first panel member as provider[:model])
   3. Aggregator     (default = first panel member)
   4. Enable web?    (y/n, default y)
@@ -64,7 +64,7 @@ class InitWizardSubprocessTest(unittest.TestCase):
     def test_valid_panel_claude_kimi(self):
         # panel "1,5:kimi-k2.6" (claude + kimi@kimi-k2.6), default judge,
         # default aggregator, web "y". Provider order: 1 claude, 2 codex, 3 agy,
-        # 4 deepseek, 5 kimi.
+        # 4 deepseek, 5 kimi, 6 glm.
         cp = self._run("1,5:kimi-k2.6\n\n\ny\n")
         self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
         cfg = self._load_out()

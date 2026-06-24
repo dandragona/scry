@@ -46,6 +46,7 @@ body:
         - gemini / agy (Antigravity)
         - deepseek
         - kimi
+        - glm (Zhipu / Z.ai)
         - other / not sure
     validations:
       required: false

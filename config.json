@@ -4,7 +4,7 @@
   "mode": "fusion",
 
   "settings": {
-    "_note": "Global default Fusion knobs; each pipeline phase can override them in the `phases` block below. web_tools enables web_search+web_fetch (the panel/judge default; synthesis is web-off via phases, mirroring OpenRouter Fusion). timeout is the per-call timeout in seconds (the default for every phase; `scry plan`'s final draft raises it via phases.final). effort/max_output_tokens/max_tool_calls applied only where a CLI supports them (max_tool_calls null = uncapped by default; set N to cap claude's --max-turns). save_history writes each run to ~/.scry for `scry last`/`scry log` (override per-run with --no-save); it is global, not per-phase. temperature has no CLI equivalent and is intentionally absent. Each provider may also declare its own top-tier `effort` default (claude: max, codex: xhigh, deepseek: max) — all phases inherit it; an explicit --effort flag or phases[stage].effort override still wins.",
+    "_note": "Global default Fusion knobs; each pipeline phase can override them in the `phases` block below. web_tools enables web_search+web_fetch (the panel/judge default; synthesis is web-off via phases, mirroring OpenRouter Fusion). timeout is the per-call timeout in seconds (the default for every phase; `scry plan`'s final draft raises it via phases.final). effort/max_output_tokens/max_tool_calls applied only where a CLI supports them (max_tool_calls null = uncapped by default; set N to cap claude's --max-turns). save_history writes each run to ~/.scry for `scry last`/`scry log` (override per-run with --no-save); it is global, not per-phase. temperature has no CLI equivalent and is intentionally absent. Each provider may also declare its own top-tier `effort` default (claude: max, codex: xhigh, deepseek: max, glm: max) — all phases inherit it; an explicit --effort flag or phases[stage].effort override still wins.",
     "web_tools": true,
     "max_tool_calls": null,
     "effort": null,
@@ -153,6 +153,27 @@
         ]
       },
       "caps": {}
+    },
+
+    "glm": {
+      "_note": "API-KEY EXCEPTION (the second one, after DeepSeek). Zhipu/Z.ai GLM-5.2 via the scry-glm sibling adapter (OpenAI-compatible chat API). Needs GLM_API_KEY (get one at https://z.ai/manage-apikey/apikey-list). Unlike DeepSeek, GLM has a BUILT-IN web_search tool: web ON (caps.web_on) passes --web so scry-glm injects it for live grounding, and --no-web omits it. Defaults to glm-5.2 and requests its 128K max output so long answers aren't truncated. Per-provider effort 'max' -> --reasoning-effort -> top-level reasoning_effort + thinking:{type:enabled}.",
+      "cmd": ["scry-glm"],
+      "model": "glm-5.2",
+      "effort": "max",
+      "model_flag": "--model",
+      "capture": "text",
+      "system_flag": "--system",
+      "prompt": "stdin",
+      "check": {
+        "verifies_auth": false,
+        "note": "API-key provider — set GLM_API_KEY; has built-in web search (--web)",
+        "install": "ships with scry as ./scry-glm; export GLM_API_KEY"
+      },
+      "caps": {
+        "web_on": ["--web"],
+        "web_off": [],
+        "effort": ["--reasoning-effort", "{effort}"]
+      }
     }
   },
 
@@ -161,7 +182,8 @@
     {"provider": "codex",  "label": "codex-gpt"},
     {"provider": "agy",    "label": "gemini-pro"},
     {"provider": "deepseek", "label": "deepseek"},
-    {"provider": "kimi",   "label": "kimi"}
+    {"provider": "kimi",   "label": "kimi"},
+    {"provider": "glm",    "label": "glm"}
   ],
 
   "judge":      {"provider": "claude"},

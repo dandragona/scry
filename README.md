@@ -97,6 +97,7 @@ Or by hand — it's a single file (keep it somewhere you own, e.g. `~/.local/bin
 mkdir -p ~/.local/bin
 install -m 755 scry ~/.local/bin/scry          # 755 so the interpreter can read it
 install -m 755 scry-deepseek ~/.local/bin/      # only needed for the DeepSeek provider
+install -m 755 scry-glm ~/.local/bin/           # only needed for the GLM (Z.ai) provider
 ```
 
 > Avoid `sudo`-installing into `/usr/local/bin`: a root-owned scry then needs `sudo` to update,
@@ -286,14 +287,16 @@ auto-loaded by name — pass it with `--config ./config.json` to use it directly
   member always overrides the provider default. Each provider can also declare a top-tier **`effort`**
   that all phases inherit (panel, judge, and synthesis) — an explicit `--effort` flag or a
   `phases[stage].effort` override still wins. Pinned defaults: claude `max`, codex `xhigh`, deepseek
-  `max` (sent to the API as `reasoning_effort` + `thinking` by the `scry-deepseek` adapter). agy is
-  already maxed via its model name (`Gemini 3.1 Pro (High)`) and kimi runs thinking-on by default
+  `max`, glm `max` (sent to the API as `reasoning_effort` + `thinking` by the `scry-deepseek` /
+  `scry-glm` adapters). agy is already maxed via its model name (`Gemini 3.1 Pro (High)`) and kimi
+  runs thinking-on by default
   (can't be disabled on K2.7), so neither has an `effort` field. **Note:** per-provider max effort
   raises latency and cost on every call, including judge and synthesis.
 - **`panel`** — `{provider, model, label}` proposers. Repeats are allowed (self-pairing still helps).
-  The built-in default runs all five providers at top tier: claude (`opus`), codex (`gpt-5.5`), agy
-  (`Gemini 3.1 Pro (High)`), deepseek (`deepseek-v4-pro`), and kimi (`K2.7`). Note that deepseek is
-  **knowledge-only** (no web search) — a voice without live grounding. Compose your own panel with
+  The built-in default runs all six providers at top tier: claude (`opus`), codex (`gpt-5.5`), agy
+  (`Gemini 3.1 Pro (High)`), deepseek (`deepseek-v4-pro`), kimi (`K2.7`), and glm (`glm-5.2`). Note
+  that deepseek is **knowledge-only** (no web search) — a voice without live grounding; glm, by
+  contrast, has **built-in web search**. Compose your own panel with
   **`scry init`** or `--panel`.
 - **`judge`**, **`aggregator`** — `{provider, model}` per stage (default `claude:opus`).
 
@@ -352,11 +355,12 @@ billing off the subscription). Install it with `curl -LsSf https://code.kimi.com
   excludes `SearchWeb`/`FetchURL`. So **unlike agy, kimi honors `--no-web`** (web off for synthesis, per
   Fusion). The file is written to a temp path per call and removed afterward.
 
-### DeepSeek — the API-key exception
+### The API-key providers: DeepSeek and GLM
 
-scry is built to avoid API keys, but DeepSeek has **no subscription CLI** — only its API. scry ships
-a small stdlib adapter, **`scry-deepseek`**, that calls DeepSeek's OpenAI-compatible API. It is the
-**one provider that needs an API key** and is in the default panel at top tier:
+scry is built to avoid API keys, but two providers — **DeepSeek** and **GLM** (Zhipu/Z.ai) — have
+**no subscription CLI**, only an API. scry ships a small stdlib adapter for each (**`scry-deepseek`**,
+**`scry-glm`**) that calls the provider's OpenAI-compatible API. These are the **two providers that
+need an API key**; both ship in the default panel at top tier. DeepSeek first:
 
 ```sh
 # Recommended: keep the key in scry's config dir (a sibling of config.json) — read
@@ -390,6 +394,25 @@ scry --check --panel "...,deepseek"                  # shows: ✓ deepseek insta
   so long answers are never cut short at the API's 4096-token default. Override with `--max-tokens`.
 - This deliberately **breaks the no-API-key rule** — it bills per token, not against a flat
   subscription.
+
+#### GLM (Zhipu / Z.ai)
+
+GLM is the **second API-key provider**, via the **`scry-glm`** adapter (same shape as `scry-deepseek`).
+Get a key at <https://z.ai/manage-apikey/apikey-list> and set **`GLM_API_KEY`** the same way (recommended:
+`~/.config/scry/.env`; the key-resolution order and the `~/.zshenv` shell-rc caveat are identical to
+DeepSeek above). It ships in the default panel at top tier (`glm-5.2`).
+
+- **Built-in web search (unlike DeepSeek).** GLM has a first-class `web_search` tool, so scry's web-on
+  cap passes `--web` and the adapter injects it for live grounding — and `--no-web` omits it. No external
+  search provider or function-call loop is needed; web search is a **metered add-on per query**.
+- **Endpoint.** Defaults to the international `https://api.z.ai/api/paas/v4`; override with `GLM_BASE_URL`
+  (e.g. the mainland `https://open.bigmodel.cn/api/paas/v4` — a separate account/key). The search backend
+  is `GLM_SEARCH_ENGINE` (default `search_pro_jina`; on the mainland use `search_pro`/`search_std`).
+- **No silent truncation:** requests `glm-5.2`'s documented max output (128K) so long answers aren't cut
+  at the API default (override with `--max-tokens`). Effort `max` → `--reasoning-effort` → top-level
+  `reasoning_effort` + `thinking:{type:enabled}`.
+- The adapter **resolves automatically as a sibling of `scry`** (PATH → next-to-scry → cwd). Like
+  DeepSeek, this **bills per token**, not against a flat subscription.
 
 ## Robustness
 

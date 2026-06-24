@@ -157,7 +157,7 @@ pass "stream_call streams deltas + reconstructs the final answer"
 # Piped answers: panel "1,5:kimi-for-coding" (claude default model + kimi with an
 # explicit model), <enter> judge, <enter> aggregator, "y" web. --out skips the path
 # prompt. Member 1 (claude) takes its suggested model; member 5 (kimi) pins an
-# explicit one. (Provider order: 1 claude, 2 codex, 3 agy, 4 deepseek, 5 kimi.)
+# explicit one. (Provider order: 1 claude, 2 codex, 3 agy, 4 deepseek, 5 kimi, 6 glm.)
 INITCFG="$STUB/init-config.json"
 printf '1,5:kimi-for-coding\n\n\ny\n' | PATH="$STUB:$PATH" "$SCRY" init --out "$INITCFG" >/dev/null 2>&1 \
   || fail "scry init exited non-zero"

@@ -61,7 +61,7 @@ class TestCliE2E(unittest.TestCase):
     # ----------------------------------------------------------- happy paths --
     def test_happy_json_run(self):
         with h.StubBins({"claude": _smart_stub()}) as stub:
-            r = h.run_scry(["--json", "--panel", "claude:opus", "--no-anim", "hi"],
+            r = h.run_scry(["--json", "--mode", "fusion", "--panel", "claude:opus", "--no-anim", "hi"],
                            env=stub.env)
         self.assertEqual(r.returncode, 0, f"stderr={r.stderr!r}\nstdout={r.stdout!r}")
         data = json.loads(r.stdout)
@@ -77,7 +77,7 @@ class TestCliE2E(unittest.TestCase):
     def test_stdin_prompt_json_run(self):
         # No positional prompt: it is read from (non-tty) stdin instead.
         with h.StubBins({"claude": _smart_stub()}) as stub:
-            r = h.run_scry(["--json", "--panel", "claude:opus", "--no-anim"],
+            r = h.run_scry(["--json", "--mode", "fusion", "--panel", "claude:opus", "--no-anim"],
                            input="from stdin", env=stub.env)
         self.assertEqual(r.returncode, 0, f"stderr={r.stderr!r}\nstdout={r.stdout!r}")
         data = json.loads(r.stdout)
@@ -90,7 +90,7 @@ class TestCliE2E(unittest.TestCase):
         # proposer sections (incl. the "----- fused answer -----" header) go to
         # stderr.
         with h.StubBins({"claude": _smart_stub()}) as stub:
-            r = h.run_scry(["--show-proposers", "--panel", "claude:opus",
+            r = h.run_scry(["--show-proposers", "--mode", "fusion", "--panel", "claude:opus",
                             "--no-anim", "hi"], env=stub.env)
         self.assertEqual(r.returncode, 0, f"stderr={r.stderr!r}\nstdout={r.stdout!r}")
         # Fused answer on stdout (buffered, since stdout is a pipe).
@@ -105,7 +105,7 @@ class TestCliE2E(unittest.TestCase):
         # Every proposer exits non-zero with a "rate limit" message -> the panel
         # all-fails and the failure_reason classifies to "rate_limited".
         with h.StubBins({"claude": h.fail(1, "rate limit")}) as stub:
-            r = h.run_scry(["--json", "--panel", "claude:opus", "--no-anim", "hi"],
+            r = h.run_scry(["--json", "--mode", "fusion", "--panel", "claude:opus", "--no-anim", "hi"],
                            env=stub.env)
         self.assertEqual(r.returncode, 1, f"stderr={r.stderr!r}\nstdout={r.stdout!r}")
         data = json.loads(r.stdout)
@@ -116,7 +116,7 @@ class TestCliE2E(unittest.TestCase):
     def test_map_flag_prints_consensus_map(self):
         # --map forces the consensus map onto stderr even on a non-tty.
         with h.StubBins({"claude": _smart_stub()}) as stub:
-            r = h.run_scry(["--map", "--panel", "claude:opus", "--no-anim", "hi"],
+            r = h.run_scry(["--map", "--mode", "fusion", "--panel", "claude:opus", "--no-anim", "hi"],
                            env=stub.env)
         self.assertEqual(r.returncode, 0, f"stderr={r.stderr!r}\nstdout={r.stdout!r}")
         self.assertIn("consensus map", r.stderr)
@@ -127,7 +127,7 @@ class TestCliE2E(unittest.TestCase):
         # Without --map, stderr is a pipe (non-tty) so the consensus map auto-print
         # is suppressed.
         with h.StubBins({"claude": _smart_stub()}) as stub:
-            r = h.run_scry(["--panel", "claude:opus", "--no-anim", "hi"],
+            r = h.run_scry(["--mode", "fusion", "--panel", "claude:opus", "--no-anim", "hi"],
                            env=stub.env)
         self.assertEqual(r.returncode, 0, f"stderr={r.stderr!r}\nstdout={r.stdout!r}")
         self.assertNotIn("consensus map", r.stderr)
@@ -138,7 +138,7 @@ class TestCliE2E(unittest.TestCase):
         # --quiet silences the progress log on stderr (the "▸ panel" stage line),
         # but the final fused answer still prints to stdout.
         with h.StubBins({"claude": _smart_stub()}) as stub:
-            r = h.run_scry(["--quiet", "--panel", "claude:opus", "--no-anim", "hi"],
+            r = h.run_scry(["--quiet", "--mode", "fusion", "--panel", "claude:opus", "--no-anim", "hi"],
                            env=stub.env)
         self.assertEqual(r.returncode, 0, f"stderr={r.stderr!r}\nstdout={r.stdout!r}")
         self.assertNotIn("▸ panel", r.stderr)

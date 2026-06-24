@@ -14,6 +14,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse
 
+from . import paths
+
 
 def add_routes(app, appstate) -> None:
     router = APIRouter(prefix="/api")
@@ -95,8 +97,10 @@ def add_routes(app, appstate) -> None:
         if not conv:
             raise HTTPException(404, "conversation not found")
         md = _export_markdown(conv, store.list_messages(conversation_id))
-        return JSONResponse({"markdown": md, "filename":
-                             f"scry-conversation-{conversation_id}.md"})
+        slug = paths.slugify(conv.get("title") or "", fallback="") \
+            or paths.safe_segment(conversation_id, fallback="conv")
+        return JSONResponse({"markdown": md,
+                             "filename": f"scry-conversation-{slug}.md"})
 
     @router.post("/conversations/{conversation_id}/messages")
     async def post_message(conversation_id: str, request: Request):

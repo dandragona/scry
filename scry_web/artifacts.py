@@ -22,25 +22,35 @@ def artifact_dir(location: dict, conversation_id: str) -> Path:
     return d
 
 
-def plan_out_path(location: dict, conversation_id: str, run_id: str) -> str:
-    """The plan file path handed to scry's plan_step (`scry-plan-<id>.md`); its
-    diagnostics file is written alongside it automatically."""
-    rid = paths.safe_segment(run_id, fallback="run")
-    return str(artifact_dir(location, conversation_id) / f"scry-plan-{rid}.md")
-
-
 def write_research(location: dict, conversation_id: str, run_id: str,
-                   request: str, final: str) -> str | None:
-    rid = paths.safe_segment(run_id, fallback="run")
-    return _write(artifact_dir(location, conversation_id) / f"scry-research-{rid}.md",
+                   request: str, final: str, title: str | None = None) -> str | None:
+    return _write(_named(location, conversation_id, "scry-research", run_id, title),
                   _framed("Deep research report", request, final))
 
 
 def write_chat(location: dict, conversation_id: str, run_id: str,
-               request: str, final: str) -> str | None:
-    rid = paths.safe_segment(run_id, fallback="run")
-    return _write(artifact_dir(location, conversation_id) / f"scry-chat-{rid}.md",
+               request: str, final: str, title: str | None = None) -> str | None:
+    return _write(_named(location, conversation_id, "scry-chat", run_id, title),
                   _framed("scry answer", request, final))
+
+
+def _named(location: dict, conversation_id: str, prefix: str, run_id: str,
+           title: str | None) -> Path:
+    """The artifact path for this run: `<prefix>-<topic>.md` when a meaningful title
+    slug is given (with a `-2`/`-3` suffix on collision), else `<prefix>-<run_id>.md`."""
+    directory = artifact_dir(location, conversation_id)
+    slug = paths.safe_segment(title, fallback="") if title else ""
+    stem = f"{prefix}-{slug}" if slug else f"{prefix}-{paths.safe_segment(run_id, fallback='run')}"
+    return _unique(directory, stem)
+
+
+def _unique(directory: Path, stem: str, ext: str = ".md") -> Path:
+    """First `directory/<stem><ext>` (then `-2`, `-3`, …) that does not yet exist."""
+    for i in range(1, 1000):
+        cand = directory / f"{stem if i == 1 else f'{stem}-{i}'}{ext}"
+        if not cand.exists():
+            return cand
+    return directory / f"{stem}-{int(time.time() * 1000)}{ext}"
 
 
 def _framed(kind: str, request: str, final: str) -> str:

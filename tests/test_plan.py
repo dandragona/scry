@@ -452,6 +452,20 @@ class PlanSubprocessTest(unittest.TestCase):
         self.assertIn("diagnostics", diag.lower())
         self.assertIn("## settings", diag)
 
+    # ----- default name is a topic slug, not a bare timestamp -------------- #
+    def test_default_plan_filename_is_topic_slug(self):
+        d = tempfile.mkdtemp(prefix="scry-plan-name-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        env = self._env(h.claude_plan(rounds_before_ready=1))
+        cp = h.run_scry(self._args(), input="linux\nok\n", env=env, cwd=d)
+        self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
+        plan = [f for f in os.listdir(d) if f.startswith("scry-plan-")
+                and f.endswith(".md") and not f.endswith(".diagnostics.md")][0]
+        # The title call (stub's panel-proposer branch -> "PLAN DRAFT") yields a slug,
+        # so the name is words — NOT the old `scry-plan-<13-digit-timestamp>.md`.
+        self.assertNotRegex(plan, r"^scry-plan-\d+\.md$")
+        self.assertRegex(plan, r"^scry-plan-[a-z0-9-]+\.md$")
+
     # ----- --no-out: print only, leave no files behind --------------------- #
     def test_no_out_writes_nothing(self):
         d = tempfile.mkdtemp(prefix="scry-plan-noout-")

@@ -70,6 +70,11 @@ class InstallShTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertTrue(os.path.exists(self._user_bin("scry-deepseek")))
 
+    def test_installs_glm_adapter_alongside(self):
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertTrue(os.path.exists(self._user_bin("scry-glm")))
+
     def test_prints_path_export_when_not_on_path(self):
         r = self._run()
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)

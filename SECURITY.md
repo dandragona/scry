@@ -22,11 +22,12 @@ shells out to subprocesses and handles credentials indirectly, so:
   **never silently bill the Console/API**. Don't remove that unless you mean to.
 - **API keys live in the environment, never the repo.** The subscription CLIs
   (`claude`/`codex`/`agy`/`kimi`) authenticate via their own logins — `scry` never
-  sees or stores those. The only key `scry` itself reads is **`DEEPSEEK_API_KEY`**
-  (the optional DeepSeek provider). Put it in your shell or a local **`.env`**
-  (gitignored — copy `.env.example`); real environment variables take precedence.
-  Keeping it in `.env` rather than `export`-ing it scopes the key to the
-  `scry-deepseek` process, so the other providers' subprocesses never receive it.
+  sees or stores those. The only keys `scry` itself reads are **`DEEPSEEK_API_KEY`**
+  and **`GLM_API_KEY`** (the two API-key providers, DeepSeek and GLM). Put them in
+  your shell or a local **`.env`** (gitignored — copy `.env.example`); real
+  environment variables take precedence. Keeping a key in `.env` rather than
+  `export`-ing it scopes it to its adapter process (`scry-deepseek` / `scry-glm`),
+  so the other providers' subprocesses never receive it.
   Never commit `.env`, and never put keys in `config.json`.
 - **Panel/judge calls run with web tools and read-only file tools enabled, but
   mutators disabled** (`--disallowedTools Bash Edit Write NotebookEdit`), and in

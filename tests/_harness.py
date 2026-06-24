@@ -39,6 +39,7 @@ REPO_ROOT = TESTS_DIR.parent
 SCRY = REPO_ROOT / "scry"
 SCRY_EVAL = REPO_ROOT / "scry-eval"
 SCRY_DEEPSEEK = REPO_ROOT / "scry-deepseek"
+SCRY_GLM = REPO_ROOT / "scry-glm"
 CONFIG_JSON = REPO_ROOT / "config.json"
 
 
@@ -72,6 +73,11 @@ def load_scry_eval():
 def load_scry_deepseek():
     """The `scry-deepseek` adapter loaded as a module (symbols only; main() not run)."""
     return _load("scry_deepseek_sut", SCRY_DEEPSEEK)
+
+
+def load_scry_glm():
+    """The `scry-glm` adapter loaded as a module (symbols only; main() not run)."""
+    return _load("scry_glm_sut", SCRY_GLM)
 
 
 # --------------------------------------------------------------------------- #
@@ -309,6 +315,13 @@ def deepseek_text(result: str = "DEEPSEEK ANSWER") -> str:
                f"sys.stdout.write({result!r} + '\\n')\n")
 
 
+def glm_text(result: str = "GLM ANSWER") -> str:
+    """scry-glm: read stdin, print the assistant message as plain text
+    (capture='text'). The stub ignores --model/--system/--max-tokens/--web flags."""
+    return _py("import sys\n" "sys.stdin.read()\n"
+               f"sys.stdout.write({result!r} + '\\n')\n")
+
+
 def version_stub(line: str = "stub 0.0.0") -> str:
     """A trivial `--version`/`--help` style probe target: print a line, exit 0."""
     return _py("import sys\n" f"sys.stdout.write({line!r} + '\\n')\n")
@@ -335,7 +348,7 @@ def echo_argv() -> str:
     return _py("import sys, json\n" "print(json.dumps(sys.argv[1:]))\n")
 
 
-# Convenience: a default set of well-behaved stubs covering all five providers.
+# Convenience: a default set of well-behaved stubs covering all six providers.
 def default_stubs() -> dict:
     return {
         "claude": claude_json("CLAUDE ANSWER"),
@@ -343,6 +356,7 @@ def default_stubs() -> dict:
         "agy": agy_text("GEMINI ANSWER"),
         "kimi-cli": kimi_text("KIMI ANSWER"),
         "scry-deepseek": deepseek_text("DEEPSEEK ANSWER"),
+        "scry-glm": glm_text("GLM ANSWER"),
     }
 
 

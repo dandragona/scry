@@ -21,14 +21,26 @@ def _noop_log(*_a, **_k):
     return None
 
 
+# An explicit 5-provider panel (one no-web: deepseek) that exactly matches the stubs
+# in _full_panel_stubs. Pinned so these tests are deterministic regardless of how many
+# providers ship in the default panel (e.g. glm was added as a 6th) — and hermetic: an
+# unstubbed default member would otherwise resolve to its real adapter.
+_CLASSIC_PANEL = [
+    {"provider": "claude", "label": "claude-opus"},
+    {"provider": "codex", "label": "codex-gpt"},
+    {"provider": "agy", "label": "gemini-pro"},
+    {"provider": "deepseek", "label": "deepseek"},
+    {"provider": "kimi", "label": "kimi"},
+]
+
+
 def _research_cfg(max_rounds=1, hard_cap=2, panel=None, early_exit=True):
     cfg = copy.deepcopy(S.DEFAULT_CONFIG)
     cfg["research"]["max_rounds"] = max_rounds
     cfg["research"]["hard_cap"] = hard_cap
     cfg["research"]["early_exit"] = early_exit
     cfg["research"]["clarify"] = False
-    if panel is not None:
-        cfg["panel"] = panel
+    cfg["panel"] = panel if panel is not None else [dict(m) for m in _CLASSIC_PANEL]
     return cfg
 
 

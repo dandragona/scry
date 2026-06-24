@@ -27,6 +27,17 @@ All notable changes to this project are documented here. The format follows
   cost (several CLIs × multiple rounds) — that's the point; use `--mode fusion` when you want one fast
   pass. **Existing configs that pin `"mode": "fusion"` keep getting fusion** until you set
   `"mode": "research"` (or run `scry init --force`).
+- **GLM (Zhipu / Z.ai) as a direct provider — the second API-key adapter.** A new stdlib sibling,
+  **`scry-glm`**, calls Z.ai's OpenAI-compatible chat API (no OpenRouter) and joins the default panel
+  as a 6th member at top tier (`glm-5.2`). Needs `GLM_API_KEY` (from <https://z.ai/manage-apikey/apikey-list>),
+  resolved exactly like `DEEPSEEK_API_KEY` (real env → `$SCRY_ENV_FILE` → adapter-dir `.env` →
+  `~/.config/scry/.env`). Unlike DeepSeek, GLM has a **built-in `web_search` tool**, so it honors web
+  on/off: the web-on cap passes `--web` and the adapter injects the tool for live grounding, while
+  `--no-web` omits it (web search is a metered add-on per query). Requests glm-5.2's documented 128K
+  max output (no silent truncation); effort `max` → `--reasoning-effort` → top-level `reasoning_effort`
+  + `thinking:{type:enabled}`. Endpoint defaults to international `https://api.z.ai/api/paas/v4`
+  (override `GLM_BASE_URL` for the mainland `open.bigmodel.cn`); search backend via `GLM_SEARCH_ENGINE`.
+  Installed alongside scry by `install.sh` and resolved as a sibling (PATH → next-to-scry → cwd).
 - **Per-provider max reasoning effort (all phases).** Each provider record now carries an `effort`
   default that panel, judge, and synthesis all inherit — an explicit `--effort` flag or a
   `phases[stage].effort` override still wins. Pinned: claude `max`, codex `xhigh`, deepseek `max`.

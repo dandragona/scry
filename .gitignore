@@ -21,6 +21,16 @@ scry-msg-*
 scry-draco-*/
 scry-eval-*/
 
+# Generated plan / research / chat artifacts (scry plan / scry web write these to the
+# working dir by default; they're outputs, not source).
+scry-plan-*.md
+scry-research-*.md
+scry-chat-*.md
+
+# The web app's local data lives under ~/.config/scry; ignore any stray in-repo copy
+# (e.g. a workspace/project scaffolded inside the repo for testing).
+.scry/web/
+
 # Local run history (scry writes here under $HOME, but ignore any stray copy).
 .scry/
 

@@ -97,7 +97,12 @@ Or by hand — it's a single file (keep it somewhere you own, e.g. `~/.local/bin
 mkdir -p ~/.local/bin
 install -m 755 scry ~/.local/bin/scry          # 755 so the interpreter can read it
 install -m 755 scry-deepseek ~/.local/bin/      # only needed for the DeepSeek provider
+install -m 755 scry-glm ~/.local/bin/           # only needed for the GLM (Z.ai) provider
+cp -R scry_web ~/.local/bin/                     # only needed for the `scry web` UI
 ```
+
+(The web UI is the only multi-file piece — copy the `scry_web/` package next to the
+binary, or just use the one-line installer, which does it for you.)
 
 > Avoid `sudo`-installing into `/usr/local/bin`: a root-owned scry then needs `sudo` to update,
 > and (installed mode 711) can even be unreadable by your user. Keep it user-owned.
@@ -112,17 +117,24 @@ scry --check    # pre-flight: are those CLIs installed + logged in?
 ### Updating
 
 ```sh
-scry update     # fetch the latest single-file build and swap it in place
+scry update     # the one command that keeps your whole install current
 ```
 
-`scry update` downloads the newest `scry` from GitHub, verifies it's complete and
-valid (length, entry point, and that it compiles), and **atomically** replaces your
-installed copy — keeping it executable and forcing it world-readable (so an older,
-broken root-owned install self-heals). It won't install a truncated download or an
-older version (pass `--force` to downgrade). For a user-owned install (the default)
-no `sudo` is needed; if scry lives in a system directory it prints the exact elevated
-command. Honors `SCRY_REPO` / `SCRY_REF` (shared with the installer) plus
-`SCRY_UPDATE_URL` — a full single-file URL override for the self-update only.
+**`scry update` is the canonical way to update — you never need to reinstall.** It
+downloads the newest `scry` from GitHub, verifies it's complete and valid (length,
+entry point, and that it compiles), and **atomically** replaces your installed copy —
+keeping it executable and forcing it world-readable (so an older, broken root-owned
+install self-heals). It won't install a truncated download or an older version (pass
+`--force` to downgrade). For a user-owned install (the default) no `sudo` is needed;
+if scry lives in a system directory it prints the exact elevated command.
+
+It then **refreshes the rest of the install in lockstep** (best-effort, from one repo
+tarball): the API-key adapters (`scry-deepseek`, `scry-glm`), the web UI package
+(`scry_web/`), and the `/scry` + `/scry-plan` Claude skills — but only the ones you
+already have, so a pure-CLI install stays lean. Honors `SCRY_REPO` / `SCRY_REF` (shared
+with the installer), `SCRY_UPDATE_URL` (a full single-file URL override for the core
+self-update), and `SCRY_WEB_TARBALL` (the source archive for the rest). A symlinked dev
+checkout is left alone — update it with `git pull`.
 
 `scry init` is optional — `scry` runs with built-in defaults — but it's the fastest way to
 compose a panel from the subscriptions you actually have (Kimi included).
@@ -316,6 +328,57 @@ the round it reached, how many questions you answered, and the original request.
 | `--no-repo` | don't give the panel read-only access to the current directory |
 | `--panel`, `--judge`, `--aggregator`, `--effort`, `--no-web`, `--json`, `--no-save` | as for a normal run |
 
+## Web UI (`scry web`)
+
+A local, single-user web app that puts the full panel — one-shot **scry**, the interactive
+**plan** interview, and web-on **deep research** — behind a sleek browser UI, so you can
+use scry *outside any project directory* (the thing you'd otherwise open gemini/claude/chatgpt
+for). It reuses scry's Python internals **in-process** (no extra `scry` subprocess) and never
+sends your prompts anywhere except the model CLIs scry already drives.
+
+```sh
+scry web                 # → http://127.0.0.1:8765 (opens your browser)
+scry web --port 9000     # pick a port
+scry web --no-open       # don't auto-open a browser
+scry web --host 127.0.0.1   # localhost-only by default (see security note below)
+```
+
+What you get:
+
+- **Sidebar + chat** — a *Scratchpad* for ad-hoc, contextless questions, plus **Workspaces**
+  (managed scry project scaffolds) and any **Project** directory you open. Pick a capability
+  (scry / plan / research) per message; multi-turn context carries between messages.
+- **Interactive plan interview** — the same clarifying-question loop as `/scry-plan`, as cards
+  in the browser. Answer, the panel converges, then it drafts and fuses the Markdown plan.
+- **Full structured results** — the fused answer, an expandable per-model panel, the judge's
+  consensus map, and a cost tally. Plans/reports are written to disk (in place for projects,
+  under `~/.config/scry/runs/` for scratchpad sessions) with copy/download/reveal.
+- **History** — every conversation + run is persisted in SQLite (per-workspace/project; the
+  scratchpad and the locations registry live in `~/.config/scry/web/web.db`). Completed runs
+  are also mirrored to the CLI's `~/.scry` log (`scry last` / `scry log`).
+- **Promote to project** — turn a scratchpad session into a real, **CLI-openable** scry project
+  (new dir + `git init` + `scry.config.json`), carrying its history and artifacts with it.
+
+**Install.** Nothing extra to do — **`scry web` comes with the standard install**. The
+one-line installer vendors the `scry_web/` package next to the binary and installs its
+only third-party deps (FastAPI + uvicorn; the core CLI stays stdlib-only,
+zero-dependency), and `scry update` keeps both current. So after `install.sh` you just
+run `scry web` from anywhere. If you ever need to add the deps by hand (e.g. you set
+`SCRY_NO_WEB=1`):
+
+```sh
+pip install 'scry[web]'          # or, from a clone:  pip install -e '.[web]'
+```
+
+The frontend ships **pre-built and vendored** (`scry_web/static/`) — no Node/npm needed to run.
+To rebuild it after editing, see `scry_web/static/` (plain ES modules, no build step required).
+
+**Security.** The server is single-user, **unauthenticated**, and bound to **localhost** by
+default. A Host/Origin-validation middleware rejects DNS-rebinding / cross-origin requests.
+Credentials are reused from your existing scry config/env — there's no key entry in the UI;
+if no providers are configured the UI directs you to run `scry init` first. Don't bind it to a
+routable interface (`--host 0.0.0.0`) without adding your own auth.
+
 ## Configuration
 
 `scry` runs with built-in defaults. The config is about which subscription CLIs you have and how you
@@ -350,14 +413,16 @@ auto-loaded by name — pass it with `--config ./config.json` to use it directly
   member always overrides the provider default. Each provider can also declare a top-tier **`effort`**
   that all phases inherit (panel, judge, and synthesis) — an explicit `--effort` flag or a
   `phases[stage].effort` override still wins. Pinned defaults: claude `max`, codex `xhigh`, deepseek
-  `max` (sent to the API as `reasoning_effort` + `thinking` by the `scry-deepseek` adapter). agy is
-  already maxed via its model name (`Gemini 3.1 Pro (High)`) and kimi runs thinking-on by default
+  `max`, glm `max` (sent to the API as `reasoning_effort` + `thinking` by the `scry-deepseek` /
+  `scry-glm` adapters). agy is already maxed via its model name (`Gemini 3.1 Pro (High)`) and kimi
+  runs thinking-on by default
   (can't be disabled on K2.7), so neither has an `effort` field. **Note:** per-provider max effort
   raises latency and cost on every call, including judge and synthesis.
 - **`panel`** — `{provider, model, label}` proposers. Repeats are allowed (self-pairing still helps).
-  The built-in default runs all five providers at top tier: claude (`opus`), codex (`gpt-5.5`), agy
-  (`Gemini 3.1 Pro (High)`), deepseek (`deepseek-v4-pro`), and kimi (`K2.7`). Note that deepseek is
-  **knowledge-only** (no web search) — a voice without live grounding. Compose your own panel with
+  The built-in default runs all six providers at top tier: claude (`opus`), codex (`gpt-5.5`), agy
+  (`Gemini 3.1 Pro (High)`), deepseek (`deepseek-v4-pro`), kimi (`K2.7`), and glm (`glm-5.2`). Note
+  that deepseek is **knowledge-only** (no web search) — a voice without live grounding; glm, by
+  contrast, has **built-in web search**. Compose your own panel with
   **`scry init`** or `--panel`.
 - **`judge`**, **`aggregator`** — `{provider, model}` per stage (default `claude:opus`).
 - **`mode`** — the default pipeline for bare `scry`: `research` (deep research, the default), `fusion`
@@ -424,11 +489,12 @@ billing off the subscription). Install it with `curl -LsSf https://code.kimi.com
   excludes `SearchWeb`/`FetchURL`. So **unlike agy, kimi honors `--no-web`** (web off for synthesis, per
   Fusion). The file is written to a temp path per call and removed afterward.
 
-### DeepSeek — the API-key exception
+### The API-key providers: DeepSeek and GLM
 
-scry is built to avoid API keys, but DeepSeek has **no subscription CLI** — only its API. scry ships
-a small stdlib adapter, **`scry-deepseek`**, that calls DeepSeek's OpenAI-compatible API. It is the
-**one provider that needs an API key** and is in the default panel at top tier:
+scry is built to avoid API keys, but two providers — **DeepSeek** and **GLM** (Zhipu/Z.ai) — have
+**no subscription CLI**, only an API. scry ships a small stdlib adapter for each (**`scry-deepseek`**,
+**`scry-glm`**) that calls the provider's OpenAI-compatible API. These are the **two providers that
+need an API key**; both ship in the default panel at top tier. DeepSeek first:
 
 ```sh
 # Recommended: keep the key in scry's config dir (a sibling of config.json) — read
@@ -462,6 +528,25 @@ scry --check --panel "...,deepseek"                  # shows: ✓ deepseek insta
   so long answers are never cut short at the API's 4096-token default. Override with `--max-tokens`.
 - This deliberately **breaks the no-API-key rule** — it bills per token, not against a flat
   subscription.
+
+#### GLM (Zhipu / Z.ai)
+
+GLM is the **second API-key provider**, via the **`scry-glm`** adapter (same shape as `scry-deepseek`).
+Get a key at <https://z.ai/manage-apikey/apikey-list> and set **`GLM_API_KEY`** the same way (recommended:
+`~/.config/scry/.env`; the key-resolution order and the `~/.zshenv` shell-rc caveat are identical to
+DeepSeek above). It ships in the default panel at top tier (`glm-5.2`).
+
+- **Built-in web search (unlike DeepSeek).** GLM has a first-class `web_search` tool, so scry's web-on
+  cap passes `--web` and the adapter injects it for live grounding — and `--no-web` omits it. No external
+  search provider or function-call loop is needed; web search is a **metered add-on per query**.
+- **Endpoint.** Defaults to the international `https://api.z.ai/api/paas/v4`; override with `GLM_BASE_URL`
+  (e.g. the mainland `https://open.bigmodel.cn/api/paas/v4` — a separate account/key). The search backend
+  is `GLM_SEARCH_ENGINE` (default `search_pro_jina`; on the mainland use `search_pro`/`search_std`).
+- **No silent truncation:** requests `glm-5.2`'s documented max output (128K) so long answers aren't cut
+  at the API default (override with `--max-tokens`). Effort `max` → `--reasoning-effort` → top-level
+  `reasoning_effort` + `thinking:{type:enabled}`.
+- The adapter **resolves automatically as a sibling of `scry`** (PATH → next-to-scry → cwd). Like
+  DeepSeek, this **bills per token**, not against a flat subscription.
 
 ## Robustness
 

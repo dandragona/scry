@@ -411,7 +411,7 @@ DEFAULT_CONFIG = {
             "no_web": True,                       # knowledge-only: the raw API has no web search
             "check": {
                 "verifies_auth": False,
-                "note": "the one API-key provider — set DEEPSEEK_API_KEY; knowledge-only (no web)",
+                "note": "an API-key provider — set DEEPSEEK_API_KEY; knowledge-only (no web)",
                 "install": "ships with scry as ./scry-deepseek; export DEEPSEEK_API_KEY",
             },
             "caps": {"effort": ["--reasoning-effort", "{effort}"]},
@@ -461,8 +461,34 @@ DEFAULT_CONFIG = {
             },
             "caps": {},                            # nothing to render into argv
         },
+        # GLM (Zhipu / Z.ai) — the SECOND API-key exception (after deepseek). No
+        # first-party subscription CLI exists; the `scry-glm` sibling adapter calls
+        # Z.ai's OpenAI-compatible chat API and needs GLM_API_KEY. Unlike deepseek,
+        # GLM has a BUILT-IN web_search tool, so it honors web on/off: caps.web_on
+        # passes `--web` (scry-glm injects the tool for live grounding); `--no-web`
+        # omits it. Defaults to glm-5.2 at its 128K max output. Effort 'max' ->
+        # --reasoning-effort -> top-level reasoning_effort + thinking:{type:enabled}.
+        "glm": {
+            "cmd": ["scry-glm"],
+            "model": "glm-5.2",
+            "effort": "max",
+            "model_flag": "--model",
+            "capture": "text",
+            "system_flag": "--system",
+            "prompt": "stdin",
+            "check": {
+                "verifies_auth": False,
+                "note": "API-key provider — set GLM_API_KEY; has built-in web search (--web)",
+                "install": "ships with scry as ./scry-glm; export GLM_API_KEY",
+            },
+            "caps": {
+                "web_on": ["--web"],
+                "web_off": [],
+                "effort": ["--reasoning-effort", "{effort}"],
+            },
+        },
     },
-    # Default panel: all five providers at top tier (models inherited from provider records).
+    # Default panel: all six providers at top tier (models inherited from provider records).
     "panel": [
         {"provider": "claude", "label": "claude-opus"},
         {"provider": "codex",  "label": "codex-gpt"},
@@ -470,6 +496,8 @@ DEFAULT_CONFIG = {
         # deepseek is knowledge-only (no web search) — a voice without live grounding.
         {"provider": "deepseek", "label": "deepseek"},
         {"provider": "kimi",   "label": "kimi"},
+        # glm (Zhipu/Z.ai) — API-key provider WITH built-in web search (honors --no-web).
+        {"provider": "glm",    "label": "glm"},
     ],
     # Judge defaults to the outer (synthesis) model, as in Fusion.
     "judge":      {"provider": "claude"},
@@ -1746,6 +1774,7 @@ INIT_SUGGEST = {
     "agy":       ("Gemini 3.1 Pro (High)", "gemini-pro"),
     "deepseek":  ("deepseek-v4-pro", "deepseek"),
     "kimi":      ("", "kimi"),  # blank: a pinned kimi id may not be in ~/.kimi/config.toml
+    "glm":       ("glm-5.2", "glm"),
 }
 
 
@@ -2179,6 +2208,136 @@ def _ver_tuple(v: str) -> tuple:
     return tuple(int(n) for n in re.findall(r"\d+", v))
 
 
+def _aux_refresh_file(dest: Path, data: bytes) -> bool:
+    """Atomically replace the contents of an EXISTING file `dest` (temp in the same dir
+    + os.replace), PRESERVING its current permissions — we only ever refresh artifacts
+    that are already installed, so we keep whatever mode the installer gave them
+    (executable adapters, plain skill files) rather than imposing our own. Returns True
+    on success; never raises. No-op (False) if `dest` doesn't exist."""
+    if not dest.is_file():
+        return False
+    tmp = None
+    try:
+        mode = os.stat(dest).st_mode          # keep the installed file's permissions
+        fd, tmp = tempfile.mkstemp(dir=str(dest.parent), prefix=".scry-aux-")
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.chmod(tmp, mode)
+        os.replace(tmp, dest)
+        return True
+    except OSError:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass  # temp cleanup is best-effort; the refresh already failed
+        return False
+
+
+def _aux_replace_tree(src: Path, dest: Path) -> bool:
+    """Replace directory `dest` with a fresh copy of `src` (best-effort: copy into a
+    sibling temp dir, drop the old tree, rename into place). Returns True on success."""
+    tmp = dest.parent / (dest.name + ".scry-new")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.copytree(src, tmp)
+        shutil.rmtree(dest, ignore_errors=True)
+        os.replace(tmp, dest)
+        return True
+    except OSError:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return False
+
+
+def _aux_safe_extract(tf, dest: Path) -> None:
+    """Extract a tar into `dest`, skipping any member that would escape it (absolute
+    paths, `..` traversal) or that is a link — we only need the regular files/dirs.
+    Guards the downloaded-tarball extraction against path-traversal entries."""
+    base = dest.resolve()
+    for m in tf.getmembers():
+        if m.issym() or m.islnk():
+            continue
+        target = (base / m.name).resolve()
+        if target != base and base not in target.parents:
+            continue
+        tf.extract(m, str(dest))
+
+
+def _aux_find_root(dest: Path) -> "Path | None":
+    """The repo root inside an extracted archive. A GitHub tarball wraps everything in
+    one `<repo>-<ref>/` dir; a bare tarball (the tests') extracts at the top. Return
+    whichever dir actually holds the scry payload, or None."""
+    def looks_like_root(d: Path) -> bool:
+        return (d / "scry_web").exists() or (d / "scry").is_file()
+    if looks_like_root(dest):
+        return dest
+    try:
+        for child in sorted(dest.iterdir()):
+            if child.is_dir() and looks_like_root(child):
+                return child
+    except OSError:
+        return None
+    return None
+
+
+def _update_aux(install_dir: Path, repo: str, ref: str) -> None:
+    """Best-effort refresh of everything in the install that drifts ALONGSIDE the core
+    `scry` binary — the sibling API-key adapters (scry-deepseek, scry-glm), the web UI
+    package (scry_web/), and the Claude skills — lifted from ONE repo tarball. This is
+    what makes `scry update` keep the WHOLE install current, so reinstalling is never
+    needed. Only refreshes artifacts that ALREADY exist (keeps what you have current;
+    never installs something new). Prints a one-line summary. Never raises — a failed
+    aux refresh leaves the already-updated core binary in place.
+
+    SCRY_WEB_TARBALL overrides the source (a file:// tarball keeps the tests hermetic)."""
+    import io
+    import tarfile
+    adapters = [n for n in ("scry-deepseek", "scry-glm")
+                if (install_dir / n).is_file()]
+    want_web = (install_dir / "scry_web" / "__init__.py").is_file()
+    skills_root = Path(os.environ.get("CLAUDE_CONFIG_DIR")
+                       or (Path.home() / ".claude")) / "skills"
+    skills = [n for n in ("scry", "scry-plan")
+              if (skills_root / n / "SKILL.md").is_file()]
+    if not (adapters or want_web or skills):
+        return
+    tb = os.environ.get("SCRY_WEB_TARBALL",
+                        f"https://github.com/{repo}/archive/{ref}.tar.gz")
+    refreshed = []
+    try:
+        req = urllib.request.Request(tb, headers={"User-Agent": f"scry/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read()
+        with tempfile.TemporaryDirectory(prefix="scry-aux-") as td:
+            tdp = Path(td)
+            with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tf:
+                _aux_safe_extract(tf, tdp)
+            root = _aux_find_root(tdp)
+            if root is None:
+                return
+            for name in adapters:
+                src = root / name
+                if src.is_file() and _aux_refresh_file(
+                        install_dir / name, src.read_bytes()):
+                    refreshed.append(name)
+            if want_web and (root / "scry_web" / "__init__.py").is_file():
+                if _aux_replace_tree(root / "scry_web", install_dir / "scry_web"):
+                    refreshed.append("web UI")
+            got_skills = [n for n in skills
+                          if (root / ".claude" / "skills" / n / "SKILL.md").is_file()
+                          and _aux_refresh_file(
+                              skills_root / n / "SKILL.md",
+                              (root / ".claude" / "skills" / n / "SKILL.md").read_bytes())]
+            if got_skills:
+                refreshed.append("skills")
+    except (urllib.error.URLError, urllib.error.HTTPError, http.client.HTTPException,
+            tarfile.TarError, OSError, ValueError):
+        return  # best-effort: never let an aux refresh fail the core update
+    if refreshed:
+        print("  also refreshed: " + ", ".join(refreshed))
+
+
 def do_update(force: bool = False) -> int:
     """Replace the running scry with the latest single-file build from GitHub.
 
@@ -2260,6 +2419,9 @@ def do_update(force: bool = False) -> int:
 
     if data == target.read_bytes():
         print(c("✓ already up to date", "32") + f"  (scry {VERSION})")
+        # The core binary is current, but the rest of the install (adapters, the
+        # scry_web package, skills) can still have drifted — keep them current too.
+        _update_aux(target.parent, repo, ref)
         return 0
     if _ver_tuple(new_ver) < _ver_tuple(VERSION) and not force:
         print(c(f"note: remote scry {new_ver} is older than installed {VERSION}.", "33"))
@@ -2307,6 +2469,8 @@ def do_update(force: bool = False) -> int:
     else:
         print(c("✓ updated", "32") + f"  scry {VERSION} → {new_ver}")
     print(f"  {target}")
+    # Keep the rest of the install in lockstep with the freshly-swapped binary.
+    _update_aux(target.parent, repo, ref)
     print("\nRun " + c("scry --version", "1") + " to confirm.")
     return 0
 
@@ -3345,15 +3509,14 @@ def _plan_step_finalize(cfg: dict, request: str, transcript: list, settings: dic
                         plan_settings: dict, run_id: str, meters: list, t0: float,
                         repo_cwd: str | None, out: str | None, no_out: bool,
                         no_save: bool, round_no: int,
-                        cli_overrides: dict | None = None) -> int:
-    """Draft the plan from the gathered transcript and print the terminal `done`
-    envelope (or an `error` envelope, exit 1, if every panel draft fails). Writes the
-    plan + diagnostics files unless no_out, and records the finished run to history."""
-    # Headless finalize: stdout is the single JSON envelope, so stream the
-    # panel → judge → synthesis progress to stderr (the /scry-plan skill relays it).
-    def log(msg: str) -> None:
-        print(msg, file=sys.stderr, flush=True)
-
+                        cli_overrides: dict | None = None, log=None) -> dict:
+    """Draft the plan from the gathered transcript and RETURN the terminal `done`
+    envelope dict (or an `error` envelope if every panel draft fails). Writes the
+    plan + diagnostics files unless no_out, and records the finished run to history.
+    The caller (CLI wrapper or web backend) decides how to surface the envelope.
+    `log` streams the panel → judge → synthesis progress (the CLI passes a
+    stderr writer so the /scry-plan skill can relay it); None stays silent."""
+    log = log or (lambda _m: None)
     try:
         result = asyncio.run(scry_run(
             cfg, render_plan_prompt(request, transcript), "fusion",
@@ -3362,11 +3525,9 @@ def _plan_step_finalize(cfg: dict, request: str, transcript: list, settings: dic
             run_overlay=cfg["phases"].get("final"), cli_overrides=cli_overrides,
             panel_system=PLAN_DRAFTER_SYSTEM))
     except AllPanelsFailed as e:
-        print(json.dumps({"status": "error", "error": str(e),
-                          "responses": [{"model": r["label"], "ok": r["ok"],
-                                         "error": r["error"]} for r in e.responses]},
-                         ensure_ascii=False))
-        return 1
+        return {"status": "error", "error": str(e),
+                "responses": [{"model": r["label"], "ok": r["ok"],
+                               "error": r["error"]} for r in e.responses]}
     _plan_result_fields(result, request, transcript, round_no, meters, t0)
     plan_md = result.get("final") or ""
     plan_path = diag_path = None
@@ -3375,46 +3536,44 @@ def _plan_step_finalize(cfg: dict, request: str, transcript: list, settings: dic
             plan_md, result, cfg, settings, plan_settings, run_id, out, None)
     if settings.get("save_history", True) and not no_save:
         save_run(result, run_id)
-    print(json.dumps({"status": "done", "id": run_id, "final": plan_md,
-                      "plan_path": plan_path, "diagnostics_path": diag_path,
-                      "responses": result.get("responses"),
-                      "cost": result.get("cost")}, ensure_ascii=False))
-    return 0
+    return {"status": "done", "id": run_id, "final": plan_md,
+            "plan_path": plan_path, "diagnostics_path": diag_path,
+            "responses": result.get("responses"),
+            "cost": result.get("cost")}
 
 
-def do_plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *,
-                 resume: str | bool = False, no_save: bool = False,
-                 repo_context: bool = True, out: str | None = None,
-                 no_out: bool = False, cli_overrides: dict | None = None) -> int:
-    """One headless, JSON-driven step of the plan interview — the protocol the
-    /scry-plan skill uses to drive full plan mode from inside Claude Code. Never
-    animates or blocks on interactive input. Reads an optional answers payload on
-    stdin (`{"answers":[{"q","a"}],"done":bool}`), advances the interview by one
-    round via the existing resume checkpoints, and prints exactly one JSON envelope:
+def plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *,
+              resume: str | bool = False, no_save: bool = False,
+              repo_cwd: str | None = None, payload: dict | None = None,
+              out: str | None = None, no_out: bool = False,
+              cli_overrides: dict | None = None, log=None) -> dict:
+    """Pure, in-process engine for one headless round of the plan interview — the
+    shared core behind the CLI's `do_plan_step` and the web backend (in-process
+    reuse, no subprocess). Takes the answers payload as a DICT
+    (`{"answers":[{"q","a"}],"done":bool}`) instead of reading stdin, and RETURNS the
+    JSON envelope as a dict instead of printing it. `repo_cwd` is the directory the
+    panel may read (None scrubs to a throwaway temp cwd). `log` receives the
+    panel → judge → synthesis pipeline progress (the CLI passes a stderr writer so
+    the /scry-plan skill can relay it); None (the web backend's default) stays silent.
+    Never animates or blocks on interactive input. The envelope dicts are exactly:
 
       {"status":"questions","id","round","questions":[{q,why,options}]}  answer & repeat
       {"status":"ready","id"}                          send {"done":true} to draft
       {"status":"done","id","final","plan_path","diagnostics_path","responses","cost"}
-      {"status":"error","error"}                       (exit 1)
+      {"status":"error","error"}                       (caller treats as exit 1)
     """
     t0 = time.time()
+    payload = payload if isinstance(payload, dict) else {}
     max_rounds = max(1, int(plan_settings.get("max_rounds", 6) or 6))
-    repo_cwd = os.getcwd() if repo_context else None
     interview_set = _phase_settings(settings, cfg.get("phases", {}), "interview",
                                     None, cli_overrides)
     depth = _depth_guard()
-    # Headless: stdout carries exactly one JSON envelope, so route human-readable
-    # pipeline progress (▸ stage / ✓ model / ✗ model) to stderr instead of dropping
-    # it. The /scry-plan skill relays these so the user can see where the (often
-    # multi-minute) draft is in the panel → judge → synthesis pipeline.
-    def log(msg: str) -> None:
-        print(msg, file=sys.stderr, flush=True)
+    log = log or (lambda _m: None)
 
     try:
         st = _load_plan_session(resume, request)
     except PlanResumeError as e:
-        print(json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False))
-        return 1
+        return {"status": "error", "error": str(e)}
     request = st["request"]
     transcript = st["transcript"]
     asked_keys = st["asked_keys"]
@@ -3423,21 +3582,6 @@ def do_plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *
     run_id = st["run_id"]
     rounds_done = st["start_round"] if resume else 0   # question-rounds emitted so far
 
-    # Optional answers payload on stdin (never block on a tty).
-    raw_in = ""
-    try:
-        if not sys.stdin.isatty():
-            raw_in = sys.stdin.read()
-    except (OSError, ValueError):
-        raw_in = ""
-    try:
-        payload = json.loads(raw_in) if raw_in.strip() else {}
-    except ValueError:
-        print(json.dumps({"status": "error",
-                          "error": "answers payload is not valid JSON"}))
-        return 1
-    if not isinstance(payload, dict):
-        payload = {}
     done = bool(payload.get("done"))
     for qa in (payload.get("answers") or []):
         q = str(qa.get("q", "")).strip()
@@ -3460,7 +3604,7 @@ def do_plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *
     if done or interview_done or rounds_done >= max_rounds:
         return _plan_step_finalize(cfg, request, transcript, settings, plan_settings,
                                    run_id, meters, t0, repo_cwd, out, no_out, no_save,
-                                   rounds_done, cli_overrides=cli_overrides)
+                                   rounds_done, cli_overrides=cli_overrides, log=log)
 
     # Otherwise gather the next round of clarifying questions.
     own_cwd = repo_cwd is None
@@ -3485,13 +3629,48 @@ def do_plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *
     new_qs = [q for q in deduped if _qkey(q) not in asked_keys]
     if all_ready or not new_qs:
         _checkpoint(None, True)          # interview over — ready to draft
-        print(json.dumps({"status": "ready", "id": run_id}, ensure_ascii=False))
-        return 0
+        return {"status": "ready", "id": run_id}
     rounds_done += 1
     _checkpoint(deduped, False)
-    print(json.dumps({"status": "questions", "id": run_id, "round": rounds_done,
-                      "questions": new_qs}, ensure_ascii=False))
-    return 0
+    return {"status": "questions", "id": run_id, "round": rounds_done,
+            "questions": new_qs}
+
+
+def do_plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *,
+                 resume: str | bool = False, no_save: bool = False,
+                 repo_context: bool = True, out: str | None = None,
+                 no_out: bool = False, cli_overrides: dict | None = None) -> int:
+    """The CLI surface for one headless plan-interview step — the protocol the
+    /scry-plan skill uses to drive full plan mode from inside Claude Code. A thin
+    stdin/stdout wrapper over the pure `plan_step` engine: reads the optional answers
+    payload on stdin (never blocking on a tty), calls `plan_step`, and prints exactly
+    one JSON envelope. Exit 1 on an `error` envelope, else 0."""
+    repo_cwd = os.getcwd() if repo_context else None
+    # Headless: stdout carries exactly one JSON envelope, so route human-readable
+    # pipeline progress (▸ stage / ✓ model / ✗ model) to stderr instead of dropping
+    # it. The /scry-plan skill relays these so the user can see where the (often
+    # multi-minute) draft is in the panel → judge → synthesis pipeline.
+    def log(msg: str) -> None:
+        print(msg, file=sys.stderr, flush=True)
+
+    # Optional answers payload on stdin (never block on a tty).
+    raw_in = ""
+    try:
+        if not sys.stdin.isatty():
+            raw_in = sys.stdin.read()
+    except (OSError, ValueError):
+        raw_in = ""
+    try:
+        payload = json.loads(raw_in) if raw_in.strip() else {}
+    except ValueError:
+        print(json.dumps({"status": "error",
+                          "error": "answers payload is not valid JSON"}))
+        return 1
+    env = plan_step(cfg, request, settings, plan_settings, resume=resume,
+                    no_save=no_save, repo_cwd=repo_cwd, payload=payload, out=out,
+                    no_out=no_out, cli_overrides=cli_overrides, log=log)
+    print(json.dumps(env, ensure_ascii=False))
+    return 1 if env.get("status") == "error" else 0
 
 
 # --------------------------------------------------------------------------- #
@@ -3703,7 +3882,8 @@ def main() -> int:
                "`scry log [N]` lists recent runs (stored in ~/.scry).")
     ap.add_argument("prompt", nargs="*",
                     help="the prompt (or pipe it via stdin); pass 'init' to run the "
-                         "setup wizard or 'update' to upgrade scry in place")
+                         "setup wizard, 'update' to upgrade scry in place, or 'web' to "
+                         "launch the local web UI")
     ap.add_argument("--mode", choices=["research", "fusion", "synthesize"], default=None,
                     help="research = iterative deep-research loop (default); "
                          "fusion = single-shot 3-stage panel/judge/synthesis; "
@@ -3774,6 +3954,12 @@ def main() -> int:
     ap.add_argument("--no-repo", action="store_true",
                     help="(plan/research) don't give the panel read-only access to the current "
                          "directory (forces the external-world, scrubbed-cwd default)")
+    ap.add_argument("--host", dest="web_host", default="127.0.0.1", metavar="HOST",
+                    help="(with `web`) interface to bind the local web UI to (default 127.0.0.1, localhost-only)")
+    ap.add_argument("--port", dest="web_port", type=int, default=8765, metavar="PORT",
+                    help="(with `web`) port for the local web UI (default 8765)")
+    ap.add_argument("--no-open", action="store_true",
+                    help="(with `web`) don't auto-open a browser tab when the server starts")
     ap.add_argument("--version", action="version", version=f"scry {VERSION}")
     args = ap.parse_args()
 
@@ -3789,6 +3975,26 @@ def main() -> int:
     # `scry update` — fetch the latest single-file build and swap it in place.
     if args.prompt[:1] == ["update"]:
         return do_update(args.force)
+
+    # `scry web` — launch the local, single-user web UI for the full panel (one-shot
+    # scry, interactive plan, web-on deep research) outside any project directory. The
+    # web stack (FastAPI/uvicorn) is an OPTIONAL dependency, lazy-imported only here so
+    # the core CLI stays stdlib-only and zero-dependency. scry_web lives next to this
+    # file; make it importable even when scry is invoked through a symlink on PATH
+    # (sys.path[0] would otherwise be the symlink's directory, not the repo).
+    if args.prompt[:1] == ["web"]:
+        here = Path(__file__).resolve().parent
+        if str(here) not in sys.path:
+            sys.path.insert(0, str(here))
+        try:
+            from scry_web import serve
+        except ImportError as e:
+            print("scry web needs the optional web dependencies (FastAPI + uvicorn).\n"
+                  "  install:  pip install 'scry[web]'\n"
+                  f"  (import error: {e})", file=sys.stderr)
+            return 1
+        return serve(host=args.web_host, port=args.web_port,
+                     open_browser=not args.no_open, config_path=args.config)
 
     # `scry plan "<request>"` — the interactive, panel-driven planning loop. The
     # request is the remaining positionals; stdin is reserved for the user's answers

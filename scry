@@ -2937,15 +2937,14 @@ def _plan_step_finalize(cfg: dict, request: str, transcript: list, settings: dic
                         plan_settings: dict, run_id: str, meters: list, t0: float,
                         repo_cwd: str | None, out: str | None, no_out: bool,
                         no_save: bool, round_no: int,
-                        cli_overrides: dict | None = None) -> int:
-    """Draft the plan from the gathered transcript and print the terminal `done`
-    envelope (or an `error` envelope, exit 1, if every panel draft fails). Writes the
-    plan + diagnostics files unless no_out, and records the finished run to history."""
-    # Headless finalize: stdout is the single JSON envelope, so stream the
-    # panel → judge → synthesis progress to stderr (the /scry-plan skill relays it).
-    def log(msg: str) -> None:
-        print(msg, file=sys.stderr, flush=True)
-
+                        cli_overrides: dict | None = None, log=None) -> dict:
+    """Draft the plan from the gathered transcript and RETURN the terminal `done`
+    envelope dict (or an `error` envelope if every panel draft fails). Writes the
+    plan + diagnostics files unless no_out, and records the finished run to history.
+    The caller (CLI wrapper or web backend) decides how to surface the envelope.
+    `log` streams the panel → judge → synthesis progress (the CLI passes a
+    stderr writer so the /scry-plan skill can relay it); None stays silent."""
+    log = log or (lambda _m: None)
     try:
         result = asyncio.run(scry_run(
             cfg, render_plan_prompt(request, transcript), "fusion",
@@ -2954,11 +2953,9 @@ def _plan_step_finalize(cfg: dict, request: str, transcript: list, settings: dic
             run_overlay=cfg["phases"].get("final"), cli_overrides=cli_overrides,
             panel_system=PLAN_DRAFTER_SYSTEM))
     except AllPanelsFailed as e:
-        print(json.dumps({"status": "error", "error": str(e),
-                          "responses": [{"model": r["label"], "ok": r["ok"],
-                                         "error": r["error"]} for r in e.responses]},
-                         ensure_ascii=False))
-        return 1
+        return {"status": "error", "error": str(e),
+                "responses": [{"model": r["label"], "ok": r["ok"],
+                               "error": r["error"]} for r in e.responses]}
     _plan_result_fields(result, request, transcript, round_no, meters, t0)
     plan_md = result.get("final") or ""
     plan_path = diag_path = None
@@ -2967,46 +2964,44 @@ def _plan_step_finalize(cfg: dict, request: str, transcript: list, settings: dic
             plan_md, result, cfg, settings, plan_settings, run_id, out, None)
     if settings.get("save_history", True) and not no_save:
         save_run(result, run_id)
-    print(json.dumps({"status": "done", "id": run_id, "final": plan_md,
-                      "plan_path": plan_path, "diagnostics_path": diag_path,
-                      "responses": result.get("responses"),
-                      "cost": result.get("cost")}, ensure_ascii=False))
-    return 0
+    return {"status": "done", "id": run_id, "final": plan_md,
+            "plan_path": plan_path, "diagnostics_path": diag_path,
+            "responses": result.get("responses"),
+            "cost": result.get("cost")}
 
 
-def do_plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *,
-                 resume: str | bool = False, no_save: bool = False,
-                 repo_context: bool = True, out: str | None = None,
-                 no_out: bool = False, cli_overrides: dict | None = None) -> int:
-    """One headless, JSON-driven step of the plan interview — the protocol the
-    /scry-plan skill uses to drive full plan mode from inside Claude Code. Never
-    animates or blocks on interactive input. Reads an optional answers payload on
-    stdin (`{"answers":[{"q","a"}],"done":bool}`), advances the interview by one
-    round via the existing resume checkpoints, and prints exactly one JSON envelope:
+def plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *,
+              resume: str | bool = False, no_save: bool = False,
+              repo_cwd: str | None = None, payload: dict | None = None,
+              out: str | None = None, no_out: bool = False,
+              cli_overrides: dict | None = None, log=None) -> dict:
+    """Pure, in-process engine for one headless round of the plan interview — the
+    shared core behind the CLI's `do_plan_step` and the web backend (in-process
+    reuse, no subprocess). Takes the answers payload as a DICT
+    (`{"answers":[{"q","a"}],"done":bool}`) instead of reading stdin, and RETURNS the
+    JSON envelope as a dict instead of printing it. `repo_cwd` is the directory the
+    panel may read (None scrubs to a throwaway temp cwd). `log` receives the
+    panel → judge → synthesis pipeline progress (the CLI passes a stderr writer so
+    the /scry-plan skill can relay it); None (the web backend's default) stays silent.
+    Never animates or blocks on interactive input. The envelope dicts are exactly:
 
       {"status":"questions","id","round","questions":[{q,why,options}]}  answer & repeat
       {"status":"ready","id"}                          send {"done":true} to draft
       {"status":"done","id","final","plan_path","diagnostics_path","responses","cost"}
-      {"status":"error","error"}                       (exit 1)
+      {"status":"error","error"}                       (caller treats as exit 1)
     """
     t0 = time.time()
+    payload = payload if isinstance(payload, dict) else {}
     max_rounds = max(1, int(plan_settings.get("max_rounds", 6) or 6))
-    repo_cwd = os.getcwd() if repo_context else None
     interview_set = _phase_settings(settings, cfg.get("phases", {}), "interview",
                                     None, cli_overrides)
     depth = _depth_guard()
-    # Headless: stdout carries exactly one JSON envelope, so route human-readable
-    # pipeline progress (▸ stage / ✓ model / ✗ model) to stderr instead of dropping
-    # it. The /scry-plan skill relays these so the user can see where the (often
-    # multi-minute) draft is in the panel → judge → synthesis pipeline.
-    def log(msg: str) -> None:
-        print(msg, file=sys.stderr, flush=True)
+    log = log or (lambda _m: None)
 
     try:
         st = _load_plan_session(resume, request)
     except PlanResumeError as e:
-        print(json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False))
-        return 1
+        return {"status": "error", "error": str(e)}
     request = st["request"]
     transcript = st["transcript"]
     asked_keys = st["asked_keys"]
@@ -3015,21 +3010,6 @@ def do_plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *
     run_id = st["run_id"]
     rounds_done = st["start_round"] if resume else 0   # question-rounds emitted so far
 
-    # Optional answers payload on stdin (never block on a tty).
-    raw_in = ""
-    try:
-        if not sys.stdin.isatty():
-            raw_in = sys.stdin.read()
-    except (OSError, ValueError):
-        raw_in = ""
-    try:
-        payload = json.loads(raw_in) if raw_in.strip() else {}
-    except ValueError:
-        print(json.dumps({"status": "error",
-                          "error": "answers payload is not valid JSON"}))
-        return 1
-    if not isinstance(payload, dict):
-        payload = {}
     done = bool(payload.get("done"))
     for qa in (payload.get("answers") or []):
         q = str(qa.get("q", "")).strip()
@@ -3052,7 +3032,7 @@ def do_plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *
     if done or interview_done or rounds_done >= max_rounds:
         return _plan_step_finalize(cfg, request, transcript, settings, plan_settings,
                                    run_id, meters, t0, repo_cwd, out, no_out, no_save,
-                                   rounds_done, cli_overrides=cli_overrides)
+                                   rounds_done, cli_overrides=cli_overrides, log=log)
 
     # Otherwise gather the next round of clarifying questions.
     own_cwd = repo_cwd is None
@@ -3077,13 +3057,48 @@ def do_plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *
     new_qs = [q for q in deduped if _qkey(q) not in asked_keys]
     if all_ready or not new_qs:
         _checkpoint(None, True)          # interview over — ready to draft
-        print(json.dumps({"status": "ready", "id": run_id}, ensure_ascii=False))
-        return 0
+        return {"status": "ready", "id": run_id}
     rounds_done += 1
     _checkpoint(deduped, False)
-    print(json.dumps({"status": "questions", "id": run_id, "round": rounds_done,
-                      "questions": new_qs}, ensure_ascii=False))
-    return 0
+    return {"status": "questions", "id": run_id, "round": rounds_done,
+            "questions": new_qs}
+
+
+def do_plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *,
+                 resume: str | bool = False, no_save: bool = False,
+                 repo_context: bool = True, out: str | None = None,
+                 no_out: bool = False, cli_overrides: dict | None = None) -> int:
+    """The CLI surface for one headless plan-interview step — the protocol the
+    /scry-plan skill uses to drive full plan mode from inside Claude Code. A thin
+    stdin/stdout wrapper over the pure `plan_step` engine: reads the optional answers
+    payload on stdin (never blocking on a tty), calls `plan_step`, and prints exactly
+    one JSON envelope. Exit 1 on an `error` envelope, else 0."""
+    repo_cwd = os.getcwd() if repo_context else None
+    # Headless: stdout carries exactly one JSON envelope, so route human-readable
+    # pipeline progress (▸ stage / ✓ model / ✗ model) to stderr instead of dropping
+    # it. The /scry-plan skill relays these so the user can see where the (often
+    # multi-minute) draft is in the panel → judge → synthesis pipeline.
+    def log(msg: str) -> None:
+        print(msg, file=sys.stderr, flush=True)
+
+    # Optional answers payload on stdin (never block on a tty).
+    raw_in = ""
+    try:
+        if not sys.stdin.isatty():
+            raw_in = sys.stdin.read()
+    except (OSError, ValueError):
+        raw_in = ""
+    try:
+        payload = json.loads(raw_in) if raw_in.strip() else {}
+    except ValueError:
+        print(json.dumps({"status": "error",
+                          "error": "answers payload is not valid JSON"}))
+        return 1
+    env = plan_step(cfg, request, settings, plan_settings, resume=resume,
+                    no_save=no_save, repo_cwd=repo_cwd, payload=payload, out=out,
+                    no_out=no_out, cli_overrides=cli_overrides, log=log)
+    print(json.dumps(env, ensure_ascii=False))
+    return 1 if env.get("status") == "error" else 0
 
 
 def main() -> int:
@@ -3105,7 +3120,8 @@ def main() -> int:
                "`scry log [N]` lists recent runs (stored in ~/.scry).")
     ap.add_argument("prompt", nargs="*",
                     help="the prompt (or pipe it via stdin); pass 'init' to run the "
-                         "setup wizard or 'update' to upgrade scry in place")
+                         "setup wizard, 'update' to upgrade scry in place, or 'web' to "
+                         "launch the local web UI")
     ap.add_argument("--mode", choices=["fusion", "synthesize"], default=None,
                     help="fusion = 3-stage panel/judge/synthesis (default); "
                          "synthesize = 2-stage panel/synthesis")
@@ -3165,6 +3181,12 @@ def main() -> int:
                     help="(with `plan`) list unfinished, resumable plan sessions")
     ap.add_argument("--no-repo", action="store_true",
                     help="(with `plan`) don't give the panel read-only access to the current directory")
+    ap.add_argument("--host", dest="web_host", default="127.0.0.1", metavar="HOST",
+                    help="(with `web`) interface to bind the local web UI to (default 127.0.0.1, localhost-only)")
+    ap.add_argument("--port", dest="web_port", type=int, default=8765, metavar="PORT",
+                    help="(with `web`) port for the local web UI (default 8765)")
+    ap.add_argument("--no-open", action="store_true",
+                    help="(with `web`) don't auto-open a browser tab when the server starts")
     ap.add_argument("--version", action="version", version=f"scry {VERSION}")
     args = ap.parse_args()
 
@@ -3180,6 +3202,26 @@ def main() -> int:
     # `scry update` — fetch the latest single-file build and swap it in place.
     if args.prompt[:1] == ["update"]:
         return do_update(args.force)
+
+    # `scry web` — launch the local, single-user web UI for the full panel (one-shot
+    # scry, interactive plan, web-on deep research) outside any project directory. The
+    # web stack (FastAPI/uvicorn) is an OPTIONAL dependency, lazy-imported only here so
+    # the core CLI stays stdlib-only and zero-dependency. scry_web lives next to this
+    # file; make it importable even when scry is invoked through a symlink on PATH
+    # (sys.path[0] would otherwise be the symlink's directory, not the repo).
+    if args.prompt[:1] == ["web"]:
+        here = Path(__file__).resolve().parent
+        if str(here) not in sys.path:
+            sys.path.insert(0, str(here))
+        try:
+            from scry_web import serve
+        except ImportError as e:
+            print("scry web needs the optional web dependencies (FastAPI + uvicorn).\n"
+                  "  install:  pip install 'scry[web]'\n"
+                  f"  (import error: {e})", file=sys.stderr)
+            return 1
+        return serve(host=args.web_host, port=args.web_port,
+                     open_browser=not args.no_open, config_path=args.config)
 
     # `scry plan "<request>"` — the interactive, panel-driven planning loop. The
     # request is the remaining positionals; stdin is reserved for the user's answers

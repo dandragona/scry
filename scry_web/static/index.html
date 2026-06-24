@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>scry · web</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='12' fill='none' stroke='%237c6cff' stroke-width='3'/><circle cx='16' cy='16' r='4' fill='%237c6cff'/></svg>"
+    />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar"></aside>
+      <main id="main">
+        <div id="banner" class="banner"></div>
+        <section id="thread" class="thread"></section>
+        <footer id="composer" class="composer">
+          <div id="pending-atts" class="pending-atts"></div>
+          <div class="composer-row">
+            <div id="cap-picker" class="cap-picker"></div>
+            <div class="composer-spacer"></div>
+            <button id="adv-toggle" class="btn ghost small" title="Advanced options">⚙ Options</button>
+          </div>
+          <div id="adv-panel" class="adv-panel">
+            <label>Mode
+              <select id="opt-mode">
+                <option value="fusion">fusion (panel · judge · synthesis)</option>
+                <option value="synthesize">synthesize (panel · synthesis)</option>
+              </select>
+            </label>
+            <label>Web tools
+              <select id="opt-web">
+                <option value="">default</option>
+                <option value="on">on</option>
+                <option value="off">off</option>
+              </select>
+            </label>
+            <label>Effort
+              <select id="opt-effort">
+                <option value="">default</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+                <option value="xhigh">xhigh</option>
+                <option value="max">max</option>
+              </select>
+            </label>
+            <label>Max tool calls
+              <input id="opt-tool-calls" type="number" min="0" placeholder="auto" />
+            </label>
+            <label>Max output tokens
+              <input id="opt-out-tokens" type="number" min="0" placeholder="auto" />
+            </label>
+            <label>Timeout (s)
+              <input id="opt-timeout" type="number" min="0" placeholder="default" />
+            </label>
+          </div>
+          <div class="composer-input-row">
+            <button id="attach-btn" class="icon-btn" title="Attach a file">📎</button>
+            <input id="file-input" type="file" hidden />
+            <textarea
+              id="composer-input"
+              rows="1"
+              placeholder="Ask the panel…  (⌘/Ctrl + Enter to send)"
+            ></textarea>
+            <button id="send-btn" class="btn primary send">Send</button>
+          </div>
+        </footer>
+      </main>
+    </div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

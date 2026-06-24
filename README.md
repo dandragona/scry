@@ -256,6 +256,53 @@ the round it reached, how many questions you answered, and the original request.
 | `--no-repo` | don't give the panel read-only access to the current directory |
 | `--panel`, `--judge`, `--aggregator`, `--effort`, `--no-web`, `--json`, `--no-save` | as for a normal run |
 
+## Web UI (`scry web`)
+
+A local, single-user web app that puts the full panel — one-shot **scry**, the interactive
+**plan** interview, and web-on **deep research** — behind a sleek browser UI, so you can
+use scry *outside any project directory* (the thing you'd otherwise open gemini/claude/chatgpt
+for). It reuses scry's Python internals **in-process** (no extra `scry` subprocess) and never
+sends your prompts anywhere except the model CLIs scry already drives.
+
+```sh
+scry web                 # → http://127.0.0.1:8765 (opens your browser)
+scry web --port 9000     # pick a port
+scry web --no-open       # don't auto-open a browser
+scry web --host 127.0.0.1   # localhost-only by default (see security note below)
+```
+
+What you get:
+
+- **Sidebar + chat** — a *Scratchpad* for ad-hoc, contextless questions, plus **Workspaces**
+  (managed scry project scaffolds) and any **Project** directory you open. Pick a capability
+  (scry / plan / research) per message; multi-turn context carries between messages.
+- **Interactive plan interview** — the same clarifying-question loop as `/scry-plan`, as cards
+  in the browser. Answer, the panel converges, then it drafts and fuses the Markdown plan.
+- **Full structured results** — the fused answer, an expandable per-model panel, the judge's
+  consensus map, and a cost tally. Plans/reports are written to disk (in place for projects,
+  under `~/.config/scry/runs/` for scratchpad sessions) with copy/download/reveal.
+- **History** — every conversation + run is persisted in SQLite (per-workspace/project; the
+  scratchpad and the locations registry live in `~/.config/scry/web/web.db`). Completed runs
+  are also mirrored to the CLI's `~/.scry` log (`scry last` / `scry log`).
+- **Promote to project** — turn a scratchpad session into a real, **CLI-openable** scry project
+  (new dir + `git init` + `scry.config.json`), carrying its history and artifacts with it.
+
+**Install.** The UI's only third-party deps are FastAPI + uvicorn (the core CLI stays
+stdlib-only, zero-dependency). `install.sh` installs them by default; otherwise:
+
+```sh
+pip install 'scry[web]'          # or, from a clone:  pip install -e '.[web]'
+```
+
+The frontend ships **pre-built and vendored** (`scry_web/static/`) — no Node/npm needed to run.
+To rebuild it after editing, see `scry_web/static/` (plain ES modules, no build step required).
+
+**Security.** The server is single-user, **unauthenticated**, and bound to **localhost** by
+default. A Host/Origin-validation middleware rejects DNS-rebinding / cross-origin requests.
+Credentials are reused from your existing scry config/env — there's no key entry in the UI;
+if no providers are configured the UI directs you to run `scry init` first. Don't bind it to a
+routable interface (`--host 0.0.0.0`) without adding your own auth.
+
 ## Configuration
 
 `scry` runs with built-in defaults. The config is about which subscription CLIs you have and how you

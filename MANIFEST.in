@@ -1,0 +1,11 @@
+# The core single-file CLIs (extension-less; shipped alongside the package).
+include scry
+include scry-eval
+include scry-deepseek
+include config.json
+include install.sh
+include README.md
+include LICENSE
+
+# The vendored, pre-built web SPA (no Node toolchain needed at install/run time).
+recursive-include scry_web/static *

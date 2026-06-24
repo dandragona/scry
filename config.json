@@ -1,10 +1,10 @@
 {
   "_note": "Optional. scry works with zero config (built-in defaults). The canonical config lives once per computer at ~/.config/scry/config.json (run `scry init` to generate it); a project that needs a different panel can drop a ./scry.config.json beside its code (run `scry init --local`), which overrides the global config when scry runs from that directory. This repo's config.json is a reference/example — it is NOT auto-loaded by name; pass it with `--config ./config.json` to use it. CLI flags (--mode/--panel/--judge/--aggregator/--no-web/--effort/--max-tool-calls) override the config.",
 
-  "mode": "fusion",
+  "mode": "research",
 
   "settings": {
-    "_note": "Global default Fusion knobs; each pipeline phase can override them in the `phases` block below. web_tools enables web_search+web_fetch (the panel/judge default; synthesis is web-off via phases, mirroring OpenRouter Fusion). timeout is the per-call timeout in seconds (the default for every phase; `scry plan`'s final draft raises it via phases.final). effort/max_output_tokens/max_tool_calls applied only where a CLI supports them (max_tool_calls null = uncapped by default; set N to cap claude's --max-turns). save_history writes each run to ~/.scry for `scry last`/`scry log` (override per-run with --no-save); it is global, not per-phase. temperature has no CLI equivalent and is intentionally absent. Each provider may also declare its own top-tier `effort` default (claude: max, codex: xhigh, deepseek: max, glm: max) — all phases inherit it; an explicit --effort flag or phases[stage].effort override still wins.",
+    "_note": "Global default Fusion knobs; each pipeline phase can override them in the `phases` block below. web_tools enables web_search+web_fetch (the panel/judge default; synthesis is web-off via phases, mirroring OpenRouter Fusion). timeout is the per-call timeout in seconds (the default for every phase; `scry plan`'s final draft and research rounds raise it via phases.final/phases.research). effort/max_output_tokens/max_tool_calls applied only where a CLI supports them (max_tool_calls null = uncapped by default; set N to cap claude's --max-turns). save_history writes each run to ~/.scry for `scry last`/`scry log` (override per-run with --no-save); it is global, not per-phase. temperature has no CLI equivalent and is intentionally absent. Each provider may also declare its own top-tier `effort` default (claude: max, codex: xhigh, deepseek: max, glm: max) — all phases inherit it; an explicit --effort flag or phases[stage].effort override still wins.",
     "web_tools": true,
     "max_tool_calls": null,
     "effort": null,
@@ -14,12 +14,15 @@
   },
 
   "phases": {
-    "_note": "Per-phase overrides of the settings above. Each stage inherits every global setting and overrides only what it lists. Resolution per call (later wins): settings -> phases[phase] -> the `final` overlay (plan draft only) -> CLI flags. Stages: panel/judge/synthesis (a normal run), interview (plan clarifying rounds), final (the plan's deep draft, applied across its panel/judge/synthesis). Overridable: web_tools, max_tool_calls, timeout, effort, max_output_tokens. e.g. to run the judge web-off with fewer turns: \"judge\": {\"web_tools\": false, \"max_tool_calls\": 4}.",
+    "_note": "Per-phase overrides of the settings above. Each stage inherits every global setting and overrides only what it lists. Resolution per call (later wins): settings -> phases[phase] -> the `final` overlay (plan draft only) -> CLI flags. Stages: panel/judge/synthesis (a fusion run), interview (plan/research clarifying rounds), final (the plan's deep draft), and the Deep Research stages brief/research/reflect (the default `scry`). Overridable: web_tools, max_tool_calls, timeout, effort, max_output_tokens. e.g. to run the judge web-off with fewer turns: \"judge\": {\"web_tools\": false, \"max_tool_calls\": 4}.",
     "panel": {},
     "judge": {},
     "synthesis": {"web_tools": false},
     "interview": {"web_tools": false},
-    "final": {"timeout": 2100}
+    "final": {"timeout": 2100},
+    "brief": {"web_tools": false},
+    "research": {"web_tools": true, "timeout": 2100},
+    "reflect": {"web_tools": false}
   },
 
   "providers": {
@@ -115,6 +118,7 @@
       "capture": "text",
       "system_flag": "--system",
       "prompt": "stdin",
+      "no_web": true,
       "check": {
         "verifies_auth": false,
         "note": "the one API-key provider — set DEEPSEEK_API_KEY; knowledge-only (no web)",
@@ -187,5 +191,15 @@
   ],
 
   "judge":      {"provider": "claude"},
-  "aggregator": {"provider": "claude"}
+  "aggregator": {"provider": "claude"},
+
+  "research": {
+    "_note": "Deep Research mode — the default bare `scry`. An iterative, gap-driven loop over the whole panel: clarify (interactive only) -> brief -> round-1 diversity fusion -> reflect (the judge names the gaps) -> gap-targeted, capability-routed rounds -> one fused prose answer. clarify runs the clarifying-question interview before research (interactive runs only; auto-skipped under --json/non-tty/--no-clarify). max_rounds is the target depth and hard_cap the absolute ceiling; with early_exit the loop stops once the judge finds no significant new gaps. sub_questions is the brief's decomposition target. repo_context \"auto\" grounds the search-capable panel in a surrounding git repo (read-only) when one is detected, \"off\" forces the external world; --repo/--no-repo and --depth/--max-rounds/--no-clarify override. `--mode fusion` keeps the single-shot pipeline.",
+    "clarify": true,
+    "max_rounds": 3,
+    "hard_cap": 5,
+    "early_exit": true,
+    "sub_questions": 6,
+    "repo_context": "auto"
+  }
 }

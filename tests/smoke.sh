@@ -243,8 +243,9 @@ print(json.dumps({"type": "result", "is_error": False, "result": "Fused.",
 EOF
 chmod +x "$CLI2/claude"
 
-# panel=claude only -> 3 claude calls (panel+judge+synth), all metered.
-COST_JSON="$(PATH="$CLI2:$PATH" SCRY_HOME="$HOME2" "$SCRY" --panel claude:opus --json "q1" 2>/dev/null)"
+# --mode fusion, panel=claude only -> 3 claude calls (panel+judge+synth), all metered.
+# (bare `scry` now defaults to research; this smoke asserts the single-shot fusion cost.)
+COST_JSON="$(PATH="$CLI2:$PATH" SCRY_HOME="$HOME2" "$SCRY" --mode fusion --panel claude:opus --json "q1" 2>/dev/null)"
 echo "$COST_JSON" | python3 -c '
 import json, sys
 c = json.load(sys.stdin)["cost"]
@@ -260,7 +261,7 @@ PATH="$CLI2:$PATH" SCRY_HOME="$HOME2" "$SCRY" log | grep -q "q1" \
 PATH="$CLI2:$PATH" SCRY_HOME="$HOME2" "$SCRY" last 2>/dev/null | grep -q "Fused." \
   || fail "scry last didn't reprint the saved answer"
 ROWS_BEFORE="$(wc -l < "$HOME2/history.jsonl")"
-PATH="$CLI2:$PATH" SCRY_HOME="$HOME2" "$SCRY" --panel claude:opus --no-save "q2" >/dev/null 2>&1
+PATH="$CLI2:$PATH" SCRY_HOME="$HOME2" "$SCRY" --mode fusion --panel claude:opus --no-save "q2" >/dev/null 2>&1
 [ "$ROWS_BEFORE" = "$(wc -l < "$HOME2/history.jsonl")" ] || fail "--no-save still wrote a history row"
 pass "run history: scry log / scry last / --no-save"
 

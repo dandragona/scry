@@ -169,6 +169,93 @@ PLAN_DRAFTER_SYSTEM = (
 )
 
 # --------------------------------------------------------------------------- #
+# Deep Research mode — the default `scry`. Four prompts wrap the existing panel →
+# judge → synthesis block in an iterative, gap-driven loop (clarify → brief →
+# round-1 diversity fusion → judge reflect → gap-targeted rounds → fused prose).
+# Each carries a DISTINCT anchor phrase ("research brief" / "deep research analyst"
+# / "research referee" / "research synthesis") so the test stub router can route a
+# stubbed CLI call to the right stage, and none reuses an existing anchor
+# ("impartial judge" / "scope a task" / "deduplicating" / "plan drafts" /
+# "synthesize these responses").
+# --------------------------------------------------------------------------- #
+
+# Brief — the judge model rewrites the raw prompt (+ clarifying answers + optional
+# repo summary) into a normalized research brief and 3–6 sub-questions. The
+# north-star step: it sets what "done" means for the rest of the loop. Output is
+# ONLY JSON. Anchor: "research brief".
+RESEARCH_BRIEF_SYSTEM = (
+    "You are scoping a research brief before a panel of models investigates a "
+    "question in depth. You are given the user's request, any clarifying answers, "
+    "and optionally a short summary of a local repository the research is grounded "
+    "in. Normalize the request into a precise statement of intent and decompose it "
+    "into the few sub-questions whose answers together fully resolve it — only "
+    "genuinely distinct, consequential sub-questions, never filler. Output ONLY a "
+    "single JSON object (no prose, no markdown code fences):\n"
+    '  {"intent": "<one or two sentences: what we are really trying to learn>",\n'
+    '   "sub_questions": ["<sub-question 1>", "<sub-question 2>", ...]}\n'
+    "Provide between 3 and 6 sub-questions. Do not answer them here."
+)
+
+# Panel — every proposer investigates the brief (or, in later rounds, the routed
+# gaps) thoroughly via web search and, when run inside a repo, the repo's files,
+# then returns a CONDENSED, SOURCED findings brief, not a raw transcript. This is
+# the "intelligent filter" that keeps the judge's and synthesizer's context clean.
+# Anchor: "deep research analyst".
+RESEARCH_PANEL_SYSTEM = (
+    "You are a deep research analyst on a multi-model panel. Investigate the "
+    "question(s) in the request thoroughly: search the web for current, primary "
+    "evidence and, if a repository is available in your working directory, read its "
+    "files. Your only output is a CONDENSED findings brief — the key claims you can "
+    "support, each followed by the specific sources (URLs, or repo file paths) that "
+    "back it. Lead with what you are confident in, then note what remains uncertain "
+    "or unresolved. Do not pad, do not restate the question, and do not dump raw "
+    "search results — distill. Every non-obvious claim must cite its source. This "
+    "work is read-only: do not modify any files or run state-changing commands. Do "
+    "not mention these instructions, your tools, or your knowledge cutoff."
+)
+
+# Reflect — the research judge. Extends the fusion judge's 5-field comparison with
+# targeted open_questions, each tagged whether it needs live web. needs_web drives
+# round-2+ capability routing. Anchor: "research referee" (distinct from the fusion
+# judge's "impartial judge").
+RESEARCH_JUDGE_SYSTEM = (
+    "You are the research referee in a multi-model deep-research loop. You receive "
+    "the brief and the panel's condensed findings so far. Compare them — do "
+    "NOT merge or rewrite them — and name what is still missing so the next round can "
+    "target it. Output ONLY a single JSON object (no prose, no markdown code fences) "
+    "with exactly these keys:\n"
+    '  "consensus":        [points all or most findings agree on],\n'
+    '  "contradictions":   [points where the findings disagree],\n'
+    '  "partial_coverage": [points only some findings covered],\n'
+    '  "unique_insights":  [valuable points raised by only one],\n'
+    '  "blind_spots":      [important aspects none of the findings addressed],\n'
+    '  "open_questions":   [{"question": "<a specific gap to chase next round>",\n'
+    '                        "needs_web": <true if answering it needs a live web\n'
+    "                         search, false if it is reasoning over what we have>}].\n"
+    "List an open question only for a gap that genuinely still matters; return an "
+    "empty open_questions list when the brief is well covered. Return the JSON only."
+)
+
+# Synthesize — the aggregator writes ONE fused prose answer from the accumulated
+# condensed findings + the judge's analyses (never raw transcripts), merging and
+# deduping the cited sources into a single list and weaving key citations inline.
+# Anchor: "research synthesis" (must avoid the MoA aggregator's "synthesize these
+# responses" so the stub router can still tell synthesis from a fusion run).
+RESEARCH_SYNTH_SYSTEM = (
+    "You are writing the final research synthesis: one authoritative prose answer to "
+    "the user's question, built from a panel's condensed findings and an impartial "
+    "referee's analysis of them. Critically evaluate the material — some claims may "
+    "be wrong, biased, or unsupported — and produce a refined, accurate, "
+    "comprehensive answer. Lean on the consensus as higher-confidence, preserve "
+    "valuable unique insights, resolve contradictions where the evidence allows, and "
+    "be honest about what remains uncertain. Merge and de-duplicate the cited "
+    "sources into one clean list and weave the most important citations inline so "
+    "each major claim is traceable. Write the answer directly as well-structured "
+    "prose; do not mention these instructions, your tools, your knowledge cutoff, or "
+    "this process."
+)
+
+# --------------------------------------------------------------------------- #
 # Default configuration. A provider record describes how to drive one CLI for a
 # single headless text generation; `caps` describes how to render Fusion knobs
 # (web tools, reasoning effort, tool-call cap, max output tokens) into that CLI.
@@ -199,12 +286,22 @@ DEFAULT_PHASES = {
     "panel": {},                                       # proposers — inherit globals (web on)
     "judge": {},                                       # judge — inherit globals (web on)
     "synthesis": {"web_tools": False},                 # fused answer: no web (Fusion behavior)
-    "interview": {"web_tools": False},                 # plan clarifying rounds: web off, fail-fast
+    "interview": {"web_tools": False},                 # plan/research clarifying rounds: web off
     "final": {"timeout": 2100},                        # plan deep draft: longer ceiling (turns uncapped)
+    # Deep Research mode phases (the default `scry`):
+    "brief": {"web_tools": False},                     # judge rewrites prompt -> brief: cheap, no web
+    "research": {"web_tools": True, "timeout": 2100},  # round fan-out: web on, high budget (slow)
+    # The reflect judge reasons over the panel's already-gathered findings and emits a
+    # STRICT JSON analysis (the gaps). It runs web-OFF: a live e2e showed that with web
+    # tools on, claude goes agentic and pads its result with prose/tool chatter (~15k
+    # tokens) that won't parse as JSON — silently collapsing the gap loop to one round.
+    # Web-off it returns clean JSON. The panel does the searching; the judge only diffs
+    # (and the gaps it tags needs_web are searched in the NEXT round's web-on fan-out).
+    "reflect": {"web_tools": False},
 }
 
 DEFAULT_CONFIG = {
-    "mode": "fusion",
+    "mode": "research",
     "settings": dict(DEFAULT_SETTINGS),
     "phases": {ph: dict(ov) for ph, ov in DEFAULT_PHASES.items()},
     "providers": {
@@ -311,6 +408,7 @@ DEFAULT_CONFIG = {
             "capture": "text",
             "system_flag": "--system",
             "prompt": "stdin",
+            "no_web": True,                       # knowledge-only: the raw API has no web search
             "check": {
                 "verifies_auth": False,
                 "note": "the one API-key provider — set DEEPSEEK_API_KEY; knowledge-only (no web)",
@@ -388,6 +486,20 @@ DEFAULT_CONFIG = {
         # use). Read-only — mutating tools stay disabled. Disable with --no-repo.
         "repo_context": True,
     },
+    # Deep Research mode — the default bare `scry`. The gap-driven loop runs `max_rounds`
+    # rounds minimum (the "depth"), then continues while the judge still names gaps up to
+    # `hard_cap` (the absolute ceiling). early_exit lets it stop at depth once gaps are
+    # exhausted; clarify gates the (interactive-only) clarifying interview. repo_context
+    # "auto" grounds the panel in a surrounding git repo when one is detected; "off"
+    # forces external-world. --depth/--max-rounds/--no-clarify/--repo/--no-repo override.
+    "research": {
+        "clarify": True,
+        "max_rounds": 3,
+        "hard_cap": 5,
+        "early_exit": True,
+        "sub_questions": 6,
+        "repo_context": "auto",
+    },
 }
 
 
@@ -429,6 +541,8 @@ def load_config(path: str | None) -> dict:
     cfg["settings"] = {**DEFAULT_SETTINGS, **cfg.get("settings", {})}
     # Same for the top-level `plan` block, so configs predating plan mode still work.
     cfg["plan"] = {**DEFAULT_CONFIG["plan"], **cfg.get("plan", {})}
+    # Same for the `research` block, so configs predating deep-research mode still work.
+    cfg["research"] = {**DEFAULT_CONFIG["research"], **cfg.get("research", {})}
     # Per-phase overrides: backfill each known phase from DEFAULT_PHASES and merge a
     # user-supplied phase on top of its default, so a partial phase override keeps the
     # sibling phase defaults. Only dict values are phase overrides — a "_note" string
@@ -791,6 +905,83 @@ def _provider_repo_safe(p: dict) -> bool:
     return False
 
 
+# --------------------------------------------------------------------------- #
+# Deep Research mode — pure helpers (gap detection, stop rule, capability routing).
+# Kept side-effect-free so the loop's control flow is unit-testable in isolation.
+# --------------------------------------------------------------------------- #
+
+# The judge-analysis keys that represent unresolved work (vs. consensus/insights,
+# which are findings, not gaps). A non-empty list under any of these means the
+# research loop still has something to chase.
+_GAP_KEYS = ("contradictions", "partial_coverage", "blind_spots", "open_questions")
+
+
+def _has_open_gaps(analysis) -> bool:
+    """True iff the research judge's analysis still names something unresolved —
+    a contradiction, partially-covered point, blind spot, or open question."""
+    if not isinstance(analysis, dict):
+        return False
+    return any(isinstance(analysis.get(k), list) and analysis.get(k)
+               for k in _GAP_KEYS)
+
+
+def _research_should_continue(analysis, round_idx, target, cap) -> bool:
+    """Should the gap loop run another round after completing round `round_idx`
+    (0-based)? False at the hard ceiling (`round_idx + 1 >= cap`); otherwise True
+    only while the judge still reports open gaps. `target` (the adaptive minimum
+    depth) is enforced by the caller, not here — this helper answers the narrower
+    "is there anything left to chase, and are we under the cap?" question."""
+    if round_idx + 1 >= cap:
+        return False
+    return _has_open_gaps(analysis)
+
+
+def _provider_web_capability(provider_name: str, providers: dict) -> str:
+    """How a provider can reach the live web, read from config (never the panel
+    label): "none" (knowledge-only — explicit no_web marker), "toggle" (web can be
+    turned on/off via caps or a web-capable agent file: claude/codex/kimi), or
+    "always" (grounding is on and uncontrollable: agy/Gemini). Fail safe: an
+    unknown provider is treated as "always" so a live-web gap is never withheld
+    from a model that might actually be able to answer it — except the explicit
+    no_web set, which is the one place we must not route web gaps."""
+    p = providers.get(provider_name) or {}
+    if p.get("no_web"):
+        return "none"
+    caps = p.get("caps") or {}
+    if caps.get("web_on") or caps.get("web_off"):
+        return "toggle"
+    if (p.get("agent_file") or {}).get("exclude_web_off"):
+        return "toggle"
+    return "always"
+
+
+def _gap_prompt(questions: list) -> str:
+    """Render the routed gaps as the per-member round-2+ prompt: a short directive
+    plus the numbered questions this member should investigate."""
+    lines = [f"{i + 1}. {q}" for i, q in enumerate(questions)]
+    return ("Investigate the following open question(s) from the research so far and "
+            "return a condensed, sourced findings brief addressing them:\n"
+            + "\n".join(lines))
+
+
+def _route_gaps(open_questions: list, panel: list, providers: dict) -> list:
+    """Re-fan the open gaps to only the capable models. For each panel member:
+    web-needing gaps go only to members that can reach the web (capability != "none");
+    reasoning-only gaps go to everyone. A member with no gaps assigned to it is
+    dropped from the round. Returns [(member, prompt), ...]. Never routes a live-web
+    gap to a no-web model (the weak-proposer trap)."""
+    web_gaps = [q.get("question", "") for q in open_questions if q.get("needs_web")]
+    reason_gaps = [q.get("question", "") for q in open_questions if not q.get("needs_web")]
+    tasks = []
+    for m in panel:
+        has_web = _provider_web_capability(m["provider"], providers) != "none"
+        assigned = ([*web_gaps, *reason_gaps] if has_web else list(reason_gaps))
+        assigned = [q for q in assigned if q]
+        if assigned:
+            tasks.append((m, _gap_prompt(assigned)))
+    return tasks
+
+
 async def call_cli(cfg: dict, provider_name: str, model: str, system: str | None,
                    user: str, cwd: str, depth: int, web: bool, settings: dict,
                    meta: dict | None = None) -> str:
@@ -1058,6 +1249,139 @@ def _depth_guard() -> int:
     return depth
 
 
+# Short backoff (seconds) before a research panel retry. Module-level so tests can
+# zero it out — the value only matters for spacing real CLI calls, never correctness.
+_RESEARCH_RETRY_BACKOFF = 2.0
+
+
+def _is_transient_error(e) -> bool:
+    """A panel failure worth one retry in research mode: a timeout or an empty
+    response, not a model/auth/usage error (retrying those just burns quota)."""
+    s = str(e).lower()
+    return ("timeout" in s or "empty output" in s or "empty stream" in s) \
+        and "model error" not in s
+
+
+async def _run_panel(cfg: dict, tasks: list, system: str | None, cwd: str, depth: int,
+                     web: bool, settings: dict, log, meters: list,
+                     stage: str = "panel", retry: bool = False) -> list:
+    """Fan a list of (member, prompt) tasks out in parallel; return one response dict
+    per task (in task order). One failed proposer is isolated (ok:False) and never
+    aborts the fan-out — the all-fail check is the caller's. With retry=True a single
+    transient failure (timeout/empty) is retried once after a short backoff, so deep
+    research doesn't silently drop a voice every round; fusion leaves retry off."""
+    async def run_one(m: dict, prompt: str) -> dict:
+        label = m.get("label", m["provider"])
+        t0 = time.time()
+        cmeta: dict = {}
+        attempt = 0
+        while True:
+            try:
+                content = await call_cli(cfg, m["provider"], m.get("model", ""),
+                                         system, prompt, cwd, depth, web, settings, cmeta)
+                dt = time.time() - t0
+                log(f"  ✓ {label} ({dt:.0f}s)")
+                meters.append({"stage": stage, "label": label,
+                               "provider": m["provider"], "ok": True, **cmeta})
+                return {"label": label, "model": m.get("model", ""), "ok": True,
+                        "content": content, "error": None, "seconds": round(dt, 1)}
+            except Exception as e:  # noqa: BLE001 — one bad proposer must not abort
+                if retry and attempt == 0 and _is_transient_error(e):
+                    attempt += 1
+                    log(f"  ↻ {label}: {e} — retrying")
+                    await asyncio.sleep(_RESEARCH_RETRY_BACKOFF)
+                    cmeta = {}
+                    continue
+                dt = time.time() - t0
+                log(f"  ✗ {label}: {e}")
+                meters.append({"stage": stage, "label": label,
+                               "provider": m["provider"], "ok": False})
+                return {"label": label, "model": m.get("model", ""), "ok": False,
+                        "content": None, "error": str(e), "seconds": round(dt, 1)}
+
+    return await asyncio.gather(*(run_one(m, prompt) for m, prompt in tasks))
+
+
+def _raise_if_all_failed(responses: list) -> list:
+    """Return the ok responses, or raise AllPanelsFailed if every proposer failed —
+    the shared all-fail guard for both the fusion and research panel fan-outs."""
+    ok = [r for r in responses if r["ok"]]
+    if not ok:
+        reason = _failure_reason(responses)
+        raise AllPanelsFailed(
+            reason,
+            f"{reason}: every proposer failed "
+            + "; ".join(f"{r['label']}: {r['error']}" for r in responses),
+            responses)
+    return ok
+
+
+async def _run_judge(cfg: dict, judge_system: str, juser: str, cwd: str, depth: int,
+                     web: bool, settings: dict, log, meters: list) -> dict | None:
+    """One judge call: returns the parsed analysis dict, or None on a parse/CLI
+    failure (best-effort — the pipeline proceeds without the analysis rather than
+    hard-failing). Shared by fusion's comparison and research's reflect step."""
+    j = cfg["judge"]
+    jmeta: dict = {}
+    try:
+        jtext = await call_cli(cfg, j["provider"], j.get("model", ""),
+                               judge_system, juser, cwd, depth, web, settings, jmeta)
+        analysis = tolerant_json(jtext)
+        if analysis is None:
+            log("  ! judge output was not valid JSON; synthesizing without it")
+        meters.append({"stage": "judge", "label": "judge",
+                       "provider": j["provider"], "ok": True, **jmeta})
+        return analysis
+    except Exception as e:  # noqa: BLE001
+        log(f"  ! judge failed: {e}; synthesizing without analysis")
+        meters.append({"stage": "judge", "label": "judge",
+                       "provider": j["provider"], "ok": False})
+        return None
+
+
+async def _run_synth(cfg: dict, aggregator_system: str, auser: str, cwd: str, depth: int,
+                     web: bool, settings: dict, log, meters: list,
+                     stream_final: bool = False, on_stream_start=None) -> tuple:
+    """Write the fused answer from the prepared `auser`. Streams token-by-token when
+    the caller asked for it, synthesis is web-off, and the aggregator can stream;
+    otherwise buffers. Falls back to buffered if the stream yields nothing. Returns
+    (final_text, streamed). Shared by fusion, plan, and research synthesis."""
+    log("▸ synthesis: writing the fused answer…")
+    a = cfg["aggregator"]
+    a_prov = a["provider"]
+    # The stream path renders no web tools, so only stream when synthesis is web-off;
+    # if a phase turns synthesis web ON, the buffered path below honors it instead.
+    can_stream = (stream_final and not web
+                  and (cfg["providers"].get(a_prov) or {}).get("stream"))
+    ameta: dict = {}  # shared object: the buffered closure and the stream path both fill it
+    streamed = False
+
+    async def _buffered() -> str:
+        return await call_cli(cfg, a_prov, a.get("model", ""),
+                              aggregator_system, auser, cwd, depth, web, settings, ameta)
+
+    if can_stream:
+        if on_stream_start:
+            on_stream_start()  # tear the orb down before the first token lands
+        try:
+            r = await stream_call(cfg, a_prov, a.get("model", ""),
+                                  aggregator_system, auser, cwd, depth, settings,
+                                  lambda d: (sys.stdout.write(d), sys.stdout.flush()))
+            final, streamed = r["text"], r["streamed"]
+            ameta.update(r.get("meta") or {})
+            if streamed:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+        except ProviderError:
+            final = await _buffered()  # nothing streamed yet -> safe to buffer
+    else:
+        final = await _buffered()
+
+    meters.append({"stage": "synth", "label": "synth",
+                   "provider": a_prov, "ok": True, **ameta})
+    return final, streamed
+
+
 async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
                    stream_final: bool = False, on_stream_start=None,
                    aggregator_system: str | None = None,
@@ -1098,60 +1422,19 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
                + (f", effort {panel_set['effort']}" if panel_set.get("effort") else "")
                + "]"))
 
-        async def run_one(m: dict) -> dict:
-            label = m.get("label", m["provider"])
-            t0 = time.time()
-            cmeta: dict = {}
-            try:
-                content = await call_cli(cfg, m["provider"], m.get("model", ""),
-                                         panel_system, prompt, cwd, depth, panel_web, panel_set, cmeta)
-                dt = time.time() - t0
-                log(f"  ✓ {label} ({dt:.0f}s)")
-                meters.append({"stage": "panel", "label": label,
-                               "provider": m["provider"], "ok": True, **cmeta})
-                return {"label": label, "model": m.get("model", ""), "ok": True,
-                        "content": content, "error": None, "seconds": round(dt, 1)}
-            except Exception as e:  # noqa: BLE001 — one bad proposer must not abort
-                dt = time.time() - t0
-                log(f"  ✗ {label}: {e}")
-                meters.append({"stage": "panel", "label": label,
-                               "provider": m["provider"], "ok": False})
-                return {"label": label, "model": m.get("model", ""), "ok": False,
-                        "content": None, "error": str(e), "seconds": round(dt, 1)}
-
-        responses = await asyncio.gather(*(run_one(m) for m in panel))
-        ok = [r for r in responses if r["ok"]]
-        if not ok:
-            reason = _failure_reason(responses)
-            raise AllPanelsFailed(
-                reason,
-                f"{reason}: every proposer failed "
-                + "; ".join(f"{r['label']}: {r['error']}" for r in responses),
-                responses)
-
+        responses = await _run_panel(cfg, [(m, prompt) for m in panel], panel_system,
+                                     cwd, depth, panel_web, panel_set, log, meters)
+        ok = _raise_if_all_failed(responses)
         numbered = numbered_responses(ok)
 
         analysis = None
         if mode == "fusion":
             log("▸ judge: comparing responses…")
-            j = cfg["judge"]
             juser = (f"User query:\n{prompt}\n\nModel responses:\n{numbered}\n\n"
                      "Return ONLY the JSON object.")
-            jmeta: dict = {}
-            try:
-                jtext = await call_cli(cfg, j["provider"], j.get("model", ""),
-                                       JUDGE_SYSTEM, juser, cwd, depth, judge_web, judge_set, jmeta)
-                analysis = tolerant_json(jtext)
-                if analysis is None:
-                    log("  ! judge output was not valid JSON; synthesizing without it")
-                meters.append({"stage": "judge", "label": "judge",
-                               "provider": j["provider"], "ok": True, **jmeta})
-            except Exception as e:  # noqa: BLE001
-                log(f"  ! judge failed: {e}; synthesizing without analysis")
-                meters.append({"stage": "judge", "label": "judge",
-                               "provider": j["provider"], "ok": False})
+            analysis = await _run_judge(cfg, JUDGE_SYSTEM, juser, cwd, depth,
+                                        judge_web, judge_set, log, meters)
 
-        log("▸ synthesis: writing the fused answer…")
         a = cfg["aggregator"]
         auser = f"Original user query:\n{prompt}\n\nResponses from models:\n{numbered}"
         if analysis:
@@ -1171,40 +1454,10 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
                   "process.")
         # Synthesis runs web-off by default (phases.synthesis), matching Fusion. When the
         # caller wants a live answer and the aggregator can stream, type it out token by
-        # token; otherwise buffer it. Falls back to buffered if streaming yields nothing
-        # (so correctness never depends on the stream parser).
-        streamed = False
-        a_prov = a["provider"]
-        # The stream path renders no web tools, so only stream when synthesis is web-off;
-        # if a phase turns synthesis web ON, the buffered path below honors it instead.
-        can_stream = (stream_final and not synth_web
-                      and (cfg["providers"].get(a_prov) or {}).get("stream"))
-
-        ameta: dict = {}  # shared object: the buffered closure and the stream path both fill it
-
-        async def _buffered() -> str:
-            return await call_cli(cfg, a_prov, a.get("model", ""),
-                                  aggregator_system, auser, cwd, depth, synth_web, synth_set, ameta)
-
-        if can_stream:
-            if on_stream_start:
-                on_stream_start()  # tear the orb down before the first token lands
-            try:
-                r = await stream_call(cfg, a_prov, a.get("model", ""),
-                                      aggregator_system, auser, cwd, depth, synth_set,
-                                      lambda d: (sys.stdout.write(d), sys.stdout.flush()))
-                final, streamed = r["text"], r["streamed"]
-                ameta.update(r.get("meta") or {})
-                if streamed:
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
-            except ProviderError:
-                final = await _buffered()  # nothing streamed yet -> safe to buffer
-        else:
-            final = await _buffered()
-
-        meters.append({"stage": "synth", "label": "synth",
-                       "provider": a_prov, "ok": True, **ameta})
+        # token; otherwise buffer it (helper handles the fallback if the stream is empty).
+        final, streamed = await _run_synth(cfg, aggregator_system, auser, cwd, depth,
+                                           synth_web, synth_set, log, meters,
+                                           stream_final, on_stream_start)
         cost = summarize_cost(meters, time.time() - run_t0)
 
         return {
@@ -1214,6 +1467,186 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
             "responses": [{"model": r["label"], "content": r["content"],
                            "ok": r["ok"], "error": r["error"], "seconds": r["seconds"]}
                           for r in responses],
+            "analysis": analysis,
+            "final": final,
+            "streamed": streamed,
+            "cost": cost,
+        }
+    finally:
+        if own_cwd:                       # never delete a caller-provided cwd
+            shutil.rmtree(cwd, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
+# Deep Research mode — the iterative, gap-driven orchestrator (the default `scry`).
+# Wraps the shared panel/judge/synth helpers in a brief -> round-1 diversity-fusion
+# -> reflect -> gap-targeted-rounds -> fused-prose loop. The interactive clarifying
+# interview is the CLI layer's job (do_research); research_run takes the gathered
+# answers and is otherwise side-effect-free, so the loop is driven by stubs in tests.
+# --------------------------------------------------------------------------- #
+
+def _brief_user(prompt: str, answers: list | None, repo_summary: str | None) -> str:
+    """The judge's input for the brief step: the request, any clarifying answers, and
+    an optional short repo summary, framed as data."""
+    parts = [f"User request:\n{prompt}"]
+    if answers:
+        qa = "\n".join(f"Q: {a.get('q', '')}\nA: {a.get('a', '')}" for a in answers)
+        parts.append("Clarifying answers:\n" + qa)
+    if repo_summary:
+        parts.append("Local repository context (read-only):\n" + repo_summary)
+    parts.append("Produce the research brief as the JSON object.")
+    return "\n\n".join(parts)
+
+
+def _brief_prompt(brief: dict) -> str:
+    """The round-1 prompt every panelist answers: the full brief (intent + sub-qs)."""
+    lines = [f"Research question:\n{brief.get('intent', '')}"]
+    subqs = brief.get("sub_questions") or []
+    if subqs:
+        lines.append("Sub-questions to resolve:\n" + "\n".join(f"- {s}" for s in subqs))
+    lines.append("Investigate thoroughly and return your condensed, sourced findings.")
+    return "\n\n".join(lines)
+
+
+def _reflect_user(brief: dict, evidence: list) -> str:
+    """The research judge's input: the intent plus the panel's accumulated findings."""
+    return (f"Research question:\n{brief.get('intent', '')}\n\n"
+            f"Panel findings so far:\n{numbered_responses(evidence)}\n\n"
+            "Return ONLY the JSON object.")
+
+
+def _research_synth_user(brief: dict, evidence: list, analysis: dict | None) -> str:
+    """The aggregator's input: the accumulated condensed findings + the referee's
+    analysis (never raw transcripts). The findings are web-grounded, so the writer
+    leans on their cited evidence and merges the sources into one list."""
+    auser = (f"Research question:\n{brief.get('intent', '')}\n\n"
+             f"Condensed findings from the panel:\n{numbered_responses(evidence)}")
+    if analysis:
+        auser += ("\n\nThe research referee's analysis of these findings (JSON):\n"
+                  + json.dumps(analysis, ensure_ascii=False, indent=2)
+                  + "\n\nLean on the consensus, preserve unique insights, resolve the "
+                  "contradictions where the evidence allows, and address the blind spots.")
+    auser += ("\n\nThe findings above were produced by models with live web access, so "
+              "rely on their cited evidence as your source of truth. Write the single "
+              "best researched answer to the question directly, merging and "
+              "de-duplicating the cited sources into one clean list.")
+    return auser
+
+
+async def _make_brief(cfg: dict, prompt: str, answers: list | None,
+                      repo_summary: str | None, settings: dict, cwd: str, depth: int,
+                      log, meters: list) -> dict:
+    """Turn the prompt (+ clarifying answers + optional repo summary) into a normalized
+    {intent, sub_questions} brief via the judge model. Best-effort: on a CLI/parse
+    failure, fall back to a trivial brief over the raw prompt so research still runs."""
+    j = cfg["judge"]
+    log("▸ brief: scoping the research…")
+    bmeta: dict = {}
+    obj: dict = {}
+    try:
+        txt = await call_cli(cfg, j["provider"], j.get("model", ""),
+                             RESEARCH_BRIEF_SYSTEM, _brief_user(prompt, answers, repo_summary),
+                             cwd, depth, bool(settings.get("web_tools")), settings, bmeta)
+        obj = tolerant_json(txt) or {}
+        meters.append({"stage": "brief", "label": "brief",
+                       "provider": j["provider"], "ok": True, **bmeta})
+    except Exception as e:  # noqa: BLE001 — research never hard-fails on the brief
+        log(f"  ! brief failed: {e}; using the raw prompt")
+        meters.append({"stage": "brief", "label": "brief",
+                       "provider": j["provider"], "ok": False})
+    intent = (obj.get("intent") or "").strip() or prompt
+    subqs = [s.strip() for s in (obj.get("sub_questions") or [])
+             if isinstance(s, str) and s.strip()]
+    return {"intent": intent, "sub_questions": subqs}
+
+
+async def research_run(cfg: dict, prompt: str, settings: dict, log,
+                       stream_final: bool = False, on_stream_start=None,
+                       cwd: str | None = None, cli_overrides: dict | None = None,
+                       answers: list | None = None, repo_summary: str | None = None,
+                       depth_override: int | None = None,
+                       cap_override: int | None = None,
+                       seed_meters: list | None = None) -> dict:
+    """Run the deep-research loop and return a result dict extending scry_run's with
+    `brief` and `rounds: [{responses, analysis}]`. The clarifying interview (if any)
+    is done by the caller and passed as `answers`; its `seed_meters` fold into the
+    cost tally so the interview's calls aren't silently dropped."""
+    own_cwd = cwd is None
+    if own_cwd:
+        cwd = tempfile.mkdtemp(prefix="scry-research-")
+    depth = _depth_guard()
+    phases = cfg.get("phases", {})
+    rcfg = cfg.get("research", {})
+    brief_set = _phase_settings(settings, phases, "brief", None, cli_overrides)
+    research_set = _phase_settings(settings, phases, "research", None, cli_overrides)
+    reflect_set = _phase_settings(settings, phases, "reflect", None, cli_overrides)
+    synth_set = _phase_settings(settings, phases, "synthesis", None, cli_overrides)
+    research_web = bool(research_set.get("web_tools"))
+    reflect_web = bool(reflect_set.get("web_tools"))
+    synth_web = bool(synth_set.get("web_tools"))
+    # target = adaptive minimum depth; cap = absolute ceiling. The cap wins: an
+    # explicit low --max-rounds clamps the target down rather than being raised to it.
+    target = max(1, int(depth_override or rcfg.get("max_rounds", 3) or 3))
+    cap = max(1, int(cap_override or rcfg.get("hard_cap", 5) or 5))
+    target = min(target, cap)
+    early_exit = bool(rcfg.get("early_exit", True))
+    providers = cfg.get("providers", {})
+    panel = cfg.get("panel", [])
+    run_t0 = time.time()
+    meters: list = list(seed_meters or [])   # fold the clarify interview's calls into cost
+    try:
+        brief = await _make_brief(cfg, prompt, answers, repo_summary, brief_set,
+                                  cwd, depth, log, meters)
+        evidence: list = []
+        analysis: dict | None = None
+        rounds: list = []
+        for i in range(cap):
+            if i == 0:
+                tasks = [(m, _brief_prompt(brief)) for m in panel]
+            else:
+                open_qs = (analysis or {}).get("open_questions") or []
+                tasks = _route_gaps(open_qs, panel, providers)
+                if not tasks:
+                    break                               # no gaps left to chase
+            log(f"▸ research round {i + 1}: {len(tasks)} proposer(s)"
+                + (f"  [web {'on' if research_web else 'off'}]"))
+            responses = await _run_panel(cfg, tasks, RESEARCH_PANEL_SYSTEM, cwd, depth,
+                                         research_web, research_set, log, meters,
+                                         stage="panel", retry=True)
+            ok = [r for r in responses if r["ok"]]
+            if not ok:
+                if not evidence:
+                    _raise_if_all_failed(responses)     # round 1 with no evidence: fatal
+                log("  ! every proposer failed this round; synthesizing with what we have")
+                break
+            evidence.extend(ok)
+            log("▸ reflect: comparing findings and naming the gaps…")
+            analysis = await _run_judge(cfg, RESEARCH_JUDGE_SYSTEM,
+                                        _reflect_user(brief, evidence), cwd, depth,
+                                        reflect_web, reflect_set, log, meters)
+            rounds.append({"responses": responses, "analysis": analysis})
+            if (early_exit and (i + 1) >= target
+                    and not _research_should_continue(analysis, i, target, cap)):
+                break
+
+        auser = _research_synth_user(brief, evidence, analysis)
+        final, streamed = await _run_synth(cfg, RESEARCH_SYNTH_SYSTEM, auser, cwd, depth,
+                                           synth_web, synth_set, log, meters,
+                                           stream_final, on_stream_start)
+        cost = summarize_cost(meters, time.time() - run_t0)
+
+        def _shape(rs):
+            return [{"model": r["label"], "content": r["content"], "ok": r["ok"],
+                     "error": r["error"], "seconds": r["seconds"]} for r in rs]
+
+        return {
+            "status": "ok",
+            "prompt": prompt,
+            "mode": "research",
+            "brief": brief,
+            "rounds": [{"responses": _shape(rd["responses"]), "analysis": rd["analysis"]}
+                       for rd in rounds],
+            "responses": _shape(evidence),
             "analysis": analysis,
             "final": final,
             "streamed": streamed,
@@ -1268,10 +1701,13 @@ def do_dry_run(cfg: dict, mode: str, settings: dict,
                                 "{OUTFILE}", agentfile="{AGENTFILE}")
         argv, note = _dry_prompt(p, argv, "prompt")
         _show("PROPOSER", argv, env, note)
-    if mode == "fusion":
+    # Both fusion and research run a judge (research's is the per-round gap-finder);
+    # synthesize skips it. Research previews one round — the loop re-fans the gaps.
+    if mode in ("fusion", "research"):
         j = cfg["judge"]
         p = cfg["providers"][j["provider"]]
-        sysv = JUDGE_SYSTEM if p.get("system_flag") else None
+        judge_sys = RESEARCH_JUDGE_SYSTEM if mode == "research" else JUDGE_SYSTEM
+        sysv = judge_sys if p.get("system_flag") else None
         argv, env = render_call(p, j.get("model", ""), sysv,
                                 bool(judge_set.get("web_tools")), judge_set,
                                 "{OUTFILE}", agentfile="{AGENTFILE}")
@@ -1279,7 +1715,8 @@ def do_dry_run(cfg: dict, mode: str, settings: dict,
         _show("JUDGE", argv, env, note)
     a = cfg["aggregator"]
     p = cfg["providers"][a["provider"]]
-    sysv = MOA_AGGREGATOR_SYSTEM if p.get("system_flag") else None
+    agg_sys = RESEARCH_SYNTH_SYSTEM if mode == "research" else MOA_AGGREGATOR_SYSTEM
+    sysv = agg_sys if p.get("system_flag") else None
     argv, env = render_call(p, a.get("model", ""), sysv,
                             bool(synth_set.get("web_tools")), synth_set,
                             "{OUTFILE}", agentfile="{AGENTFILE}")
@@ -3057,6 +3494,196 @@ def do_plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *
     return 0
 
 
+# --------------------------------------------------------------------------- #
+# Deep Research mode — the CLI wrapper (clarify interview + orb + output) around the
+# research_run orchestrator. Mirrors the bare-`scry` run block, plus the optional
+# interactive clarifying interview and repo grounding.
+# --------------------------------------------------------------------------- #
+
+# How many clarifying rounds the research interview may run before it gives up waiting
+# for the panel to converge. Small — research clarification is about scoping intent,
+# not exhaustive Q&A (that's `scry plan`'s job).
+_RESEARCH_CLARIFY_MAX_ROUNDS = 3
+
+
+def _detect_repo(start: str | None = None) -> str | None:
+    """The nearest enclosing git repo root (walking up from `start`/cwd), or None.
+    Used by research.repo_context "auto" to ground the panel in a surrounding repo."""
+    p = Path(start or os.getcwd()).resolve()
+    for d in [p, *p.parents]:
+        if (d / ".git").exists():
+            return str(d)
+    return None
+
+
+def _resolve_research_repo(args, rcfg: dict) -> str | None:
+    """Resolve the read-only repo cwd for research, or None for the external-world
+    default. --no-repo forces None; --repo PATH / bare --repo (cwd) overrides config;
+    otherwise research.repo_context "auto" auto-detects a surrounding git repo."""
+    if getattr(args, "no_repo", False):
+        return None
+    repo = getattr(args, "repo", None)
+    if repo:
+        path = os.getcwd() if repo is True else str(repo)
+        if os.path.isdir(path):
+            return path
+        sys.stderr.write(f"scry: --repo path is not a directory: {path}; "
+                         "researching the external world instead\n")
+        return None
+    if rcfg.get("repo_context") == "auto":
+        return _detect_repo()
+    return None
+
+
+def _research_clarify(cfg: dict, prompt: str, settings: dict, log,
+                      start_orb, stop_orb, depth: int, meters: list) -> list:
+    """The interactive clarifying interview before research: the panel proposes
+    questions, the judge dedups them, and they're asked one at a time, for up to a
+    few rounds. Returns the Q&A transcript (the `answers` fed into the brief), and
+    appends its model calls to `meters` so they ride along in the cost tally.
+    Reuses `scry plan`'s gather/dedup/ask machinery."""
+    transcript: list = []
+    asked_keys: set = set()
+    interview_set = _phase_settings(settings, cfg.get("phases", {}), "interview", None, None)
+
+    async def _round(cwd: str) -> tuple:
+        raw, all_ready = await gather_questions(
+            cfg, prompt, transcript, interview_set, log, meters, depth, cwd)
+        if all_ready or not raw:
+            return [], all_ready
+        deduped = await dedup_questions(
+            cfg, prompt, transcript, raw, interview_set, log, meters, depth, cwd)
+        return deduped, all_ready
+
+    for round_no in range(1, _RESEARCH_CLARIFY_MAX_ROUNDS + 1):
+        cwd = tempfile.mkdtemp(prefix="scry-research-clarify-")
+        try:
+            start_orb(f"clarifying (round {round_no})…")
+            try:
+                deduped, all_ready = asyncio.run(_round(cwd))
+            finally:
+                stop_orb()  # cursor restored before we read any answer
+        finally:
+            shutil.rmtree(cwd, ignore_errors=True)
+        new_qs = [q for q in deduped if _qkey(q) not in asked_keys]
+        if all_ready or not new_qs:
+            break
+        hdr = f"Clarify {round_no} — {len(new_qs)} question(s):"
+        print("\n" + (f"\x1b[1m{hdr}\x1b[0m"
+                      if color_enabled(sys.stderr) else hdr), file=sys.stderr)
+        qa, done = ask_questions_interactively(new_qs, asked_keys)
+        transcript.extend(qa)
+        if done:
+            break
+    return transcript
+
+
+def do_research(cfg: dict, prompt: str, settings: dict, args, cli: dict) -> int:
+    """Deep research: optional clarify interview → brief → gap-driven loop → fused
+    prose. The default behavior of bare `scry "<prompt>"`."""
+    as_json = bool(getattr(args, "as_json", False))
+    quiet = bool(getattr(args, "quiet", False))
+    rcfg = cfg.get("research", {})
+    depth = _depth_guard()
+    repo_cwd = _resolve_research_repo(args, rcfg)
+
+    # A fresh orb per fan-out, fully stopped before any input() (the clarify reads
+    # answers). Gate animation on stdin too, like `scry plan`.
+    reduced_motion = args.no_anim or ("SCRY_NO_ANIM" in os.environ)
+    animate = (not quiet and not reduced_motion and color_enabled(sys.stderr)
+               and sys.stderr.isatty())
+    orb = None
+    orb_stopped = {"v": True}
+
+    def stop_orb() -> None:
+        if orb is not None and not orb_stopped["v"]:
+            orb.stop()
+            orb_stopped["v"] = True
+
+    def start_orb(caption: str) -> None:
+        nonlocal orb
+        if not animate:
+            return
+        orb = ScryingOrb()
+        orb_stopped["v"] = False
+        orb.start(caption)
+
+    def log(msg: str) -> None:
+        if quiet:
+            return
+        if orb is None or orb_stopped["v"]:
+            print(msg, file=sys.stderr, flush=True)
+            return
+        s = msg.strip()
+        if s.startswith("▸"):
+            orb.set_caption(s.lstrip("▸").strip())
+        else:
+            orb.note(msg)
+
+    # Clarify is interactive-only (mirrors do_plan vs do_plan_step): it needs a real
+    # stdin to read answers, so a non-interactive / --json / --no-clarify run skips it.
+    clarify_on = (rcfg.get("clarify", True) and not args.no_clarify
+                  and not as_json and sys.stdin.isatty())
+    answers: list = []
+    clarify_meters: list = []
+    if clarify_on:
+        answers = _research_clarify(cfg, prompt, settings, log,
+                                    start_orb, stop_orb, depth, clarify_meters)
+
+    stream_final = (not as_json and not quiet and sys.stdout.isatty())
+    try:
+        start_orb("awakening the orb…")
+        try:
+            result = asyncio.run(research_run(
+                cfg, prompt, settings, log, stream_final, stop_orb,
+                cwd=repo_cwd, cli_overrides=cli, answers=answers,
+                depth_override=args.depth, cap_override=args.max_rounds,
+                seed_meters=clarify_meters))
+        finally:
+            stop_orb()
+    except AllPanelsFailed as e:
+        if as_json:
+            print(json.dumps({"status": "error", "failure_reason": e.failure_reason,
+                              "responses": [{"model": r["label"], "ok": r["ok"],
+                                             "error": r["error"]} for r in e.responses]},
+                             indent=2))
+        else:
+            print(f"scry: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+    # Consensus map from the final round's referee analysis (auto on an interactive
+    # stderr; --map forces, --no-map suppresses; never under --json/--quiet).
+    analysis = result.get("analysis")
+    if (analysis and not args.no_map and not as_json and not quiet
+            and (args.map or sys.stderr.isatty())):
+        rendered = render_consensus_map(analysis, color_enabled(sys.stderr))
+        if rendered:
+            print(rendered + "\n", file=sys.stderr)
+
+    cost = result.get("cost")
+    if cost and not as_json and not quiet:
+        print(format_cost_tally(cost, color_enabled(sys.stderr)), file=sys.stderr)
+
+    if settings.get("save_history", True) and not args.no_save:
+        save_run(result)
+
+    if args.show_proposers:
+        for r in result["responses"]:
+            tag = "ok" if r["ok"] else "FAILED"
+            print(f"\n----- {r['model']} ({tag}, {r['seconds']}s) -----", file=sys.stderr)
+            print(r["content"] or r["error"] or "", file=sys.stderr)
+        print("\n----- researched answer -----", file=sys.stderr)
+
+    if as_json:
+        out = {k: v for k, v in result.items() if k != "streamed"}
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+    elif not result.get("streamed"):
+        print(result["final"])
+    return 0
+
+
 def main() -> int:
     # History sub-commands: `scry last`, `scry log [N]`. Intercepted before
     # argparse, and only when unambiguous (no extra words/flags) so a real prompt
@@ -3077,9 +3704,18 @@ def main() -> int:
     ap.add_argument("prompt", nargs="*",
                     help="the prompt (or pipe it via stdin); pass 'init' to run the "
                          "setup wizard or 'update' to upgrade scry in place")
-    ap.add_argument("--mode", choices=["fusion", "synthesize"], default=None,
-                    help="fusion = 3-stage panel/judge/synthesis (default); "
+    ap.add_argument("--mode", choices=["research", "fusion", "synthesize"], default=None,
+                    help="research = iterative deep-research loop (default); "
+                         "fusion = single-shot 3-stage panel/judge/synthesis; "
                          "synthesize = 2-stage panel/synthesis")
+    ap.add_argument("--depth", type=int, metavar="N",
+                    help="(research) target number of research rounds (overrides "
+                         "research.max_rounds)")
+    ap.add_argument("--no-clarify", action="store_true",
+                    help="(research) skip the clarifying-question interview")
+    ap.add_argument("--repo", nargs="?", const=True, default=None, metavar="PATH",
+                    help="(research) ground the panel in a read-only repo (no arg = the "
+                         "current directory); overrides research.repo_context")
     ap.add_argument("--no-web", action="store_true",
                     help="disable web_search/web_fetch on the panel + judge")
     ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"],
@@ -3129,13 +3765,15 @@ def main() -> int:
     ap.add_argument("--no-save", action="store_true",
                     help="don't record this run to ~/.scry (scry last / scry log)")
     ap.add_argument("--max-rounds", type=int, metavar="N",
-                    help="(with `plan`) cap interactive clarifying rounds (default 5)")
+                    help="(plan) cap interactive clarifying rounds (default 5); "
+                         "(research) hard cap on research rounds (overrides research.hard_cap)")
     ap.add_argument("--resume", nargs="?", const=True, default=False,
                     help="(with `plan`) continue the most recent unfinished plan session (or --resume=<id>)")
     ap.add_argument("--list", action="store_true",
                     help="(with `plan`) list unfinished, resumable plan sessions")
     ap.add_argument("--no-repo", action="store_true",
-                    help="(with `plan`) don't give the panel read-only access to the current directory")
+                    help="(plan/research) don't give the panel read-only access to the current "
+                         "directory (forces the external-world, scrubbed-cwd default)")
     ap.add_argument("--version", action="version", version=f"scry {VERSION}")
     args = ap.parse_args()
 
@@ -3196,7 +3834,7 @@ def main() -> int:
         cfg["aggregator"] = parse_member(args.aggregator)
     if args.judge:
         cfg["judge"] = parse_member(args.judge)
-    mode = args.mode or cfg.get("mode", "fusion")
+    mode = args.mode or cfg.get("mode", "research")
 
     settings = dict(cfg["settings"])
     if args.no_web:
@@ -3218,6 +3856,10 @@ def main() -> int:
     prompt = read_prompt(args.prompt)
     if not prompt:
         ap.error("no prompt given (pass as arguments or pipe via stdin)")
+
+    # Deep research is the default; --mode fusion/synthesize take the single-shot path.
+    if mode == "research":
+        return do_research(cfg, prompt, settings, args, cli)
 
     # The scrying orb animates only on an interactive, color-capable stderr.
     # Reduced motion (--no-anim / SCRY_NO_ANIM) or a no-color terminal (NO_COLOR,

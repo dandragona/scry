@@ -156,13 +156,17 @@ state carried via resume checkpoints).
 scry init                                   # interactive setup: choose CLIs → write your panel
 scry update                                 # upgrade scry to the latest build, in place
 scry --check                                # pre-flight: are my CLIs installed + logged in?
-scry "Explain why my Postgres query is slow and how to fix it"
+scry "Explain why my Postgres query is slow and how to fix it"   # deep research (default; see below)
 cat prompt.txt | scry                       # prompt from stdin
+scry "..." --no-clarify                     # skip the clarifying interview
+scry "..." --depth 4                        # target more research rounds (default 3, cap 5)
+scry "..." --repo                            # ground the panel read-only in the current git repo
 scry plan "add rate limiting to my API"     # interactive, panel-driven planning (see below)
+scry --mode fusion "..."                    # single-shot 3-stage panel/judge/synthesis (fast)
 scry --mode synthesize "..."                # lighter 2-stage (skip the judge)
 scry --no-web "..."                         # pure generation, no web tools
 scry --effort high "..."                    # raise reasoning effort on every stage
-scry --json "..." > out.json                # {status, responses, analysis, final}
+scry --json "..." > out.json                # research: {brief, rounds, responses, analysis, final, cost}
 scry --show-proposers "..."                 # also print each model's raw answer (stderr)
 scry --dry-run "..."                        # print the exact commands, run nothing
 scry --no-anim "..."                        # plain progress (reduced motion); honors NO_COLOR too
@@ -176,7 +180,11 @@ scry log 50                                 # ...the last 50
 
 | Flag | Effect |
 |---|---|
-| `--mode fusion\|synthesize` | 3-stage (default) vs 2-stage |
+| `--mode research\|fusion\|synthesize` | iterative deep research (default) vs single-shot 3-stage vs 2-stage |
+| `--depth N` | (research) target research rounds (overrides `research.max_rounds`) |
+| `--max-rounds N` | (research) hard cap on rounds (overrides `research.hard_cap`); (plan) clarifying-round cap |
+| `--no-clarify` | (research) skip the clarifying-question interview |
+| `--repo [PATH]` / `--no-repo` | (research/plan) ground the panel read-only in a repo (no arg = cwd) / force the external-world default |
 | `--no-web` | disable web tools on panel + judge |
 | `--effort low\|medium\|high\|xhigh\|max` | reasoning effort, every stage (where supported) |
 | `--max-tool-calls N` | cap web tool iterations (Fusion default 8; claude only) |
@@ -189,6 +197,59 @@ scry log 50                                 # ...the last 50
 
 A panel member is `provider[:model]`. Same-model "self-pairing" still improves results — most of
 Fusion's lift comes from the synthesis step, not model diversity.
+
+### Deep Research mode (the default `scry "<prompt>"`)
+
+Bare `scry "<prompt>"` runs an **iterative, gap-driven deep-research loop** over the whole panel,
+not a single fan-out. The structural advantage over other deep-research tools: they clone *one*
+model into identical sub-agents, whereas scry already has **five different frontier models**, a
+**non-candidate judge** (verification, not self-preference), and a **synthesizer**. The loop:
+
+1. **Clarify** — an interactive clarifying-question interview (the whole panel proposes questions,
+   the judge dedups them, you answer one at a time), reusing `scry plan`'s machinery. Interactive
+   only — skipped automatically under `--json`, a non-tty stdin, or `--no-clarify`.
+2. **Brief** — the judge model normalizes your prompt (+ clarifying answers + optional repo
+   context) into a precise intent and 3–6 sub-questions.
+3. **Round 1 — diversity fusion** — every panelist investigates the full brief web-on and returns a
+   **condensed, sourced findings brief** (claims + the URLs/paths that support them), not a raw dump.
+4. **Reflect** — a research-tuned judge compares the findings and emits the 5-field analysis **plus**
+   targeted `open_questions`, each tagged whether it needs a live web search.
+5. **Rounds 2+ — gap-targeted, capability-routed** — only the open gaps are re-fanned, and only to
+   the capable models: live-web gaps go to the web-capable searchers (claude/codex/kimi + Gemini's
+   always-on grounding), reasoning gaps to everyone (incl. the no-web DeepSeek). A live-web gap is
+   never routed to a no-web model.
+6. **Stop** — adaptive with a generous cap: target `research.max_rounds` (default 3), early-exit
+   when the judge finds no significant new gaps, hard cap `research.hard_cap` (5).
+7. **Synthesize** — the aggregator writes **one fused prose answer** from the judge-compressed
+   findings (never the raw transcripts), merging the cited sources into a single clean list.
+
+```sh
+scry "what's the best embedding model for code search in 2026, and why?"   # full deep research
+scry "..." --no-clarify                     # skip the interview, go straight to research
+scry "..." --depth 4 --max-rounds 6         # deeper: target 4 rounds, hard cap 6
+scry "..." --repo                            # ground the search-capable panel in the current git repo
+scry "..." --repo ../other-project           # ...or a specific repo path
+scry "..." --no-repo                         # force external-world (ignore an auto-detected repo)
+scry "..." --json                            # {brief, rounds:[{responses, analysis}], final, cost}
+scry --mode fusion "..."                     # opt out: today's fast single-shot pipeline
+```
+
+**Repo grounding.** `research.repo_context: "auto"` (the default) grounds the search-capable panel
+**read-only** in a surrounding git repo when one is detected, so research can draw on your code as
+well as the web; `--repo [PATH]` forces it (no arg = cwd), `--no-repo` forces the scrubbed,
+external-world cwd. Read-only-unsafe providers (e.g. agy) are isolated from the repo, as in `scry
+plan`. Note this sends repo contents to your panel models.
+
+**Cost.** Deep research is **deliberately expensive** — five heterogeneous CLIs across multiple
+rounds on your subscription quotas. The structural mitigations are baked in (gap-targeted re-fan of
+only the open gaps to only the capable models; a low default round count; the judge compresses
+findings before synthesis), but if you want one fast pass, use `--mode fusion`. Tune depth in the
+`research` block (`max_rounds`/`hard_cap`/`early_exit`) and per-round budgets in `phases.research`
+(web-on, `timeout: 2100` by default).
+
+> **Existing configs:** a config that pins `"mode": "fusion"` keeps getting the single-shot pipeline.
+> Set `"mode": "research"` in your `~/.config/scry/config.json` (or re-run `scry init --force`) to
+> make deep research your default.
 
 ### Plan mode (`scry plan "<request>"`)
 
@@ -270,10 +331,13 @@ auto-loaded by name — pass it with `--config ./config.json` to use it directly
   `max_output_tokens`, `timeout`, `save_history`). `timeout` is the per-call timeout in seconds (default
   420). Every pipeline phase inherits these and may override them in `phases` (below).
 - **`phases`** — per-phase overrides of `settings`. Each stage inherits every global setting and overrides
-  only what it lists. Stages: `panel`, `judge`, `synthesis` (a normal run); `interview`, `final` (plan).
-  Resolution per call (later wins): `settings` → `phases[stage]` → the `final` overlay (plan draft only) →
-  explicit CLI flags. Defaults reproduce scry's built-in behavior (synthesis/interview web-off; `final`
-  gets `timeout: 2100`). `max_tool_calls` is **uncapped by default** — set it on any phase to cap claude's
+  only what it lists. Stages: `panel`, `judge`, `synthesis` (a fusion run); `interview`, `final` (plan);
+  `brief`, `research`, `reflect` (deep research). Resolution per call (later wins): `settings` →
+  `phases[stage]` → the `final` overlay (plan draft only) → explicit CLI flags. Defaults reproduce scry's
+  built-in behavior (synthesis/interview/brief/reflect web-off; `research` web-on with `timeout: 2100`;
+  `final` gets `timeout: 2100`). The research `reflect` judge runs **web-off** on purpose — it reasons
+  over the panel's gathered findings and must return strict JSON; web tools make it ramble and break the
+  gap loop. `max_tool_calls` is **uncapped by default** — set it on any phase to cap claude's
   `--max-turns`. e.g. `"judge": {"web_tools": false, "max_tool_calls": 4}`.
 - **`providers`** — how to drive each CLI: base `cmd`, `model_flag`, capture (`json`+`result_path`,
   `outfile`+`-o`, or `text`), `system_flag`, `env_unset`, and a **`caps`** block mapping each
@@ -296,6 +360,14 @@ auto-loaded by name — pass it with `--config ./config.json` to use it directly
   **knowledge-only** (no web search) — a voice without live grounding. Compose your own panel with
   **`scry init`** or `--panel`.
 - **`judge`**, **`aggregator`** — `{provider, model}` per stage (default `claude:opus`).
+- **`mode`** — the default pipeline for bare `scry`: `research` (deep research, the default), `fusion`
+  (single-shot 3-stage), or `synthesize` (2-stage). `--mode` overrides it per run.
+- **`research`** — Deep Research mode knobs: `clarify` (the interactive interview, on by default),
+  `max_rounds` (target depth, 3), `hard_cap` (ceiling, 5), `early_exit` (stop on no new gaps),
+  `sub_questions` (brief decomposition target, 6), and `repo_context` (`"auto"` detects a surrounding
+  git repo, `"off"` forces external-world). `--depth`/`--max-rounds`/`--no-clarify`/`--repo`/`--no-repo`
+  override. A provider record may also set `"no_web": true` (deepseek) so a live-web gap is never routed
+  to it.
 
 ### Setup wizard (`scry init`)
 

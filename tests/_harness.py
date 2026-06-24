@@ -211,6 +211,68 @@ def claude_plan(rounds_before_ready: int = 1, questions=None,
     )
 
 
+def claude_research(findings: str = "CLAUDE FINDINGS", fused: str = "RESEARCH ANSWER",
+                    subqs=None, gaps: bool = False, needs_web: bool = True,
+                    report_cwd: bool = False) -> str:
+    """A claude stub for Deep Research mode: ONE binary that plays every research role
+    by branching on the UNIQUE anchor in each system prompt:
+
+      RESEARCH_BRIEF_SYSTEM     ('research brief')        -> {intent, sub_questions}
+      RESEARCH_JUDGE_SYSTEM     ('research referee')      -> 5-field analysis + open_questions
+      RESEARCH_SYNTH_SYSTEM     ('research synthesis')    -> the fused prose answer
+      RESEARCH_PANEL_SYSTEM     ('deep research analyst') -> a condensed findings brief
+
+    `gaps` controls whether the referee keeps naming an open question every round
+    (drives early-exit vs hard-cap loop tests); `needs_web` tags that gap so round-2+
+    routing tests can assert no-web providers are excluded. `report_cwd` appends the
+    proposer's cwd to its findings (for repo-grounding tests)."""
+    if subqs is None:
+        subqs = ["sub-q-1", "sub-q-2", "sub-q-3"]
+    oq = [{"question": "What remains unresolved?", "needs_web": bool(needs_web)}] if gaps else []
+    analysis = {"consensus": [], "contradictions": [], "partial_coverage": [],
+                "unique_insights": [], "blind_spots": [], "open_questions": oq}
+    brief = {"intent": "INTENT", "sub_questions": subqs}
+    return _py(
+        "import sys, json, os\n"
+        "argv = sys.argv[1:]\n"
+        "sp = ''\n"
+        "for i, a in enumerate(argv):\n"
+        "    if a == '--append-system-prompt' and i + 1 < len(argv):\n"
+        "        sp = argv[i + 1]\n"
+        "if os.environ.get('SCRY_SYSDUMP'):\n"
+        "    open(os.environ['SCRY_SYSDUMP'], 'a').write(sp + '\\n===SCRY-SYS-END===\\n')\n"
+        "sys.stdin.read()\n"
+        f"brief = {brief!r}\n"
+        f"analysis = {analysis!r}\n"
+        f"findings = {findings!r}\n"
+        f"rc = {bool(report_cwd)!r}\n"
+        "if 'research brief' in sp:\n"
+        "    print(json.dumps({'result': json.dumps(brief), 'is_error': False}))\n"
+        "elif 'research referee' in sp:\n"
+        "    print(json.dumps({'result': json.dumps(analysis), 'is_error': False}))\n"
+        "elif 'research synthesis' in sp:\n"
+        f"    print(json.dumps({{'result': {fused!r}, 'is_error': False}}))\n"
+        "else:\n"
+        "    out = findings + ('\\nCWD=' + os.getcwd() if rc else '')\n"
+        "    print(json.dumps({'result': out, 'is_error': False}))\n"
+    )
+
+
+def flaky_text(marker: str, text: str = "RECOVERED") -> str:
+    """A capture='text' proposer that fails ONCE then succeeds: the first call exits
+    1 with empty output (-> a transient "empty output" ProviderError) and drops a
+    marker file; later calls print `text`. Drives the research retry test."""
+    return _py(
+        "import sys, os\n"
+        "sys.stdin.read()\n"
+        f"marker = {marker!r}\n"
+        "if not os.path.exists(marker):\n"
+        "    open(marker, 'w').write('1')\n"
+        "    sys.exit(1)\n"
+        f"sys.stdout.write({text!r} + '\\n')\n"
+    )
+
+
 def codex_outfile(result: str = "CODEX ANSWER") -> str:
     """codex `exec -o <outfile>`: write the answer to the file named after `-o`
     (scry's capture='outfile' contract); falls back to stdout if no -o."""

@@ -71,7 +71,7 @@ class TestLoadConfigDefaults(unittest.TestCase):
         # Mutating the returned cfg must not bleed into the module default.
         cfg["mode"] = "MUTATED"
         cfg["panel"].append({"provider": "x"})
-        self.assertEqual(scry.DEFAULT_CONFIG["mode"], "fusion")
+        self.assertEqual(scry.DEFAULT_CONFIG["mode"], "research")
         self.assertEqual(
             len(scry.DEFAULT_CONFIG["panel"]),
             len(self._load_none()["panel"]),

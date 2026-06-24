@@ -7,6 +7,26 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Deep Research mode — the new default `scry`.** Bare `scry "<prompt>"` is now an iterative,
+  gap-driven deep-research pipeline over the whole heterogeneous panel instead of a single-shot
+  fusion: **clarify** (an interactive clarifying-question interview, reusing `scry plan`'s machinery)
+  → **brief** (the judge model normalizes the prompt into an intent + 3–6 sub-questions) →
+  **round 1** (every panelist answers the full brief web-on and returns condensed, sourced findings)
+  → **reflect** (a research-tuned judge emits the 5-field analysis plus targeted `open_questions`,
+  each tagged whether it needs live web) → **gap-targeted rounds** (re-fan only the open gaps to only
+  the capable models — live-web gaps skip the no-web provider; Gemini's always-on grounding is always
+  eligible) → **synthesis** (one fused prose answer from the judge-compressed findings, merging the
+  cited sources into a single list). The loop is adaptive with a generous cap (`research.max_rounds`
+  default 3, `research.hard_cap` 5, early-exit when the judge finds no significant new gaps). New
+  config block `research` and phases `brief`/`research`/`reflect`; new flags `--depth N`,
+  `--no-clarify`, `--repo [PATH]`/`--no-repo` (ground the panel read-only in a surrounding git repo;
+  `repo_context: "auto"` auto-detects one), and `--max-rounds N` now also caps research rounds.
+  Single-shot stays reachable as a fast escape hatch: `--mode fusion` (today's 3-stage pipeline) and
+  `--mode synthesize` (panel→synth) are unchanged, and `scry plan` is untouched. `--json` emits the
+  full trace (brief + per-round responses/analyses + final + cost). Note: deep research multiplies
+  cost (several CLIs × multiple rounds) — that's the point; use `--mode fusion` when you want one fast
+  pass. **Existing configs that pin `"mode": "fusion"` keep getting fusion** until you set
+  `"mode": "research"` (or run `scry init --force`).
 - **Per-provider max reasoning effort (all phases).** Each provider record now carries an `effort`
   default that panel, judge, and synthesis all inherit — an explicit `--effort` flag or a
   `phases[stage].effort` override still wins. Pinned: claude `max`, codex `xhigh`, deepseek `max`.

@@ -86,12 +86,14 @@ class RunManager:
                               f"Run failed: {e}", capability=capability, run_id=run_id)
             return
         final = result.get("final") or ""
+        # Name the artifact after the topic (cheap title call), not the run id.
+        title = await asyncio.to_thread(engine.topic_slug, cfg, request, cwd)
         if capability == "research":
             ap = artifacts.write_research(location, conversation["id"], run_id,
-                                          request, final)
+                                          request, final, title=title)
         else:
             ap = artifacts.write_chat(location, conversation["id"], run_id,
-                                      request, final)
+                                      request, final, title=title)
         store.update_run(run_id, status="done", final=final,
                          responses=result.get("responses"),
                          analysis=result.get("analysis"), cost=result.get("cost"),
@@ -107,12 +109,12 @@ class RunManager:
         store = self.app.locations.store_for(location)
         cfg = self.app.config()
         repo_cwd = location.get("root_path")
-        out_path = artifacts.plan_out_path(location, conversation["id"], run_id)
+        out_dir = str(artifacts.artifact_dir(location, conversation["id"]))
 
         def _call():
             return engine.plan_step(cfg, request, options, resume=resume,
                                     repo_cwd=repo_cwd, payload=payload,
-                                    out=out_path, no_out=False)
+                                    out_dir=out_dir, no_out=False)
         try:
             async with self._sema():
                 env = await asyncio.to_thread(_call)

@@ -502,6 +502,10 @@ DEFAULT_CONFIG = {
     # Judge defaults to the outer (synthesis) model, as in Fusion.
     "judge":      {"provider": "claude"},
     "aggregator": {"provider": "claude"},
+    # Model that names artifact files (the cheap `scry-plan-<topic>.md` title call).
+    # Empty => reuse the judge. Set "provider[:model]" or {"provider","model"} to
+    # point it at a cheaper model, e.g. "title": "deepseek".
+    "title": {},
     # `scry plan` — the interactive, panel-driven planning mode. max_rounds is the
     # hard backstop on clarifying-question rounds (the real termination guarantee;
     # the per-round convergence check is LLM-driven and non-deterministic). The
@@ -3081,6 +3085,90 @@ def do_plan_list(as_json: bool = False) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- #
+# Artifact naming — turn the prompt into a short, meaningful filename slug so a
+# run lands as e.g. `scry-plan-dark-mode-toggle.md` instead of a bare timestamp.
+# --------------------------------------------------------------------------- #
+
+_TITLE_SYSTEM = (
+    "You name files. Read the request below and reply with ONLY a 3-5 word title "
+    "naming its topic — lowercase, plain words, no quotes, no punctuation, no "
+    "preamble. Example request: 'Add a dark mode toggle to settings' -> "
+    "dark mode toggle."
+)
+
+_SLUG_UNSAFE = re.compile(r"[^a-z0-9]+")
+
+
+def slugify_title(text: str, cap: int = 50) -> str:
+    """A filesystem-safe slug from arbitrary text: take the first line, lowercase,
+    collapse every run of non-alphanumerics to a single dash, trim, and cap the
+    length (never ending on a dash). Returns '' when nothing usable remains."""
+    first = (text or "").strip().splitlines()[0] if (text or "").strip() else ""
+    slug = _SLUG_UNSAFE.sub("-", first.lower()).strip("-")
+    if len(slug) > cap:
+        slug = slug[:cap].rstrip("-")
+    return slug
+
+
+def _first_words_slug(request: str, n: int = 6) -> str:
+    """Deterministic fallback slug: the first `n` words of the request, slugified."""
+    return slugify_title(" ".join((request or "").strip().split()[:n]))
+
+
+def _title_member(cfg: dict) -> dict:
+    """Which model names artifact files: the optional top-level `title` override
+    (a "provider[:model]" string or a {"provider","model"} dict), else the judge.
+    Returns a parsed {"provider","model"} dict ({} when neither is configured)."""
+    spec = cfg.get("title") or cfg.get("judge") or {}
+    if isinstance(spec, str):
+        spec = parse_member(spec)
+    return spec if isinstance(spec, dict) else {}
+
+
+async def _gen_title(cfg: dict, request: str, cwd: str, depth: int) -> str:
+    """One cheap model call that names the request's topic. Uses the configured title
+    model (the judge by default) with the CHEAPEST reasoning effort, web tools OFF, a
+    tiny output cap and a short timeout — naming a file never warrants real reasoning
+    or search. Returns the raw title text (caller slugifies); raises like call_cli."""
+    m = _title_member(cfg)
+    provider = m.get("provider")
+    if not provider:
+        return ""
+    settings = {"web_tools": False, "max_tool_calls": 0, "effort": "low",
+                "max_output_tokens": 32, "timeout": 30}
+    user = (request or "").strip()[:600]
+    return await call_cli(cfg, provider, m.get("model", ""), _TITLE_SYSTEM, user,
+                          cwd, depth, False, settings)
+
+
+def topic_slug(cfg: dict, request: str) -> str:
+    """A short, meaningful filename slug for `request`: a cheap LLM-generated title,
+    else the first few words of the request, else '' (the caller falls back to a run
+    id). Never raises and never blocks a run — every failure degrades quietly. The
+    title call runs in a throwaway cwd; it needs no repo access."""
+    iso = tempfile.mkdtemp(prefix="scry-title-")
+    try:
+        try:
+            title = asyncio.run(_gen_title(cfg, request, iso, _depth_guard()))
+        except Exception:                          # any provider/parse/timeout error
+            title = ""
+        return slugify_title(title) or _first_words_slug(request)
+    finally:
+        shutil.rmtree(iso, ignore_errors=True)
+
+
+def _unique_stem(directory: Path, stem: str, exts: tuple) -> str:
+    """Return `stem`, or `stem-2`, `stem-3`, … — the first variant for which none of
+    `directory/<variant><ext>` exists across every `ext`. Bounded so a pathological
+    directory can't spin forever (falls back to a timestamped stem)."""
+    for i in range(1, 1000):
+        cand = stem if i == 1 else f"{stem}-{i}"
+        if not any((directory / f"{cand}{ext}").exists() for ext in exts):
+            return cand
+    return f"{stem}-{int(time.time() * 1000)}"
+
+
 def _diag_path(plan_path: str) -> str:
     """The diagnostics file that rides alongside a plan file: strip a trailing
     `.md` and append `.diagnostics.md` (so `foo/plan.md` -> `foo/plan.diagnostics.md`;
@@ -3257,12 +3345,25 @@ def _plan_result_fields(result: dict, request: str, transcript: list,
 
 def _write_plan_files(plan_md: str, result: dict, cfg: dict, settings: dict,
                       plan_settings: dict, run_id: str, out: str | None,
-                      announce) -> tuple:
-    """Write the plan (`out` or ./scry-plan-<id>.md) and its diagnostics file
-    alongside it. `announce` is an optional callable(msg) for the per-file status
-    line (None = silent, for headless callers). Returns (plan_path, diag_path), with
-    a path set to None if that write failed."""
-    plan_path = out or f"scry-plan-{run_id}.md"
+                      announce, request: str = "", out_dir: str | None = None) -> tuple:
+    """Write the plan and its diagnostics file alongside it, returning
+    (plan_path, diag_path) (a path is None if that write failed).
+
+    An explicit `out` path always wins. Otherwise the name is derived from the
+    prompt — `scry-plan-<topic>.md` (e.g. `scry-plan-dark-mode-toggle.md`), with a
+    `-2`/`-3` suffix on collision — written into `out_dir` (the web backend's
+    artifact dir) or the current directory (the CLI default). `announce` is an
+    optional callable(msg) for the per-file status line (None = silent)."""
+    if out:
+        plan_path = out
+    else:
+        directory = Path(out_dir) if out_dir else Path.cwd()
+        slug = topic_slug(cfg, request)
+        stem = f"scry-plan-{slug}" if slug else f"scry-plan-{run_id}"
+        stem = _unique_stem(directory, stem, (".md", ".diagnostics.md"))
+        # CLI default (no out_dir): a bare filename written into the cwd — keeps the
+        # status line repo-path-free. Web passes out_dir and gets an absolute path.
+        plan_path = str(directory / f"{stem}.md") if out_dir else f"{stem}.md"
     diag_path = _diag_path(plan_path)
 
     def _w(path: str, body: str, label: str):
@@ -3492,7 +3593,7 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
             colored = (msg.startswith("✓") and color_enabled(sys.stderr))
             print(f"\x1b[32m{msg}\x1b[0m" if colored else msg, file=sys.stderr)
         _write_plan_files(plan_md, result, cfg, settings, plan_settings, run_id,
-                          out, _announce)
+                          out, _announce, request=request)
 
     if settings.get("save_history", True) and not no_save:
         save_run(result, run_id)
@@ -3509,7 +3610,8 @@ def _plan_step_finalize(cfg: dict, request: str, transcript: list, settings: dic
                         plan_settings: dict, run_id: str, meters: list, t0: float,
                         repo_cwd: str | None, out: str | None, no_out: bool,
                         no_save: bool, round_no: int,
-                        cli_overrides: dict | None = None, log=None) -> dict:
+                        cli_overrides: dict | None = None, log=None,
+                        out_dir: str | None = None) -> dict:
     """Draft the plan from the gathered transcript and RETURN the terminal `done`
     envelope dict (or an `error` envelope if every panel draft fails). Writes the
     plan + diagnostics files unless no_out, and records the finished run to history.
@@ -3533,7 +3635,8 @@ def _plan_step_finalize(cfg: dict, request: str, transcript: list, settings: dic
     plan_path = diag_path = None
     if not no_out:
         plan_path, diag_path = _write_plan_files(
-            plan_md, result, cfg, settings, plan_settings, run_id, out, None)
+            plan_md, result, cfg, settings, plan_settings, run_id, out, None,
+            request=request, out_dir=out_dir)
     if settings.get("save_history", True) and not no_save:
         save_run(result, run_id)
     return {"status": "done", "id": run_id, "final": plan_md,
@@ -3546,7 +3649,8 @@ def plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *,
               resume: str | bool = False, no_save: bool = False,
               repo_cwd: str | None = None, payload: dict | None = None,
               out: str | None = None, no_out: bool = False,
-              cli_overrides: dict | None = None, log=None) -> dict:
+              cli_overrides: dict | None = None, log=None,
+              out_dir: str | None = None) -> dict:
     """Pure, in-process engine for one headless round of the plan interview — the
     shared core behind the CLI's `do_plan_step` and the web backend (in-process
     reuse, no subprocess). Takes the answers payload as a DICT
@@ -3604,7 +3708,8 @@ def plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *,
     if done or interview_done or rounds_done >= max_rounds:
         return _plan_step_finalize(cfg, request, transcript, settings, plan_settings,
                                    run_id, meters, t0, repo_cwd, out, no_out, no_save,
-                                   rounds_done, cli_overrides=cli_overrides, log=log)
+                                   rounds_done, cli_overrides=cli_overrides, log=log,
+                                   out_dir=out_dir)
 
     # Otherwise gather the next round of clarifying questions.
     own_cwd = repo_cwd is None

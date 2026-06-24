@@ -188,13 +188,26 @@ def run_research_sync(cfg: dict, prompt: str, options: dict | None = None,
     return result
 
 
+def topic_slug(cfg: dict, request: str, cwd: str | None = None) -> str:
+    """A short, meaningful filename slug for `request` (a cheap LLM-generated title,
+    falling back to the prompt's first words). Empty under the fake engine so tests
+    fall back to run-id names. `cwd` is accepted for symmetry but ignored — scry runs
+    the title call in its own throwaway dir."""
+    if fake_enabled():
+        return ""
+    return load_scry().topic_slug(cfg, request) or ""
+
+
 def plan_step(cfg: dict, request: str, options: dict | None = None, *,
               resume=False, repo_cwd: str | None = None, payload: dict | None = None,
-              out: str | None = None, no_out: bool = False) -> dict:
+              out: str | None = None, no_out: bool = False,
+              out_dir: str | None = None) -> dict:
     """One headless round of the plan interview, in-process. Returns the envelope dict
-    ({status: questions|ready|done|error, ...}) from scry's pure `plan_step` engine."""
+    ({status: questions|ready|done|error, ...}) from scry's pure `plan_step` engine.
+    `out_dir` lets the caller pass a directory and have scry pick a meaningful
+    `scry-plan-<topic>.md` name inside it (an explicit `out` path still wins)."""
     if fake_enabled():
-        return _fake_plan_step(request, resume, payload, out, no_out)
+        return _fake_plan_step(request, resume, payload, out, no_out, out_dir)
     scry = load_scry()
     settings, cli = _apply_options(cfg, options)
     plan_settings = dict(cfg.get("plan", {}))
@@ -202,10 +215,10 @@ def plan_step(cfg: dict, request: str, options: dict | None = None, *,
         plan_settings["max_rounds"] = options["max_rounds"]
     return scry.plan_step(cfg, request, settings, plan_settings, resume=resume,
                           repo_cwd=repo_cwd, payload=payload, out=out, no_out=no_out,
-                          cli_overrides=cli)
+                          cli_overrides=cli, out_dir=out_dir)
 
 
-def _fake_plan_step(request, resume, payload, out, no_out) -> dict:
+def _fake_plan_step(request, resume, payload, out, no_out, out_dir=None) -> dict:
     """Deterministic plan interview for SCRY_WEB_FAKE_ENGINE: one question round, then
     ready, then a drafted plan. Keyed off the answers payload so the API tests can drive
     the whole questions -> ready -> done loop."""
@@ -214,13 +227,14 @@ def _fake_plan_step(request, resume, payload, out, no_out) -> dict:
     if payload.get("done"):
         plan_md = "## Context\nFake plan.\n## Steps\n1. do it"
         plan_path = diag_path = None
-        if not no_out and out:
+        target = out or (str(Path(out_dir) / f"scry-plan-{rid}.md") if out_dir else None)
+        if not no_out and target:
             try:
-                Path(out).parent.mkdir(parents=True, exist_ok=True)
-                Path(out).write_text(plan_md + "\n")
-                diag_path = out.replace(".md", ".diagnostics.md")
+                Path(target).parent.mkdir(parents=True, exist_ok=True)
+                Path(target).write_text(plan_md + "\n")
+                diag_path = target.replace(".md", ".diagnostics.md")
                 Path(diag_path).write_text("# diagnostics\nfake")
-                plan_path = out
+                plan_path = target
             except OSError:
                 plan_path = diag_path = None
         return {"status": "done", "id": rid, "final": plan_md,

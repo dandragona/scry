@@ -87,6 +87,7 @@ install_skill scry-plan
 # Skip with SCRY_NO_WEB=1.
 install_web_deps() {
   [ "${SCRY_NO_WEB:-0}" = "1" ] && { note "SCRY_NO_WEB=1 — skipping web UI deps."; return 0; }
+  [ "${SCRY_NO_WEB_DEPS:-0}" = "1" ] && { note "SCRY_NO_WEB_DEPS=1 — skipping pip deps (managing your own Python env)."; return 0; }
   printf '\nInstalling the optional web UI dependencies (FastAPI + uvicorn)\n'
   if python3 -m pip install --user --quiet \
       "fastapi>=0.110" "uvicorn[standard]>=0.29" "python-multipart>=0.0.9" 2>/dev/null; then
@@ -95,7 +96,43 @@ install_web_deps() {
     note "could not install web UI deps automatically — run \`scry web\` to see the install hint, or \`pip install 'scry[web]'\`."
   fi
 }
+
+# The web UI is a small Python PACKAGE (scry_web/), not a single file, so unlike
+# `scry` it can't be a one-file curl. It ships NEXT TO the binary at
+# $INSTALL_DIR/scry_web — the `web` subcommand puts the binary's dir on sys.path, so
+# a sibling package is importable with no clone and no `pip install`. We fetch the
+# repo tarball and lift out just scry_web/. Best-effort; gated by SCRY_NO_WEB.
+# SCRY_WEB_TARBALL overrides the source (a file:// tarball keeps the tests hermetic).
+install_web_package() {
+  if [ "${SCRY_NO_WEB:-0}" = "1" ]; then return 0; fi
+  if ! command -v tar >/dev/null 2>&1; then
+    note "tar not found — skipping the scry_web package (\`scry web\` will need a clone)."
+    return 0
+  fi
+  printf '\nInstalling the scry web UI package (scry_web)\n'
+  tb="${SCRY_WEB_TARBALL:-https://github.com/${REPO}/archive/${REF}.tar.gz}"
+  tmpd="$(mktemp -d 2>/dev/null)" || { note "could not create a temp dir — skipping scry_web."; return 0; }
+  if curl -fsSL "$tb" -o "$tmpd/src.tgz" 2>/dev/null \
+      && tar -xzf "$tmpd/src.tgz" -C "$tmpd" 2>/dev/null; then
+    pkg="$(find "$tmpd" -maxdepth 3 -type d -name scry_web 2>/dev/null | head -n1)"
+    if [ -n "$pkg" ] && [ -f "$pkg/__init__.py" ]; then
+      rm -rf "${INSTALL_DIR%/}/scry_web"
+      if cp -R "$pkg" "${INSTALL_DIR%/}/scry_web" 2>/dev/null; then
+        printf '  -> %s\n' "${INSTALL_DIR%/}/scry_web"
+      else
+        note "could not copy scry_web into ${INSTALL_DIR%/} — \`scry web\` will need a clone."
+      fi
+    else
+      note "scry_web not found in the downloaded archive — \`scry web\` will need a clone."
+    fi
+  else
+    note "could not download the scry_web package — \`scry web\` will need a repo clone or \`pip install 'scry[web]'\`."
+  fi
+  rm -rf "$tmpd"
+}
+
 install_web_deps
+install_web_package
 
 printf '\n\033[32m✓ installed\033[0m %s\n' "$("${INSTALL_DIR%/}/scry" --version 2>/dev/null || echo scry)"
 
@@ -125,4 +162,4 @@ fi
 printf '\nNext: run \033[1mscry --check\033[0m to verify your model CLIs are logged in.\n'
 printf 'For the API-key providers, set \033[1mDEEPSEEK_API_KEY\033[0m / \033[1mGLM_API_KEY\033[0m in \033[1m~/.config/scry/.env\033[0m (see .env.example).\n'
 printf 'In Claude Code, run \033[1m/scry <prompt>\033[0m to consult the panel, or \033[1m/scry-plan <request>\033[0m to plan.\n'
-printf 'Local web UI: run \033[1mscry web\033[0m from a repo clone (or \033[1mpip install -e \047.[web]\047\033[0m) to launch the sleek browser UI.\n'
+printf 'Local web UI: just run \033[1mscry web\033[0m to launch the sleek browser UI (no clone needed).\n'

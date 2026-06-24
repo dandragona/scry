@@ -98,7 +98,11 @@ mkdir -p ~/.local/bin
 install -m 755 scry ~/.local/bin/scry          # 755 so the interpreter can read it
 install -m 755 scry-deepseek ~/.local/bin/      # only needed for the DeepSeek provider
 install -m 755 scry-glm ~/.local/bin/           # only needed for the GLM (Z.ai) provider
+cp -R scry_web ~/.local/bin/                     # only needed for the `scry web` UI
 ```
+
+(The web UI is the only multi-file piece — copy the `scry_web/` package next to the
+binary, or just use the one-line installer, which does it for you.)
 
 > Avoid `sudo`-installing into `/usr/local/bin`: a root-owned scry then needs `sudo` to update,
 > and (installed mode 711) can even be unreadable by your user. Keep it user-owned.
@@ -113,17 +117,24 @@ scry --check    # pre-flight: are those CLIs installed + logged in?
 ### Updating
 
 ```sh
-scry update     # fetch the latest single-file build and swap it in place
+scry update     # the one command that keeps your whole install current
 ```
 
-`scry update` downloads the newest `scry` from GitHub, verifies it's complete and
-valid (length, entry point, and that it compiles), and **atomically** replaces your
-installed copy — keeping it executable and forcing it world-readable (so an older,
-broken root-owned install self-heals). It won't install a truncated download or an
-older version (pass `--force` to downgrade). For a user-owned install (the default)
-no `sudo` is needed; if scry lives in a system directory it prints the exact elevated
-command. Honors `SCRY_REPO` / `SCRY_REF` (shared with the installer) plus
-`SCRY_UPDATE_URL` — a full single-file URL override for the self-update only.
+**`scry update` is the canonical way to update — you never need to reinstall.** It
+downloads the newest `scry` from GitHub, verifies it's complete and valid (length,
+entry point, and that it compiles), and **atomically** replaces your installed copy —
+keeping it executable and forcing it world-readable (so an older, broken root-owned
+install self-heals). It won't install a truncated download or an older version (pass
+`--force` to downgrade). For a user-owned install (the default) no `sudo` is needed;
+if scry lives in a system directory it prints the exact elevated command.
+
+It then **refreshes the rest of the install in lockstep** (best-effort, from one repo
+tarball): the API-key adapters (`scry-deepseek`, `scry-glm`), the web UI package
+(`scry_web/`), and the `/scry` + `/scry-plan` Claude skills — but only the ones you
+already have, so a pure-CLI install stays lean. Honors `SCRY_REPO` / `SCRY_REF` (shared
+with the installer), `SCRY_UPDATE_URL` (a full single-file URL override for the core
+self-update), and `SCRY_WEB_TARBALL` (the source archive for the rest). A symlinked dev
+checkout is left alone — update it with `git pull`.
 
 `scry init` is optional — `scry` runs with built-in defaults — but it's the fastest way to
 compose a panel from the subscriptions you actually have (Kimi included).
@@ -287,8 +298,12 @@ What you get:
 - **Promote to project** — turn a scratchpad session into a real, **CLI-openable** scry project
   (new dir + `git init` + `scry.config.json`), carrying its history and artifacts with it.
 
-**Install.** The UI's only third-party deps are FastAPI + uvicorn (the core CLI stays
-stdlib-only, zero-dependency). `install.sh` installs them by default; otherwise:
+**Install.** Nothing extra to do — **`scry web` comes with the standard install**. The
+one-line installer vendors the `scry_web/` package next to the binary and installs its
+only third-party deps (FastAPI + uvicorn; the core CLI stays stdlib-only,
+zero-dependency), and `scry update` keeps both current. So after `install.sh` you just
+run `scry web` from anywhere. If you ever need to add the deps by hand (e.g. you set
+`SCRY_NO_WEB=1`):
 
 ```sh
 pip install 'scry[web]'          # or, from a clone:  pip install -e '.[web]'

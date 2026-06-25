@@ -140,8 +140,11 @@ class Store:
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT * FROM conversations WHERE location_id=? "
-                "ORDER BY updated_at DESC", (location_id,)).fetchall()
+                "SELECT c.*, "
+                "(SELECT COUNT(*) FROM messages m WHERE m.conversation_id=c.id) "
+                "AS message_count "
+                "FROM conversations c WHERE c.location_id=? "
+                "ORDER BY c.updated_at DESC", (location_id,)).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()

@@ -14,13 +14,21 @@
   <body>
     <div id="app">
       <aside id="sidebar"></aside>
+      <div id="nav-backdrop" class="nav-backdrop" hidden></div>
       <main id="main">
+        <button
+          id="nav-toggle"
+          class="nav-toggle"
+          aria-label="Toggle navigation"
+          aria-expanded="false"
+          aria-controls="sidebar"
+        >☰</button>
         <div id="banner" class="banner"></div>
         <section id="thread" class="thread"></section>
         <footer id="composer" class="composer">
           <div id="pending-atts" class="pending-atts"></div>
           <div class="composer-row">
-            <div id="cap-picker" class="cap-picker"></div>
+            <div id="cap-picker" class="cap-picker" role="group" aria-label="Capability"></div>
             <div class="composer-spacer"></div>
             <button id="adv-toggle" class="btn ghost small" title="Advanced options">⚙ Options</button>
           </div>
@@ -56,6 +64,9 @@
             </label>
             <label>Timeout (s)
               <input id="opt-timeout" type="number" min="0" placeholder="default" />
+            </label>
+            <label>Max plan rounds
+              <input id="opt-max-rounds" type="number" min="1" placeholder="auto" />
             </label>
           </div>
           <div class="composer-input-row">

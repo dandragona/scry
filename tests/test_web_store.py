@@ -76,6 +76,19 @@ class StoreSchemaTest(unittest.TestCase):
         self.assertEqual(len(self.s.list_messages(c1["id"])), 1)
         self.assertEqual(len(self.s.list_messages(c2["id"])), 1)
 
+    def test_list_conversations_includes_message_count(self):
+        # The web UI uses message_count to reuse an empty conversation instead of
+        # minting a fresh blank one on every load (avoids "Untitled" pile-up).
+        self.s.upsert_location({"id": "L", "type": "contextless", "name": "n",
+                                "db_path": self.db})
+        empty = self.s.create_conversation("L", "empty")
+        full = self.s.create_conversation("L", "full")
+        self.s.add_message(full["id"], "user", "hi")
+        self.s.add_message(full["id"], "assistant", "hey")
+        by_id = {c["id"]: c for c in self.s.list_conversations("L")}
+        self.assertEqual(by_id[empty["id"]]["message_count"], 0)
+        self.assertEqual(by_id[full["id"]]["message_count"], 2)
+
     def test_attachment_roundtrip(self):
         self.s.upsert_location({"id": "L", "type": "contextless", "name": "n",
                                 "db_path": self.db})

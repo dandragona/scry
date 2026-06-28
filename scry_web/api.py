@@ -111,8 +111,8 @@ def add_routes(app, appstate) -> None:
         content = (body.get("content") or "").strip()
         if not content:
             raise HTTPException(400, "content is required")
-        capability = body.get("capability") or "scry"
-        if capability not in ("scry", "plan", "research"):
+        capability = body.get("capability") or "ask"
+        if capability not in ("ask", "plan"):
             raise HTTPException(400, f"unknown capability: {capability}")
         run = R.start(conv, loc, capability, content, body.get("options") or {},
                       body.get("attachment_ids") or [])

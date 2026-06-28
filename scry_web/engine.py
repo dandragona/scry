@@ -159,22 +159,11 @@ def _fake_result(prompt: str, mode: str) -> dict:
     }
 
 
-def run_scry_sync(cfg: dict, prompt: str, options: dict | None = None,
-                  cwd: str | None = None) -> dict:
-    """One-shot scry fusion/synthesize run, in-process. Returns the full result dict."""
-    if fake_enabled():
-        return _fake_result(prompt, "fusion")
-    scry = load_scry()
-    mode = (options or {}).get("mode") or cfg.get("mode", "fusion")
-    settings, cli = _apply_options(cfg, options)
-    return asyncio.run(scry.scry_run(cfg, prompt, mode, settings,
-                                     lambda _m: None, cli_overrides=cli, cwd=cwd))
-
-
 def run_research_sync(cfg: dict, prompt: str, options: dict | None = None,
                       cwd: str | None = None) -> dict:
-    """A web-on deep-research run: a fusion run with web tools forced on for every
-    phase and a research-report framing wrapped around the prompt. Tagged mode=research."""
+    """The "ask" engine: a web-on deep-research run — a fusion run (internal plumbing)
+    with web tools forced on for every phase and a research-report framing wrapped
+    around the prompt. Tagged mode=research."""
     if fake_enabled():
         r = _fake_result(prompt, "research")
         return r
@@ -251,10 +240,11 @@ def _fake_plan_step(request, resume, payload, out, no_out, out_dir=None) -> dict
 # --------------------------------------------------------------------------- #
 # Provider readiness — a non-billing probe mirroring `scry --check`, no paid calls.
 # --------------------------------------------------------------------------- #
-def provider_readiness(cfg: dict, mode: str = "fusion") -> dict:
+def provider_readiness(cfg: dict) -> dict:
     """Probe each configured provider CLI (installed? logged in?) WITHOUT any paid
     model call — reuses scry's resolve_command + _probe. Returns a structured report
-    the UI surfaces so missing keys show up before a run instead of failing mid-run."""
+    the UI surfaces so missing keys show up before a run instead of failing mid-run.
+    Always includes the judge provider (every run is a fusion run with a judge round)."""
     if fake_enabled():
         return {"ready": True, "providers": [
             {"name": "claude", "ok": True, "installed": True, "detail": "fake ok"}],
@@ -262,8 +252,7 @@ def provider_readiness(cfg: dict, mode: str = "fusion") -> dict:
     scry = load_scry()
     providers = cfg.get("providers", {})
     used: list = [m["provider"] for m in cfg.get("panel", [])]
-    if mode == "fusion":
-        used.append(cfg.get("judge", {}).get("provider"))
+    used.append(cfg.get("judge", {}).get("provider"))
     used.append(cfg.get("aggregator", {}).get("provider"))
     seen: list = []
     for p in used:

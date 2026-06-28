@@ -3,9 +3,8 @@ import { renderMarkdown } from "./markdown.js";
 import { toast, confirmDialog, promptDialog } from "./ui.js";
 
 const CAPABILITIES = [
-  { id: "scry", label: "Scry", hint: "multi-model fan-out + fused answer" },
+  { id: "ask", label: "Ask", hint: "multi-model deep-research answer" },
   { id: "plan", label: "Plan", hint: "interactive clarifying interview → plan" },
-  { id: "research", label: "Research", hint: "web-on deep research report" },
 ];
 
 const state = {
@@ -16,8 +15,7 @@ const state = {
   convList: [], // sibling conversations in the active location (for the picker)
   pendingAttachments: [],
   options: {
-    capability: "scry",
-    mode: "fusion",
+    capability: "ask",
     web_tools: null,
     effort: "",
     max_tool_calls: "",
@@ -381,8 +379,8 @@ function renderThread() {
 function emptyState() {
   return `<div class="empty">
     <h2>Ask the whole panel.</h2>
-    <p>Pick a mode below — <b>Scry</b> for a fused multi-model answer,
-    <b>Plan</b> for an interactive planning interview, <b>Research</b> for a web-on report.</p>
+    <p>Pick a verb below — <b>Ask</b> for a fused, web-grounded multi-model answer,
+    <b>Plan</b> for an interactive planning interview.</p>
   </div>`;
 }
 
@@ -406,7 +404,7 @@ function assistantBlock(m, run) {
 }
 
 function capLabel(cap) {
-  return { scry: "Scry", plan: "Plan", research: "Research" }[cap] || "Assistant";
+  return { ask: "Ask", plan: "Plan" }[cap] || "Assistant";
 }
 
 // --------------------------------------------------------------------------- //
@@ -683,7 +681,6 @@ function wireComposer() {
   $("#file-input").addEventListener("change", onAttach);
 
   // advanced fields
-  bindAdv("opt-mode", "mode");
   bindAdv("opt-web", "web_tools", true);
   bindAdv("opt-effort", "effort");
   bindAdv("opt-tool-calls", "max_tool_calls");
@@ -694,58 +691,29 @@ function wireComposer() {
   applyCapabilityUI(state.options.capability);
 }
 
-// Keep the composer's options + placeholder honest about what each mode uses:
-// Mode (fusion/synthesize) only affects Scry; Research always runs web-on
-// (the engine forces it); Max plan rounds only applies to the Plan interview.
+// Keep the composer's options + placeholder honest about what each verb uses:
+// effort / web tools / timeout apply to both Ask and Plan; the Max plan rounds knob
+// only applies to the Plan interview, so it's hidden (not greyed) for Ask.
 function applyCapabilityUI(cap) {
   const ta = $("#composer-input");
   const placeholders = {
-    scry: "Ask the panel…  (⌘/Ctrl + Enter to send)",
+    ask: "Ask the panel…  (⌘/Ctrl + Enter to send)",
     plan: "Describe what you want to plan…  (⌘/Ctrl + Enter to send)",
-    research: "What should the panel research?  (⌘/Ctrl + Enter to send)",
   };
   if (placeholders[cap]) ta.placeholder = placeholders[cap];
 
-  setOptEnabled("opt-mode", cap === "scry", cap === "scry" ? "" : "scry only");
-
   const web = document.getElementById("opt-web");
   if (web) {
-    if (cap === "research") {
-      web.value = "on";
-      setOptEnabled("opt-web", false, "forced on for research");
-    } else {
-      web.value =
-        state.options.web_tools === true
-          ? "on"
-          : state.options.web_tools === false
-          ? "off"
-          : "";
-      setOptEnabled("opt-web", true, "");
-    }
+    web.value =
+      state.options.web_tools === true
+        ? "on"
+        : state.options.web_tools === false
+        ? "off"
+        : "";
   }
 
   const roundsLabel = document.getElementById("opt-max-rounds")?.closest("label");
   if (roundsLabel) roundsLabel.style.display = cap === "plan" ? "" : "none";
-}
-
-function setOptEnabled(id, enabled, note = "") {
-  const ctl = document.getElementById(id);
-  if (!ctl) return;
-  ctl.disabled = !enabled;
-  const label = ctl.closest("label");
-  if (!label) return;
-  label.classList.toggle("disabled", !enabled);
-  let hint = label.querySelector(".opt-note");
-  if (note) {
-    if (!hint) {
-      hint = document.createElement("span");
-      hint.className = "opt-note";
-      label.appendChild(hint);
-    }
-    hint.textContent = note;
-  } else if (hint) {
-    hint.remove();
-  }
 }
 
 function bindAdv(id, key, tri) {
@@ -779,7 +747,7 @@ function renderPending() {
 }
 
 function collectOptions() {
-  const o = { mode: state.options.mode };
+  const o = {};
   if (state.options.web_tools !== null) o.web_tools = state.options.web_tools;
   for (const k of ["effort", "max_tool_calls", "max_output_tokens", "timeout", "max_rounds"]) {
     const v = state.options[k];

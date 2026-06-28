@@ -21,12 +21,11 @@ class AppState:
 
     def status(self) -> dict:
         cfg = self.config()
-        readiness = engine.provider_readiness(cfg, cfg.get("mode", "fusion"))
+        readiness = engine.provider_readiness(cfg)
         return {
             "has_config": engine.has_config_file(self.config_path),
             "ready": readiness["ready"],
             "providers": readiness["providers"],
             "panel": readiness["panel"],
-            "mode": cfg.get("mode", "fusion"),
             "fake_engine": engine.fake_enabled(),
         }

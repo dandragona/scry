@@ -4,8 +4,8 @@ engine call is dispatched through ``asyncio.to_thread`` (the engine owns its own
 event loop) and gated by a small concurrency semaphore so concurrent full-panel
 fan-outs don't pile up.
 
-Run statuses: ``running | questions | ready | done | error``. One-shot scry/research
-runs go running→done; plan runs walk running→questions→…→ready→done, reusing one
+Run statuses: ``running | questions | ready | done | error``. One-shot ask runs go
+running→done; plan runs walk running→questions→…→ready→done, reusing one
 ``engine_run_id`` across every interview step (scry's resume checkpoint).
 
 In-flight runs live only in memory (loss-on-disconnect is acceptable for v1, no
@@ -70,7 +70,7 @@ class RunManager:
         self._tasks[run_id] = task
         return store.get_run(run_id)
 
-    # -- one-shot scry / research ------------------------------------------ #
+    # -- one-shot ask ------------------------------------------------------ #
     async def _run_chat(self, run_id, conversation, location, capability, request,
                         prompt, options) -> None:
         store = self.app.locations.store_for(location)
@@ -78,8 +78,8 @@ class RunManager:
         cwd = location.get("root_path")  # None for contextless (scry scrubs a temp cwd)
         try:
             async with self._sema():
-                fn = engine.run_research_sync if capability == "research" else engine.run_scry_sync
-                result = await asyncio.to_thread(fn, cfg, prompt, options, cwd)
+                result = await asyncio.to_thread(
+                    engine.run_research_sync, cfg, prompt, options, cwd)
         except Exception as e:  # noqa: BLE001 — AllPanelsFailed or anything else
             store.update_run(run_id, status="error", error=str(e))
             store.add_message(conversation["id"], "assistant",
@@ -88,11 +88,7 @@ class RunManager:
         final = result.get("final") or ""
         # Name the artifact after the topic (cheap title call), not the run id.
         title = await asyncio.to_thread(engine.topic_slug, cfg, request, cwd)
-        if capability == "research":
-            ap = artifacts.write_research(location, conversation["id"], run_id,
-                                          request, final, title=title)
-        else:
-            ap = artifacts.write_chat(location, conversation["id"], run_id,
+        ap = artifacts.write_research(location, conversation["id"], run_id,
                                       request, final, title=title)
         store.update_run(run_id, status="done", final=final,
                          responses=result.get("responses"),

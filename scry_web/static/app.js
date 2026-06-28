@@ -38,10 +38,34 @@ const esc = (s) =>
 // Boot
 // --------------------------------------------------------------------------- //
 async function init() {
-  wireComposer();
-  await refreshStatus();
-  await refreshLocations();
-  await newConversation("contextless");
+  try {
+    wireComposer();
+    await refreshStatus();
+    await refreshLocations();
+    await newConversation("contextless");
+  } catch (e) {
+    fatalError(e);
+  }
+}
+
+// Render a visible fatal-error state instead of a blank dark screen when boot
+// (or a later unhandled rejection) fails — e.g. the scry server isn't reachable.
+function fatalError(e) {
+  const msg = (e && e.message) || String(e || "unknown error");
+  const thread = $("#thread");
+  if (thread) {
+    thread.innerHTML = `<div class="messages"><div class="empty">
+      <h2>Couldn't reach the scry server</h2>
+      <p>Is it running? Start it with <code>scry web</code> in your terminal,
+      then reload this page.</p>
+      <p class="error">${esc(msg)}</p>
+    </div></div>`;
+  }
+  const banner = $("#banner");
+  if (banner) {
+    banner.style.display = "block";
+    banner.innerHTML = `⚠ Couldn't reach the scry server — is it running? <code>${esc(msg)}</code>`;
+  }
 }
 
 async function refreshStatus() {
@@ -426,7 +450,13 @@ async function submitAnswers(runId, done) {
     });
     payload.answers = answers;
   }
-  if (node) node.innerHTML = `<div class="working"><span class="spinner"></span> thinking…</div>`;
+  if (node) {
+    // Drop the data-run marker so the poll loop no longer treats this as the
+    // live, must-preserve questions UI — the next poll re-renders fresh state
+    // (a new round of questions, or the drafting spinner).
+    node.removeAttribute("data-run");
+    node.innerHTML = `<div class="working"><span class="spinner"></span> thinking…</div>`;
+  }
   await api.answerRun(runId, payload);
   startPolling(runId);
 }
@@ -454,6 +484,10 @@ function startPolling(runId) {
     if (["done", "error"].includes(run.status)) {
       stopPolling(runId);
       await loadConversation(state.conv.conversation.id);
+    } else if (run.status === "questions" && $(`.questions[data-run="${run.id}"]`)) {
+      // Questions are already on screen and don't change while we wait for
+      // answers — re-rendering would wipe the user's in-progress inputs/focus.
+      // Skip the re-render so typing survives across polls.
     } else {
       renderThread();
     }
@@ -564,21 +598,31 @@ async function sendMessage() {
   if (state.status && !state.status.ready && !state.status.fake_engine) {
     if (!confirm("The panel isn't reporting ready. Send anyway?")) return;
   }
-  ta.value = "";
+  // Capture what we're sending and clear the UI optimistically, but keep a copy
+  // so a transient send failure doesn't eat a long composed prompt/attachments.
+  const sentAttachments = state.pendingAttachments;
   const payload = {
     capability: state.options.capability,
     content,
     options: collectOptions(),
-    attachment_ids: state.pendingAttachments.map((a) => a.id),
+    attachment_ids: sentAttachments.map((a) => a.id),
   };
+  ta.value = "";
   state.pendingAttachments = [];
   renderPending();
+  ta.disabled = true;
   try {
     const r = await api.postMessage(state.conv.conversation.id, payload);
     await loadConversation(state.conv.conversation.id);
     startPolling(r.run.id);
   } catch (e) {
+    // Restore the user's input + attachments so nothing is lost.
+    ta.value = content;
+    state.pendingAttachments = sentAttachments;
+    renderPending();
     alert("Send failed: " + e.message);
+  } finally {
+    ta.disabled = false;
   }
 }
 
@@ -624,5 +668,10 @@ function renderStatusBanner() {
     ? `⚠ Panel not ready: ${esc(missing || "providers unavailable")}. Run <code>scry --check</code>.`
     : `⚠ No scry config found. Run <code>scry init</code> in your terminal first, then reload.`;
 }
+
+// Surface otherwise-silent async failures visibly instead of a blank screen.
+window.addEventListener("unhandledrejection", (e) => {
+  fatalError(e && e.reason);
+});
 
 window.addEventListener("DOMContentLoaded", init);

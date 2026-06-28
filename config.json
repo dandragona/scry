@@ -4,7 +4,7 @@
   "mode": "research",
 
   "settings": {
-    "_note": "Global default Fusion knobs; each pipeline phase can override them in the `phases` block below. web_tools enables web_search+web_fetch (the panel/judge default; synthesis is web-off via phases, mirroring OpenRouter Fusion). timeout is the per-call timeout in seconds (the default for every phase; `scry plan`'s final draft and research rounds raise it via phases.final/phases.research). effort/max_output_tokens/max_tool_calls applied only where a CLI supports them (max_tool_calls null = uncapped by default; set N to cap claude's --max-turns). save_history writes each run to ~/.scry for `scry last`/`scry log` (override per-run with --no-save); it is global, not per-phase. temperature has no CLI equivalent and is intentionally absent. Each provider may also declare its own top-tier `effort` default (claude: max, codex: xhigh, deepseek: max, glm: max) — all phases inherit it; an explicit --effort flag or phases[stage].effort override still wins.",
+    "_note": "Global default Fusion knobs; each pipeline phase can override them in the `phases` block below. web_tools enables web_search+web_fetch on the panelist phases only (panel/research); the judge and synthesis are pinned web-off via phases, so the heavy web wall-clock stays with the panel. timeout is the per-call timeout in seconds (the default for every phase; `scry plan`'s final draft and research rounds raise it via phases.final/phases.research). effort/max_output_tokens/max_tool_calls applied only where a CLI supports them (max_tool_calls null = uncapped by default; set N to cap claude's --max-turns). save_history writes each run to ~/.scry for `scry last`/`scry log` (override per-run with --no-save); it is global, not per-phase. temperature has no CLI equivalent and is intentionally absent. Each provider may also declare its own top-tier `effort` default (claude: max, codex: xhigh, deepseek: max, glm: max) — all phases inherit it; an explicit --effort flag or phases[stage].effort override still wins.",
     "web_tools": true,
     "max_tool_calls": null,
     "effort": null,
@@ -14,9 +14,9 @@
   },
 
   "phases": {
-    "_note": "Per-phase overrides of the settings above. Each stage inherits every global setting and overrides only what it lists. Resolution per call (later wins): settings -> phases[phase] -> the `final` overlay (plan draft only) -> CLI flags. Stages: panel/judge/synthesis (a fusion run), interview (plan/research clarifying rounds), final (the plan's deep draft), and the Deep Research stages brief/research/reflect (the default `scry`). Overridable: web_tools, max_tool_calls, timeout, effort, max_output_tokens. e.g. to run the judge web-off with fewer turns: \"judge\": {\"web_tools\": false, \"max_tool_calls\": 4}.",
+    "_note": "Per-phase overrides of the settings above. Each stage inherits every global setting and overrides only what it lists. Resolution per call (later wins): settings -> phases[phase] -> the `final` overlay (plan draft only) -> CLI flags. Stages: panel/judge/synthesis (a fusion run), interview (plan/research clarifying rounds), final (the plan's deep draft), and the Deep Research stages brief/research/reflect (the default `scry`). Overridable: web_tools, max_tool_calls, timeout, effort, max_output_tokens. The judge defaults web-off (only panelists do web); to opt it back in for a fusion run: \"judge\": {\"web_tools\": true}.",
     "panel": {},
-    "judge": {},
+    "judge": {"web_tools": false},
     "synthesis": {"web_tools": false},
     "interview": {"web_tools": false},
     "final": {"timeout": 2100},
@@ -121,6 +121,7 @@
       "no_web": true,
       "check": {
         "verifies_auth": false,
+        "requires_env": "DEEPSEEK_API_KEY",
         "note": "the one API-key provider — set DEEPSEEK_API_KEY; knowledge-only (no web)",
         "install": "ships with scry as ./scry-deepseek; export DEEPSEEK_API_KEY"
       },
@@ -170,6 +171,7 @@
       "prompt": "stdin",
       "check": {
         "verifies_auth": false,
+        "requires_env": "GLM_API_KEY",
         "note": "API-key provider — set GLM_API_KEY; has built-in web search (--web)",
         "install": "ships with scry as ./scry-glm; export GLM_API_KEY"
       },

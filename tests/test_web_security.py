@@ -48,6 +48,17 @@ class WebSecurityTest(unittest.TestCase):
         r = self.c.get("/api/status", headers={"host": "evil.example.com"})
         self.assertEqual(r.status_code, 403)
 
+    def test_empty_host_rejected(self):
+        # A missing/empty Host header is the canonical DNS-rebinding case — it must
+        # NOT bypass the guard.
+        r = self.c.get("/api/status", headers={"host": ""})
+        self.assertEqual(r.status_code, 403)
+
+    def test_empty_host_rejected_on_state_changing_endpoint(self):
+        r = self.c.post("/api/conversations", json={"title": "x"},
+                        headers={"host": ""})
+        self.assertEqual(r.status_code, 403)
+
     def test_foreign_host_with_port_rejected(self):
         r = self.c.get("/api/status", headers={"host": "attacker.test:8765"})
         self.assertEqual(r.status_code, 403)

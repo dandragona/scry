@@ -124,6 +124,21 @@ class TestDryRun(unittest.TestCase):
         self.assertIn("--disallowedTools", claude_proposer)
         self.assertNotIn("--allowedTools", claude_proposer)
 
+    # ---- research mode previews the REFLECT stage (web off), not JUDGE ---- #
+    def test_research_reflect_preview_is_web_off(self):
+        # In research mode the per-round judge IS the REFLECT stage, which runs
+        # web-OFF (config: reflect.web_tools=false). The preview must label it REFLECT
+        # (not JUDGE) so a user running --dry-run to estimate the default mode isn't
+        # misled. (Both judges are web-off now — only the panelist phases use web.)
+        out = _dry(self.cfg, "research", self.cfg["settings"])
+        judge_lines = _lines(out, "JUDGE") + _lines(out, "REFLECT")
+        self.assertEqual(len(judge_lines), 1, out)
+        line = judge_lines[0]
+        self.assertNotIn("--allowedTools", line)     # web off
+        self.assertIn("--disallowedTools", line)
+        # And it's labeled as the reflect stage, not "JUDGE".
+        self.assertTrue(line.startswith("REFLECT"), line)
+
     # ---- aggregator always runs with web off ---------------------------- #
     def test_aggregator_always_web_off(self):
         # Even in fusion + web_tools=True, the AGGREGATOR (final synthesis) is

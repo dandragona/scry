@@ -178,6 +178,15 @@ def claude_plan(rounds_before_ready: int = 1, questions=None,
         # panel proposer must receive PLAN_DRAFTER_SYSTEM).
         "if os.environ.get('SCRY_SYSDUMP'):\n"
         "    open(os.environ['SCRY_SYSDUMP'], 'a').write(sp + '\\n===SCRY-SYS-END===\\n')\n"
+        # SCRY_CWDDUMP (test hook): one '<stage>\\t<cwd>' line per invocation, so a test
+        # can assert exactly which stage ran in which cwd (panel drafts in the repo, the
+        # tool-free synth/judge in a scrubbed throwaway dir). Stage is keyed off the same
+        # disjoint system-prompt anchors the role branches below use.
+        "stage = ('dedup' if 'deduplicating' in sp else 'synth' if 'plan drafts' in sp"
+        "  else 'interview' if 'scope a task' in sp else 'judge' if 'impartial judge' in sp"
+        "  else 'title' if 'name files' in sp else 'draft')\n"
+        "if os.environ.get('SCRY_CWDDUMP'):\n"
+        "    open(os.environ['SCRY_CWDDUMP'], 'a').write(stage + '\\t' + os.getcwd() + '\\n')\n"
         "data = sys.stdin.read()\n"
         f"qs = {questions!r}\n"
         f"need = {int(rounds_before_ready)}\n"

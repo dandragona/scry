@@ -74,6 +74,45 @@ All notable changes to this project are documented here. The format follows
 ## [0.3.0] — 2026-06-24
 
 ### Added
+- **`scry --check` now verifies API-key providers.** DeepSeek and GLM ship in the default panel but
+  need a key; `--check` now reports them as **not ready** (✗) when `DEEPSEEK_API_KEY` / `GLM_API_KEY`
+  is unset, and surfaces their setup note, instead of green-lighting a panel that would silently drop
+  voices on the first run.
+- **Degraded-run notice.** When some proposers fail, fusion prints `⚠ fused from N/M proposers — …`
+  (even under `--quiet`) so a one-model answer is never silently presented as "fused".
+- **Provider-name validation.** An unknown `--panel` / `--judge` / `--aggregator` provider now fails
+  fast with an argparse error (exit 2) instead of running a paid panel and then crashing (or silently
+  dropping the unknown member). A research-only flag (`--depth`/`--no-clarify`/`--repo`) used in
+  another mode now warns instead of doing nothing.
+- **`commands:` section in `--help`** listing `plan` / `web` / `init` / `update` / `--check` / `last`
+  / `log`, so the headline subcommands are discoverable.
+
+### Changed
+- **Cross-vendor API-key isolation.** Each managed provider key is now stripped from every *other*
+  provider's child process, so an exported `DEEPSEEK_API_KEY` / `GLM_API_KEY` is no longer handed to
+  the claude/codex/agy/kimi CLIs.
+- **Child processes run in their own session/process-group** and are killed on Ctrl-C / timeout /
+  cancellation, so an interrupted run can no longer orphan a still-billing model CLI.
+- **`--dry-run` for research mode** now previews the per-round **REFLECT** stage (web-off, as it
+  actually runs) instead of the web-on fusion `JUDGE`, and notes the gap-driven loop's round range.
+
+### Fixed
+- **No more raw tracebacks at the user.** A top-level guard turns an unexpected failure (e.g. a flaky
+  aggregator after a multi-minute paid run) or a Ctrl-C during the research/plan clarify interview
+  into a clean `scry: …` message / exit 130 (set `SCRY_DEBUG=1` for the full traceback).
+- **Tolerant JSON recovery** for chatty judge output: handles prose with its own braces, multiple
+  objects, a stray trailing brace, trailing commas, and braces inside string values (the consensus
+  map no longer silently disappears on a slightly-malformed judge reply).
+- **Web UI:** plan-mode answer inputs no longer wiped by the status poller; a failed send restores the
+  typed message + attachments; a boot/API failure shows a visible error instead of a blank page; the
+  Markdown renderer now handles tables and indented code blocks; empty-Host requests are rejected by
+  the web server's guard; opening an unwritable project path returns a clean 400 instead of a 500.
+- **Installer** validates the downloaded payload (entry-point marker + `py_compile`) before the atomic
+  swap, so a truncated/corrupt download can't install a broken `scry`.
+
+## [0.3.0] — 2026-06-24
+
+### Added
 - **Deep Research mode — the new default `scry`.** Bare `scry "<prompt>"` is now an iterative,
   gap-driven deep-research pipeline over the whole heterogeneous panel instead of a single-shot
   fusion: **clarify** (an interactive clarifying-question interview, reusing `scry plan`'s machinery)

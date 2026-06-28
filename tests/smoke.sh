@@ -112,7 +112,10 @@ fi
 pass "--check exit non-zero when a provider binary is missing"
 
 # --- dry-run constructs the expected pipeline (no spend) ---------------------
-OUT="$(PATH="$STUB:$PATH" "$SCRY" --dry-run "smoke test prompt")"
+# Force fusion: the default mode is now Deep Research, whose per-round judge previews
+# as REFLECT (web-off), not JUDGE — so pin --mode fusion to exercise the 3-stage
+# panel/JUDGE/synthesis pipeline these assertions describe.
+OUT="$(PATH="$STUB:$PATH" "$SCRY" --mode fusion --dry-run "smoke test prompt")"
 echo "$OUT" | grep -q "^PROPOSER"   || fail "dry-run missing PROPOSER lines"
 echo "$OUT" | grep -q "^JUDGE"      || fail "dry-run missing JUDGE line"
 echo "$OUT" | grep -q "^AGGREGATOR" || fail "dry-run missing AGGREGATOR line"

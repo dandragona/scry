@@ -4154,20 +4154,26 @@ def _detect_repo(start: str | None = None) -> str | None:
 
 def _resolve_research_repo(args, rcfg: dict) -> str | None:
     """Resolve the read-only repo cwd for research, or None for the external-world
-    default. --no-repo forces None; --repo PATH / bare --repo (cwd) overrides config;
-    otherwise research.repo_context "auto" auto-detects a surrounding git repo."""
-    if getattr(args, "no_repo", False):
+    default. `--repo none` forces None; `--repo <PATH>` ('.' = cwd) grounds in that repo;
+    `--repo auto` (the default) follows research.repo_context (auto-detect a surrounding
+    git repo)."""
+    repo = getattr(args, "repo", "auto")
+    if repo == "none":
         return None
-    repo = getattr(args, "repo", None)
-    if repo:
-        path = os.getcwd() if repo is True else str(repo)
+    if repo != "auto":
+        path = os.getcwd() if repo == "." else str(repo)
         if os.path.isdir(path):
             return path
         sys.stderr.write(f"scry: --repo path is not a directory: {path}; "
                          "researching the external world instead\n")
         return None
-    if rcfg.get("repo_context") == "auto":
+    rc = rcfg.get("repo_context", "auto")
+    if rc == "auto":
         return _detect_repo()
+    if rc is True or rc == ".":
+        return os.getcwd()
+    if isinstance(rc, str) and os.path.isdir(rc):
+        return rc
     return None
 
 
@@ -4273,7 +4279,7 @@ def do_research(cfg: dict, prompt: str, settings: dict, args, cli: dict) -> int:
             result = asyncio.run(research_run(
                 cfg, prompt, settings, log, stream_final, stop_orb,
                 cwd=repo_cwd, cli_overrides=cli, answers=answers,
-                depth_override=args.depth, cap_override=args.max_rounds,
+                depth_override=args.depth, cap_override=args.hard_cap,
                 seed_meters=clarify_meters))
         finally:
             stop_orb()
@@ -4292,8 +4298,8 @@ def do_research(cfg: dict, prompt: str, settings: dict, args, cli: dict) -> int:
     # Consensus map from the final round's referee analysis (auto on an interactive
     # stderr; --map forces, --no-map suppresses; never under --json/--quiet).
     analysis = result.get("analysis")
-    if (analysis and not args.no_map and not as_json and not quiet
-            and (args.map or sys.stderr.isatty())):
+    if (analysis and args.map != "off" and not as_json and not quiet
+            and (args.map == "on" or sys.stderr.isatty())):
         rendered = render_consensus_map(analysis, color_enabled(sys.stderr))
         if rendered:
             print(rendered + "\n", file=sys.stderr)
@@ -4345,14 +4351,20 @@ def main() -> int:
             return do_history("last", [])
         if argv[0] == "log" and (not rest or (len(rest) == 1 and rest[0].isdigit())):
             return do_history("log", rest)
+    # Progressive help: `scry --help` lists the everyday flags; `scry --help-all` also
+    # reveals the advanced / verb-specific ones. H() hides a flag from the short help
+    # WITHOUT disabling it (it still parses and works).
+    full_help = "--help-all" in argv
+    def H(text):
+        return text if full_help else argparse.SUPPRESS
     ap = argparse.ArgumentParser(
         prog="scry",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description="Local OpenRouter-Fusion-style multi-model synthesis over "
-                    "headless subscription CLIs.",
+        description="Local multi-model deep-research synthesis over headless "
+                    "subscription CLIs.",
         epilog=(
             "commands:\n"
-            '  scry "<question>"        deep-research answer (the default mode)\n'
+            '  scry "<question>"        deep-research answer (the default)\n'
             '  scry plan "<request>"    interactive, panel-driven planning -> a '
             "repo-grounded implementation plan\n"
             "  scry web                 launch the local web UI for the full panel\n"
@@ -4362,7 +4374,9 @@ def main() -> int:
             "  scry --check             verify your model CLIs are installed & logged "
             "in (no paid calls)\n"
             "  scry last | scry log [N] re-print the last answer / list recent runs "
-            "(stored in ~/.scry)\n"))
+            "(stored in ~/.scry)\n"
+            "\n  scry --help-all          show every flag (incl. advanced / web / init "
+            "/ update options)\n"))
     ap.add_argument("prompt", nargs="*",
                     help="the prompt (or pipe it via stdin); or a command word: "
                          "'plan' (interactive planning), 'web' (local web UI), "
@@ -4373,74 +4387,77 @@ def main() -> int:
                          "research.max_rounds)")
     ap.add_argument("--no-clarify", action="store_true",
                     help="(research) skip the clarifying-question interview")
-    ap.add_argument("--repo", nargs="?", const=True, default=None, metavar="PATH",
-                    help="(research) ground the panel in a read-only repo (no arg = the "
-                         "current directory); overrides research.repo_context")
+    ap.add_argument("--repo", default="auto", metavar="{auto,none,PATH}",
+                    help="(plan/research) repo grounding: 'auto' (default — detect a "
+                         "surrounding repo), 'none' (external world, scrubbed cwd), or a "
+                         "PATH ('.' = the current directory)")
     ap.add_argument("--no-web", action="store_true",
                     help="disable web_search/web_fetch on the panel (judge/synthesis are already web-off)")
     ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"],
                     help="reasoning effort for every stage (where the CLI supports it)")
     ap.add_argument("--max-tool-calls", type=int, metavar="N",
-                    help="cap web tool-call iterations (Fusion default 8; claude only)")
+                    help=H("cap web tool-call iterations (claude only)"))
     ap.add_argument("--max-output-tokens", type=int, metavar="N",
-                    help="cap output tokens (claude only)")
+                    help=H("cap output tokens (claude only)"))
     ap.add_argument("--timeout", type=int, metavar="SECONDS",
-                    help="per-call timeout for every phase (overrides settings.timeout)")
+                    help=H("per-call timeout for every phase (overrides settings.timeout)"))
     ap.add_argument("--json", action="store_true", dest="as_json",
                     help="emit JSON: {status, responses, analysis, final}")
     ap.add_argument("--show-proposers", action="store_true",
-                    help="print each proposer's raw answer to stderr")
+                    help=H("print each proposer's raw answer to stderr"))
     ap.add_argument("--dry-run", action="store_true",
                     help="print the commands that would run, then exit")
     ap.add_argument("--check", action="store_true",
                     help="verify each provider CLI is installed + logged in, then exit (no paid calls)")
     ap.add_argument("--no-anim", action="store_true",
-                    help="disable the scrying-orb animation (reduced motion); plain progress lines instead")
-    ap.add_argument("--map", action="store_true",
-                    help="always print the consensus map (judge's agreement/contradiction summary)")
-    ap.add_argument("--no-map", action="store_true",
-                    help="never print the consensus map")
+                    help=H("disable the scrying-orb animation (reduced motion); plain progress lines instead"))
+    ap.add_argument("--map", choices=["auto", "on", "off"], default="auto",
+                    help="consensus map (the judge's agreement/contradiction summary): "
+                         "'auto' (on when stderr is a terminal), 'on', or 'off'")
     ap.add_argument("--config", help="path to a config.json")
     ap.add_argument("--out", help="(with `init`) path to write the generated config "
                     "(default: the global ~/.config/scry/config.json, or ./scry.config.json with --local); "
                     "(with `plan`) path to write the Markdown plan (default: "
-                    "./scry-plan-<id>.md); a <plan>.diagnostics.md is written alongside it")
-    ap.add_argument("--no-out", action="store_true",
-                    help="(with `plan`) don't write the plan or diagnostics files; print to stdout only")
+                    "./scry-plan-<id>.md; '-' = print to stdout only, write no files); a "
+                    "<plan>.diagnostics.md is written alongside it")
     ap.add_argument("--step", action="store_true",
-                    help="(with `plan`) headless one-round JSON interview step for orchestration "
-                         "(the /scry-plan skill); reads an answers payload on stdin, prints one "
-                         "JSON envelope, never prompts")
+                    help=H("(with `plan`) headless one-round JSON interview step for orchestration "
+                           "(the /scry-plan skill); reads an answers payload on stdin, prints one "
+                           "JSON envelope, never prompts"))
     ap.add_argument("--local", action="store_true",
-                    help="(with `init`) write a project-local ./scry.config.json in the current "
-                         "directory instead of the global ~/.config/scry/config.json")
-    ap.add_argument("--force", action="store_true",
-                    help="(with `init`) overwrite an existing config without prompting; "
-                         "(with `update`) install even if the remote build is older")
+                    help=H("(with `init`) write a project-local ./scry.config.json in the current "
+                           "directory instead of the global ~/.config/scry/config.json"))
+    ap.add_argument("--overwrite", action="store_true",
+                    help=H("(with `init`) overwrite an existing config without prompting"))
+    ap.add_argument("--allow-downgrade", action="store_true",
+                    help=H("(with `update`) install even if the remote build is older"))
     ap.add_argument("--panel",
                     help="override panel, e.g. 'claude:opus,codex,kimi'")
     ap.add_argument("--aggregator", help="override aggregator, e.g. 'claude:opus'")
     ap.add_argument("--judge", help="override judge, e.g. 'claude:opus'")
     ap.add_argument("--quiet", action="store_true", help="suppress progress on stderr")
     ap.add_argument("--no-save", action="store_true",
-                    help="don't record this run to ~/.scry (scry last / scry log)")
-    ap.add_argument("--max-rounds", type=int, metavar="N",
-                    help="(plan) cap interactive clarifying rounds (default 5); "
-                         "(research) hard cap on research rounds (overrides research.hard_cap)")
+                    help=H("don't record this run to ~/.scry (scry last / scry log)"))
+    ap.add_argument("--interview-rounds", type=int, metavar="N",
+                    help="(plan) cap the interactive clarifying-interview rounds (default 5)")
+    ap.add_argument("--hard-cap", type=int, metavar="N",
+                    help="(research) absolute ceiling on research rounds (overrides research.hard_cap)")
     ap.add_argument("--resume", nargs="?", const=True, default=False,
-                    help="(with `plan`) continue the most recent unfinished plan session (or --resume=<id>)")
+                    help=H("(with `plan`) continue the most recent unfinished plan session (or --resume=<id>)"))
     ap.add_argument("--list", action="store_true",
-                    help="(with `plan`) list unfinished, resumable plan sessions")
-    ap.add_argument("--no-repo", action="store_true",
-                    help="(plan/research) don't give the panel read-only access to the current "
-                         "directory (forces the external-world, scrubbed-cwd default)")
+                    help=H("(with `plan`) list unfinished, resumable plan sessions"))
     ap.add_argument("--host", dest="web_host", default="127.0.0.1", metavar="HOST",
-                    help="(with `web`) interface to bind the local web UI to (default 127.0.0.1, localhost-only)")
+                    help=H("(with `web`) interface to bind the local web UI to (default 127.0.0.1, localhost-only)"))
     ap.add_argument("--port", dest="web_port", type=int, default=8765, metavar="PORT",
-                    help="(with `web`) port for the local web UI (default 8765)")
+                    help=H("(with `web`) port for the local web UI (default 8765)"))
     ap.add_argument("--no-open", action="store_true",
-                    help="(with `web`) don't auto-open a browser tab when the server starts")
+                    help=H("(with `web`) don't auto-open a browser tab when the server starts"))
+    ap.add_argument("--help-all", action="store_true",
+                    help="show every flag, including the advanced / verb-specific ones")
     ap.add_argument("--version", action="version", version=f"scry {VERSION}")
+    if full_help:
+        ap.print_help()
+        return 0
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -4450,11 +4467,11 @@ def main() -> int:
 
     # `scry init` — interactive setup wizard; ignores the run-time overrides below.
     if args.prompt[:1] == ["init"]:
-        return do_init(cfg, args.out, args.force, args.no_anim, args.local)
+        return do_init(cfg, args.out, args.overwrite, args.no_anim, args.local)
 
     # `scry update` — fetch the latest single-file build and swap it in place.
     if args.prompt[:1] == ["update"]:
-        return do_update(args.force)
+        return do_update(args.allow_downgrade)
 
     # `scry web` — launch the local, single-user web UI for the full panel (one-shot
     # scry, interactive plan, web-on deep research) outside any project directory. The
@@ -4499,21 +4516,23 @@ def main() -> int:
         if args.max_output_tokens is not None:
             psettings["max_output_tokens"] = args.max_output_tokens
         plan_settings = dict(cfg.get("plan", {}))
-        if args.max_rounds is not None:
-            plan_settings["max_rounds"] = args.max_rounds
-        repo_context = (not args.no_repo) and bool(plan_settings.get("repo_context", True))
+        if args.interview_rounds is not None:
+            plan_settings["max_rounds"] = args.interview_rounds
+        repo_context = (args.repo != "none") and bool(plan_settings.get("repo_context", True))
+        stdout_only = (args.out == "-")          # `--out -` => print only, write no files
+        out_path = None if stdout_only else args.out
         request = " ".join(args.prompt[1:]).strip()
         if not request and not args.resume:
             ap.error('plan needs a request, e.g.  scry plan "build X"')
         if args.step:
             return do_plan_step(cfg, request, psettings, plan_settings,
                                 resume=args.resume, no_save=args.no_save,
-                                repo_context=repo_context, out=args.out,
-                                no_out=args.no_out, cli_overrides=cli)
-        return do_plan(cfg, request, psettings, plan_settings, out=args.out,
+                                repo_context=repo_context, out=out_path,
+                                no_out=stdout_only, cli_overrides=cli)
+        return do_plan(cfg, request, psettings, plan_settings, out=out_path,
                        no_anim=args.no_anim, quiet=args.quiet,
                        as_json=args.as_json, no_save=args.no_save, resume=args.resume,
-                       repo_context=repo_context, no_out=args.no_out, cli_overrides=cli)
+                       repo_context=repo_context, no_out=stdout_only, cli_overrides=cli)
 
     if args.panel:
         cfg["panel"] = parse_panel(args.panel)

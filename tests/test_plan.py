@@ -450,7 +450,7 @@ class PlanSubprocessTest(unittest.TestCase):
     def test_max_rounds_cap(self):
         rec, _ = self._json_run(
             h.claude_plan(rounds_before_ready=99, unique_each_round=True),
-            "a\na\na\na\n", "--max-rounds", "2")
+            "a\na\na\na\n", "--interview-rounds", "2")
         self.assertEqual(rec["rounds"], 2)
         self.assertIn("## Context", rec["final"])
 
@@ -459,7 +459,7 @@ class PlanSubprocessTest(unittest.TestCase):
         # never "ready", but the same two questions every round -> round 2 yields
         # no NEW questions (asked_keys filters them) -> stop and synthesize.
         rec, _ = self._json_run(
-            h.claude_plan(rounds_before_ready=99), "linux\nok\n", "--max-rounds", "9")
+            h.claude_plan(rounds_before_ready=99), "linux\nok\n", "--interview-rounds", "9")
         self.assertEqual(rec["rounds"], 2)
         self.assertEqual(len(rec["transcript"]), 2)
 
@@ -528,7 +528,7 @@ class PlanSubprocessTest(unittest.TestCase):
         d = tempfile.mkdtemp(prefix="scry-plan-noout-")
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         env = self._env(h.claude_plan(rounds_before_ready=1))
-        cp = h.run_scry(self._args("--no-out"), input="linux\nok\n", env=env, cwd=d)
+        cp = h.run_scry(self._args("--out", "-"), input="linux\nok\n", env=env, cwd=d)
         self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
         self.assertEqual([f for f in os.listdir(d) if f.startswith("scry-plan-")], [])
         self.assertIn("## Context", cp.stdout)            # still printed to stdout
@@ -622,7 +622,7 @@ class PlanSubprocessTest(unittest.TestCase):
         dump = os.path.join(d, "cwd.txt")
         env = self._env(h.claude_plan(rounds_before_ready=1, report_cwd=True),
                         SCRY_CWDDUMP=dump)
-        cp = h.run_scry(self._args("--no-repo"), input="ok\n", env=env, cwd=repo)
+        cp = h.run_scry(self._args("--repo", "none"), input="ok\n", env=env, cwd=repo)
         self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
         self.assertNotIn(real, cp.stdout)              # final draft did NOT see the repo
         by_stage = self._cwd_by_stage(dump)
@@ -664,7 +664,7 @@ class ResumeSubprocessTest(unittest.TestCase):
         return env
 
     def _base(self, *extra):
-        return ["plan", *extra, "--no-anim", "--no-repo",
+        return ["plan", *extra, "--no-anim", "--repo", "none",
                 "--panel", "claude:opus", "--judge", "claude:opus",
                 "--aggregator", "claude:opus"]
 
@@ -845,7 +845,7 @@ class PlanListSubprocessTest(unittest.TestCase):
         self.assertEqual(cp.returncode, 0, cp.stderr)
         rid = json.loads(cp.stdout)[0]["id"]
         self.assertEqual(rid, "1700000000888")          # bare id, no `.json`
-        resumed = h.run_scry(["plan", f"--resume={rid}", "--no-anim", "--no-repo",
+        resumed = h.run_scry(["plan", f"--resume={rid}", "--no-anim", "--repo", "none",
                               "--panel", "claude:opus", "--judge", "claude:opus",
                               "--aggregator", "claude:opus"], env=env)
         self.assertEqual(resumed.returncode, 0, resumed.stderr + resumed.stdout)

@@ -53,7 +53,7 @@ class InitWizardSubprocessTest(unittest.TestCase):
     def _run(self, stdin, out=None, force=False):
         args = ["init", "--no-anim", "--out", out or self.out]
         if force:
-            args.append("--force")
+            args.append("--overwrite")
         return h.run_scry(args, input=stdin, env=self.env, timeout=60)
 
     def _load_out(self, path=None):

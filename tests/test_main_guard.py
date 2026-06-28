@@ -69,5 +69,21 @@ class TestHelpDiscoverability(unittest.TestCase):
         self.assertIn("--check", r.stdout)
 
 
+class TestProgressiveHelp(unittest.TestCase):
+    def test_short_help_hides_advanced_and_verb_only_flags(self):
+        short = h.run_scry(["--help"]).stdout
+        self.assertIn("scry plan", short)        # the two verbs stay discoverable
+        self.assertIn("--check", short)
+        self.assertIn("--help-all", short)       # pointer to the full list
+        self.assertNotIn("--step", short)        # internal protocol flag
+        self.assertNotIn("--host", short)        # web-only flag
+
+    def test_help_all_reveals_every_flag(self):
+        full = h.run_scry(["--help-all"]).stdout
+        for flag in ("--step", "--host", "--port", "--no-open", "--resume",
+                     "--allow-downgrade", "--overwrite"):
+            self.assertIn(flag, full, flag)
+
+
 if __name__ == "__main__":
     unittest.main()

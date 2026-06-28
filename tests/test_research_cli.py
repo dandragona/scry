@@ -79,12 +79,12 @@ class TestResearchCliJson(unittest.TestCase):
 
 class TestResearchCliFlags(unittest.TestCase):
     def test_max_rounds_flag_caps_rounds(self):
-        # Persistent gaps would otherwise run to hard_cap; --max-rounds overrides it.
+        # Persistent gaps would otherwise run to hard_cap; --hard-cap overrides it.
         cfg = _write_cfg(CLAUDE_ONLY, {"max_rounds": 1, "hard_cap": 5, "clarify": False})
         with h.StubBins({"claude": h.claude_research(gaps=True, needs_web=True)},
                         patch_path=False) as sb:
             r = h.run_scry(["--json", "--no-anim", "--config", cfg,
-                            "--max-rounds", "2", "what is X?"], input="", env=sb.env)
+                            "--hard-cap", "2", "what is X?"], input="", env=sb.env)
         self.assertEqual(r.returncode, 0, f"stderr={r.stderr!r}\nstdout={r.stdout!r}")
         data = json.loads(r.stdout)
         self.assertEqual(len(data["rounds"]), 2)

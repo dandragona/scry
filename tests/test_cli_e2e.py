@@ -129,7 +129,7 @@ class TestCliResearch(unittest.TestCase):
 class TestConsensusMapGate(unittest.TestCase):
     def test_map_flag_prints_consensus_map(self):
         with h.StubBins({"claude": _research_stub(analysis_fields=_ANALYSIS)}) as stub:
-            r = h.run_scry(["--map", "--no-anim", "--config", _cfg(), "hi"], env=stub.env)
+            r = h.run_scry(["--map", "on", "--no-anim", "--config", _cfg(), "hi"], env=stub.env)
         self.assertEqual(r.returncode, 0, f"stderr={r.stderr!r}\nstdout={r.stdout!r}")
         self.assertIn("consensus map", r.stderr)
         self.assertIn("THE RESEARCH ANSWER", r.stdout)
@@ -150,6 +150,30 @@ class TestQuiet(unittest.TestCase):
         self.assertNotIn("▸", r.stderr)               # no stage progress
         self.assertNotIn("research round", r.stderr)
         self.assertIn("THE RESEARCH ANSWER", r.stdout)
+
+
+class TestFlagCleanup(unittest.TestCase):
+    def test_removed_flags_error(self):
+        # The old boolean/overloaded flags are gone with no aliases (a hard break).
+        for flag in ("--no-map", "--no-repo", "--no-out", "--max-rounds", "--force"):
+            r = h.run_scry([flag, "x"], input="")
+            self.assertEqual(r.returncode, 2, f"{flag}: {r.stdout!r} {r.stderr!r}")
+            self.assertIn("unrecognized arguments", r.stderr.lower())
+
+    def test_map_tristate_parses(self):
+        for v in ("auto", "on", "off"):
+            r = h.run_scry(["--map", v, "--check", "--config", _cfg()], input="")
+            self.assertNotEqual(r.returncode, 2, f"--map {v} should parse: {r.stderr!r}")
+
+    def test_map_invalid_value_is_error(self):
+        r = h.run_scry(["--map", "bogus", "x"], input="")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_new_verb_flags_parse(self):
+        # --repo tri-state and --hard-cap (research) parse without an argparse error.
+        r = h.run_scry(["--repo", "none", "--hard-cap", "2", "--check",
+                        "--config", _cfg()], input="")
+        self.assertNotEqual(r.returncode, 2, r.stderr)
 
 
 if __name__ == "__main__":

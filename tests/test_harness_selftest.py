@@ -49,8 +49,10 @@ class TestHarness(unittest.TestCase):
             "scry-deepseek": h.version_stub("scry-deepseek 0.0.0"),
             "scry-glm": h.version_stub("scry-glm 0.0.0"),
         }):
-            with contextlib.redirect_stdout(io.StringIO()):
-                rc = scry.do_check(cfg, "fusion", cfg["settings"])
+            # deepseek/glm are API-key providers; --check now verifies their keys.
+            with h.env_vars(DEEPSEEK_API_KEY="x", GLM_API_KEY="x"):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = scry.do_check(cfg, "fusion", cfg["settings"])
         self.assertEqual(rc, 0)
 
     def test_call_cli_through_stub(self):

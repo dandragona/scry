@@ -18,12 +18,19 @@ sys.path.insert(0, os.path.dirname(__file__))
 import _harness as h  # noqa: E402
 
 
-def _run_check(cfg, mode, settings):
+def _run_check(cfg, mode, settings, with_keys=True):
     """Call do_check with NO_COLOR forced (plain output) and stdout captured.
-    Returns (rc, stdout_text)."""
+    Returns (rc, stdout_text).
+
+    The default panel includes the API-key providers deepseek + glm, whose
+    pre-flight now checks for their key env vars; with_keys=True sets dummy keys so
+    tests that exercise *other* behavior still reach the ready path, while
+    with_keys=False unsets them to exercise the missing-key path."""
     scry = h.load_scry()
     buf = io.StringIO()
-    with h.env_vars(NO_COLOR="1", FORCE_COLOR=None):
+    keys = ({"DEEPSEEK_API_KEY": "sk-test", "GLM_API_KEY": "glm-test"} if with_keys
+            else {"DEEPSEEK_API_KEY": None, "GLM_API_KEY": None})
+    with h.env_vars(NO_COLOR="1", FORCE_COLOR=None, **keys):
         with contextlib.redirect_stdout(buf):
             rc = scry.do_check(cfg, mode, settings)
     return rc, buf.getvalue()
@@ -270,6 +277,46 @@ class TestDoCheck(unittest.TestCase):
         agy_lines = [ln for ln in out.splitlines() if "agy" in ln and "✓" in ln]
         self.assertTrue(agy_lines, out)
         self.assertTrue(any("installed (agy)" in ln for ln in agy_lines), out)
+
+    # -- API-key provider with no key set -> not ready (honest pre-flight) --- #
+    def test_api_key_provider_without_key_not_ready(self):
+        # deepseek + glm have no probe but DO require an API key. With the key
+        # missing, --check must report them as not-ready (✗) and fail the run,
+        # rather than green-lighting a panel that will silently drop those voices.
+        stubs = {
+            "claude": h.version_stub("claude x"),
+            "codex": h.version_stub("Logged in as a@b"),
+            "agy": h.version_stub("agy x"),
+            "kimi-cli": h.version_stub("kimi x"),
+            "scry-deepseek": h.version_stub("scry-deepseek x"),
+            "scry-glm": h.version_stub("scry-glm x"),
+        }
+        with h.StubBins(stubs):
+            rc, out = _run_check(self.cfg, "fusion", self.settings, with_keys=False)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("DEEPSEEK_API_KEY", out)
+        self.assertIn("GLM_API_KEY", out)
+        self.assertIn("not set", out)
+        self.assertIn("not ready", out)
+
+    # -- API-key provider WITH key set -> ready, and its note is shown ------- #
+    def test_api_key_provider_with_key_ready_and_note(self):
+        stubs = {
+            "claude": h.version_stub("claude x"),
+            "codex": h.version_stub("Logged in as a@b"),
+            "agy": h.version_stub("agy x"),
+            "kimi-cli": h.version_stub("kimi x"),
+            "scry-deepseek": h.version_stub("scry-deepseek x"),
+            "scry-glm": h.version_stub("scry-glm x"),
+        }
+        with h.StubBins(stubs):
+            rc, out = _run_check(self.cfg, "fusion", self.settings, with_keys=True)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ready", out)
+        # The deepseek/glm note (dead before this fix — only printed in the probe
+        # branch) is now surfaced under the no-probe ✓ line too.
+        ds_note = self.cfg["providers"]["deepseek"]["check"]["note"]
+        self.assertIn(ds_note, out)
 
     # -- web_tools=True surfaces the web-search billing note ---------------- #
     def test_web_billing_note(self):

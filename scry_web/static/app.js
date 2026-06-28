@@ -46,11 +46,35 @@ const esc = (s) =>
 // Boot
 // --------------------------------------------------------------------------- //
 async function init() {
-  wireComposer();
-  wireMobileNav();
-  await refreshStatus();
-  await refreshLocations();
-  await openScratchOrNew("contextless");
+  try {
+    wireComposer();
+    wireMobileNav();
+    await refreshStatus();
+    await refreshLocations();
+    await openScratchOrNew("contextless");
+  } catch (e) {
+    fatalError(e);
+  }
+}
+
+// Render a visible fatal-error state instead of a blank dark screen when boot
+// (or a later unhandled rejection) fails — e.g. the scry server isn't reachable.
+function fatalError(e) {
+  const msg = (e && e.message) || String(e || "unknown error");
+  const thread = $("#thread");
+  if (thread) {
+    thread.innerHTML = `<div class="messages"><div class="empty">
+      <h2>Couldn't reach the scry server</h2>
+      <p>Is it running? Start it with <code>scry web</code> in your terminal,
+      then reload this page.</p>
+      <p class="error">${esc(msg)}</p>
+    </div></div>`;
+  }
+  const banner = $("#banner");
+  if (banner) {
+    banner.style.display = "block";
+    banner.innerHTML = `⚠ Couldn't reach the scry server — is it running? <code>${esc(msg)}</code>`;
+  }
 }
 
 // --------------------------------------------------------------------------- //
@@ -842,5 +866,10 @@ function renderStatusBanner() {
     ? `⚠ Panel not ready: ${esc(missing || "providers unavailable")}. Run <code>scry --check</code>.`
     : `⚠ No scry config found. Run <code>scry init</code> in your terminal first, then reload.`;
 }
+
+// Surface otherwise-silent async failures visibly instead of a blank screen.
+window.addEventListener("unhandledrejection", (e) => {
+  fatalError(e && e.reason);
+});
 
 window.addEventListener("DOMContentLoaded", init);

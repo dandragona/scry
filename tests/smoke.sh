@@ -83,8 +83,12 @@ printf '#!/bin/sh\necho "agy 0.0.0-stub"\n'                 > "$STUB/agy"
 printf '#!/bin/sh\necho "kimi-cli 0.0.0-stub"\n'            > "$STUB/kimi-cli"
 chmod +x "$STUB/claude" "$STUB/codex" "$STUB/agy" "$STUB/kimi-cli"
 
-# --- doctor passes when all CLIs are present ---------------------------------
-PATH="$STUB:$PATH" "$SCRY" --check >/dev/null 2>&1 || fail "--check should pass with stubs present"
+# --- doctor passes when all CLIs are present (and key-providers are configured) ---
+# The default panel includes the API-key providers (deepseek, glm); --check now hard-fails
+# when their key env vars are missing (no more "false-green" with unconfigured providers),
+# so set stub keys here to exercise the all-present, all-configured -> ready path.
+DEEPSEEK_API_KEY=smoke-stub GLM_API_KEY=smoke-stub PATH="$STUB:$PATH" "$SCRY" --check \
+  >/dev/null 2>&1 || fail "--check should pass with stubs present"
 pass "--check exit 0 with all providers present"
 
 # --- doctor probes kimi too when it's in the panel ---------------------------
@@ -108,7 +112,10 @@ fi
 pass "--check exit non-zero when a provider binary is missing"
 
 # --- dry-run constructs the expected pipeline (no spend) ---------------------
-OUT="$(PATH="$STUB:$PATH" "$SCRY" --dry-run "smoke test prompt")"
+# Force fusion: the default mode is now Deep Research, whose per-round judge previews
+# as REFLECT (web-off), not JUDGE — so pin --mode fusion to exercise the 3-stage
+# panel/JUDGE/synthesis pipeline these assertions describe.
+OUT="$(PATH="$STUB:$PATH" "$SCRY" --mode fusion --dry-run "smoke test prompt")"
 echo "$OUT" | grep -q "^PROPOSER"   || fail "dry-run missing PROPOSER lines"
 echo "$OUT" | grep -q "^JUDGE"      || fail "dry-run missing JUDGE line"
 echo "$OUT" | grep -q "^AGGREGATOR" || fail "dry-run missing AGGREGATOR line"

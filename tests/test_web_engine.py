@@ -130,6 +130,14 @@ class EnginePlanLoopTest(unittest.TestCase):
         self.assertEqual(e3["status"], "done")
         self.assertTrue(e3["final"])
         self.assertTrue(Path(out).exists(), "plan file should be written to out")
+        # The finalized step carries true end-to-end elapsed (spanning every prior --step
+        # round, restored from the checkpoint), and the interview meters from round 1 keep
+        # their round tag across the separate step processes — both were missing before.
+        cost = e3["cost"]
+        self.assertIn("wall_seconds", cost)
+        self.assertTrue(any(m.get("stage") == "interview" and m.get("round") == 1
+                            for m in cost["by_stage"]),
+                        "round-1 interview meters should survive (tagged) into finalize")
 
 
 if __name__ == "__main__":

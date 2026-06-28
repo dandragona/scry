@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """scry — local "Fusion" over headless AI CLIs.
 
-Replicates OpenRouter's Fusion (a Mixture-of-Agents pipeline) without OpenRouter
-and without API keys: it fans a prompt out to several models running through their
-*subscription* CLIs in headless mode, then deliberates + synthesizes one answer.
+Replicates OpenRouter's Fusion (a Mixture-of-Agents pipeline) without OpenRouter:
+it fans a prompt out to several models running through the *subscription* CLIs you
+already pay for, in headless mode, then deliberates + synthesizes one answer.
 
 Pipeline (mirrors OpenRouter Fusion):
   1. PANEL      — every configured proposer answers the prompt in parallel, each
@@ -19,7 +19,7 @@ Pipeline (mirrors OpenRouter Fusion):
 The only intended differences from real Fusion are (a) which models sit in the
 panel and (b) the internal prompts (OpenRouter's are unpublished; we use the
 canonical MoA aggregator + a reconstructed judge). Everything else — parallel
-panel, web tools on panel+judge, judge=outer model, max_tool_calls cap, reasoning
+panel, web tools on the panel, judge=outer model, max_tool_calls cap, reasoning
 effort, the 5-field analysis, and the {status, analysis, responses} output shape —
 is matched. See README.md.
 
@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import copy
 import http.client
 import json
@@ -37,6 +38,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -268,7 +270,7 @@ RESEARCH_SYNTH_SYSTEM = (
 DEFAULT_TIMEOUT = 420
 
 DEFAULT_SETTINGS = {
-    "web_tools": True,         # web_search+web_fetch on panel + judge (Fusion behavior)
+    "web_tools": True,         # web_search+web_fetch on the panel (judge/synthesis: off)
     "max_tool_calls": None,    # uncapped by default; set N to cap claude's web tool-call turns (--max-turns)
     "effort": None,            # reasoning effort; None = each CLI's own default
     "max_output_tokens": None,  # applied where supported (claude only)
@@ -284,7 +286,11 @@ DEFAULT_SETTINGS = {
 # web_tools, max_tool_calls, timeout, effort, max_output_tokens (save_history is global).
 DEFAULT_PHASES = {
     "panel": {},                                       # proposers — inherit globals (web on)
-    "judge": {},                                       # judge — inherit globals (web on)
+    # judge/synthesis only REASON over the panel's already-gathered output, so they run
+    # web-OFF: the heavy web/tool wall-clock belongs to the panelist phases (panel,
+    # research) alone. Web-off also keeps the judge's strict-JSON analysis from devolving
+    # into the agentic prose/tool ramble that web-on triggers (see the reflect note below).
+    "judge": {"web_tools": False},                     # compares panel responses: no web
     "synthesis": {"web_tools": False},                 # fused answer: no web (Fusion behavior)
     "interview": {"web_tools": False},                 # plan/research clarifying rounds: web off
     "final": {"timeout": 2100},                        # plan deep draft: longer ceiling (turns uncapped)
@@ -411,6 +417,7 @@ DEFAULT_CONFIG = {
             "no_web": True,                       # knowledge-only: the raw API has no web search
             "check": {
                 "verifies_auth": False,
+                "requires_env": "DEEPSEEK_API_KEY",   # --check fails if this isn't set
                 "note": "an API-key provider — set DEEPSEEK_API_KEY; knowledge-only (no web)",
                 "install": "ships with scry as ./scry-deepseek; export DEEPSEEK_API_KEY",
             },
@@ -478,6 +485,7 @@ DEFAULT_CONFIG = {
             "prompt": "stdin",
             "check": {
                 "verifies_auth": False,
+                "requires_env": "GLM_API_KEY",        # --check fails if this isn't set
                 "note": "API-key provider — set GLM_API_KEY; has built-in web search (--web)",
                 "install": "ships with scry as ./scry-glm; export GLM_API_KEY",
             },
@@ -669,7 +677,7 @@ def render_call(p: dict, model: str, system: str | None, web: bool,
     if system and p.get("system_flag"):
         argv += [p["system_flag"], system]
 
-    # Web tools (Fusion: on for panel + judge, off for synthesis).
+    # Web tools (on for the panelist phases only; judge + synthesis run web-off).
     if web:
         argv += list(caps.get("web_on", []))
         argv += list(caps.get("mutator_disallow", []))
@@ -728,22 +736,62 @@ def extract_json_result(text: str, result_path: str) -> str:
 
 
 def tolerant_json(s: str) -> dict | None:
+    """Recover a JSON object from a chatty/imperfect model reply. Handles fenced
+    code, prose before/after/between the object, a stray brace in commentary, and
+    trailing commas. When several balanced objects appear, the largest valid one
+    wins (the real 5-field judge analysis dwarfs any incidental `{x, y}`)."""
     if not s:
         return None
     s = s.strip()
     if s.startswith("```"):
         s = re.sub(r"^```[a-zA-Z0-9]*\s*", "", s)
         s = re.sub(r"\s*```$", "", s.strip())
-    for candidate in (s, _slice_braces(s)):
-        if not candidate:
+    best, best_len = None, -1
+    for cand in [s, *_json_objects(s)]:
+        if not cand:
             continue
-        try:
-            v = json.loads(candidate)
-            if isinstance(v, dict):
-                return v
-        except ValueError:
+        for variant in (cand, _strip_trailing_commas(cand)):
+            try:
+                v = json.loads(variant)
+            except ValueError:
+                continue
+            if isinstance(v, dict) and len(cand) > best_len:
+                best, best_len = v, len(cand)
+            break
+    return best
+
+
+def _json_objects(s: str) -> list:
+    """Every top-level balanced {...} substring in s, ignoring braces that appear
+    inside JSON strings (so a '}' in a string value can't close the object early)."""
+    out, depth, start = [], 0, -1
+    in_str = esc = False
+    for i, ch in enumerate(s):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
             continue
-    return None
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start != -1:
+                out.append(s[start:i + 1])
+                start = -1
+    return out
+
+
+def _strip_trailing_commas(s: str) -> str:
+    """Drop commas that sit just before a closing } or ] (a common model slip)."""
+    return re.sub(r",(\s*[}\]])", r"\1", s)
 
 
 def _slice_braces(s: str) -> str | None:
@@ -1014,6 +1062,44 @@ def _route_gaps(open_questions: list, panel: list, providers: dict) -> list:
     return tasks
 
 
+def _terminate(proc) -> None:
+    """Best-effort kill of a child started with start_new_session=True. The child is
+    its own process-group leader (pid == pgid), so we SIGKILL the whole group — that
+    reaps any grandchildren the CLI spawned too. Safe to call if it's already gone."""
+    if proc is None or proc.returncode is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            pass
+
+
+def _provider_api_keys(cfg: dict) -> set:
+    """Every credential env var any provider manages: the union of each provider's
+    `env_unset` entries and its `check.requires_env`. Used to strip one vendor's key
+    out of every OTHER vendor's child process."""
+    keys: set = set()
+    for p in cfg.get("providers", {}).values():
+        keys.update(p.get("env_unset", []) or [])
+        req = (p.get("check") or {}).get("requires_env")
+        if req:
+            keys.add(req)
+    return keys
+
+
+def _keys_to_scrub(p: dict, cfg: dict) -> set:
+    """Credential env vars to remove from THIS provider's child: every managed
+    provider key (plus this provider's own declared env_unset) EXCEPT the single key
+    this provider legitimately needs. So an exported DEEPSEEK_API_KEY never reaches
+    claude/codex/agy/kimi, and ANTHROPIC_API_KEY never reaches the API-key adapters."""
+    scrub = _provider_api_keys(cfg) | set(p.get("env_unset", []) or [])
+    scrub.discard((p.get("check") or {}).get("requires_env"))
+    return scrub
+
+
 async def call_cli(cfg: dict, provider_name: str, model: str, system: str | None,
                    user: str, cwd: str, depth: int, web: bool, settings: dict,
                    meta: dict | None = None) -> str:
@@ -1067,32 +1153,40 @@ async def call_cli(cfg: dict, provider_name: str, model: str, system: str | None
             argv = append_prompt_arg(argv, p, user_text)
 
         env = os.environ.copy()
-        for k in p.get("env_unset", []):
+        for k in _keys_to_scrub(p, cfg):   # don't leak one vendor's key to another
             env.pop(k, None)
         env.update(env_over)
         env["SCRY_DEPTH"] = str(depth + 1)  # recursion guard
 
         timeout = _effective_timeout(settings)
         try:
+            # start_new_session=True puts the child in its own process group so a
+            # Ctrl-C/cancel/timeout can kill it (and any grandchildren) explicitly —
+            # otherwise a cancelled run leaves a paid CLI running and billing.
             proc = await asyncio.create_subprocess_exec(
                 *argv, stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                env=env, cwd=cwd,
+                env=env, cwd=cwd, start_new_session=True,
             )
         except FileNotFoundError:
             raise ProviderError(f"command not found: {argv[0]}")
 
         stdin_bytes = b"" if prompt_is_arg else user_text.encode()
-        if timeout is None:               # timeout disabled — run to completion, no kill
-            out, err = await proc.communicate(stdin_bytes)
-        else:
-            try:
+        try:
+            if timeout is None:           # timeout disabled — run to completion
+                out, err = await proc.communicate(stdin_bytes)
+            else:
                 out, err = await asyncio.wait_for(
                     proc.communicate(stdin_bytes), timeout=timeout)
-            except asyncio.TimeoutError:
-                proc.kill()
+        except asyncio.TimeoutError:
+            _terminate(proc)
+            await proc.wait()
+            raise ProviderError(f"timeout after {int(timeout)}s")
+        except BaseException:             # cancelled (Ctrl-C) or any error: never orphan
+            _terminate(proc)
+            with contextlib.suppress(BaseException):
                 await proc.wait()
-                raise ProviderError(f"timeout after {int(timeout)}s")
+            raise
 
         rc = proc.returncode
         err_txt = err.decode(errors="replace").strip()
@@ -1179,7 +1273,7 @@ async def stream_call(cfg: dict, provider_name: str, model: str, system: str | N
     argv[0] = exe
 
     env = os.environ.copy()
-    for k in p.get("env_unset", []):
+    for k in _keys_to_scrub(p, cfg):   # don't leak one vendor's key to another
         env.pop(k, None)
     env.update(env_over)
     env["SCRY_DEPTH"] = str(depth + 1)
@@ -1192,10 +1286,12 @@ async def stream_call(cfg: dict, provider_name: str, model: str, system: str | N
     if not _provider_repo_safe(p):
         iso_cwd = tempfile.mkdtemp(prefix="scry-iso-")
         cwd = iso_cwd
+    proc = None
     try:
+        # Own process group (see call_cli) so a cancel/timeout can't orphan the child.
         proc = await asyncio.create_subprocess_exec(
             *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE, env=env, cwd=cwd)
+            stderr=asyncio.subprocess.PIPE, env=env, cwd=cwd, start_new_session=True)
         try:
             proc.stdin.write(user_text.encode())
             await proc.stdin.drain()
@@ -1232,7 +1328,7 @@ async def stream_call(cfg: dict, provider_name: str, model: str, system: str | N
                     final_text = fin
             await proc.wait()
         except asyncio.TimeoutError:
-            proc.kill()
+            _terminate(proc)
             await proc.wait()
             if not streamed_any:
                 raise ProviderError(f"stream timeout after {int(timeout)}s")
@@ -1242,6 +1338,9 @@ async def stream_call(cfg: dict, provider_name: str, model: str, system: str | N
             raise ProviderError("empty stream output")
         return {"text": text, "streamed": streamed_any, "meta": meta}
     finally:
+        # Kill the child on every non-normal exit (cancel/error); a no-op if it
+        # already exited. Then clean up the throwaway cwd.
+        _terminate(proc)
         if iso_cwd:
             shutil.rmtree(iso_cwd, ignore_errors=True)
 
@@ -1314,7 +1413,8 @@ async def _run_panel(cfg: dict, tasks: list, system: str | None, cwd: str, depth
                 dt = time.time() - t0
                 log(f"  ✓ {label} ({dt:.0f}s)")
                 meters.append({"stage": stage, "label": label,
-                               "provider": m["provider"], "ok": True, **cmeta})
+                               "provider": m["provider"], "ok": True,
+                               "seconds": round(dt, 1), **cmeta})
                 return {"label": label, "model": m.get("model", ""), "ok": True,
                         "content": content, "error": None, "seconds": round(dt, 1)}
             except Exception as e:  # noqa: BLE001 — one bad proposer must not abort
@@ -1327,7 +1427,8 @@ async def _run_panel(cfg: dict, tasks: list, system: str | None, cwd: str, depth
                 dt = time.time() - t0
                 log(f"  ✗ {label}: {e}")
                 meters.append({"stage": stage, "label": label,
-                               "provider": m["provider"], "ok": False})
+                               "provider": m["provider"], "ok": False,
+                               "seconds": round(dt, 1), "error": str(e)})
                 return {"label": label, "model": m.get("model", ""), "ok": False,
                         "content": None, "error": str(e), "seconds": round(dt, 1)}
 
@@ -1355,6 +1456,7 @@ async def _run_judge(cfg: dict, judge_system: str, juser: str, cwd: str, depth: 
     hard-failing). Shared by fusion's comparison and research's reflect step."""
     j = cfg["judge"]
     jmeta: dict = {}
+    t0 = time.time()
     try:
         jtext = await call_cli(cfg, j["provider"], j.get("model", ""),
                                judge_system, juser, cwd, depth, web, settings, jmeta)
@@ -1362,12 +1464,14 @@ async def _run_judge(cfg: dict, judge_system: str, juser: str, cwd: str, depth: 
         if analysis is None:
             log("  ! judge output was not valid JSON; synthesizing without it")
         meters.append({"stage": "judge", "label": "judge",
-                       "provider": j["provider"], "ok": True, **jmeta})
+                       "provider": j["provider"], "ok": True,
+                       "seconds": round(time.time() - t0, 1), **jmeta})
         return analysis
     except Exception as e:  # noqa: BLE001
         log(f"  ! judge failed: {e}; synthesizing without analysis")
         meters.append({"stage": "judge", "label": "judge",
-                       "provider": j["provider"], "ok": False})
+                       "provider": j["provider"], "ok": False,
+                       "seconds": round(time.time() - t0, 1), "error": str(e)})
         return None
 
 
@@ -1381,6 +1485,7 @@ async def _run_synth(cfg: dict, aggregator_system: str, auser: str, cwd: str, de
     log("▸ synthesis: writing the fused answer…")
     a = cfg["aggregator"]
     a_prov = a["provider"]
+    t0 = time.time()
     # The stream path renders no web tools, so only stream when synthesis is web-off;
     # if a phase turns synthesis web ON, the buffered path below honors it instead.
     can_stream = (stream_final and not web
@@ -1410,7 +1515,8 @@ async def _run_synth(cfg: dict, aggregator_system: str, auser: str, cwd: str, de
         final = await _buffered()
 
     meters.append({"stage": "synth", "label": "synth",
-                   "provider": a_prov, "ok": True, **ameta})
+                   "provider": a_prov, "ok": True,
+                   "seconds": round(time.time() - t0, 1), **ameta})
     return final, streamed
 
 
@@ -1420,7 +1526,8 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
                    cwd: str | None = None,
                    cli_overrides: dict | None = None,
                    run_overlay: dict | None = None,
-                   panel_system: str | None = None) -> dict:
+                   panel_system: str | None = None,
+                   scrub_fuse_cwd: bool = False) -> dict:
     # The synthesis system prompt defaults to the canonical MoA aggregator; callers
     # (e.g. `scry plan`) may override it to shape the fused output differently.
     aggregator_system = aggregator_system or MOA_AGGREGATOR_SYSTEM
@@ -1432,9 +1539,16 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
     # it after. A caller may pass an existing cwd (e.g. `scry plan --repo`, to let the
     # panel read the codebase); that directory is the user's — NEVER delete it.
     own_cwd = cwd is None
+    depth = _depth_guard()   # before any mkdtemp: a tripped recursion guard raises here,
+                             # outside the try/finally, so allocate temp dirs only after it
     if own_cwd:
         cwd = tempfile.mkdtemp(prefix="scry-run-")
-    depth = _depth_guard()
+    # scrub_fuse_cwd (set by `scry plan`): the PANEL may need the repo (`cwd`), but the
+    # judge + synthesis only fuse the drafts they're handed as text — they need neither
+    # the repo nor any tools. Run them in a fresh throwaway dir so a web-off synth in an
+    # empty cwd makes ZERO tool calls (claude's web-off policy still leaves Read/Grep/Glob,
+    # so without this the "final draft" could wander the repo). Always cleaned up.
+    fuse_cwd = tempfile.mkdtemp(prefix="scry-fuse-") if scrub_fuse_cwd else cwd
     # Resolve each stage's settings from globals + its phase override + (for the plan
     # final draft) the `final` run overlay + explicit CLI flags. web is per-stage now.
     phases = cfg.get("phases", {})
@@ -1464,7 +1578,7 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
             log("▸ judge: comparing responses…")
             juser = (f"User query:\n{prompt}\n\nModel responses:\n{numbered}\n\n"
                      "Return ONLY the JSON object.")
-            analysis = await _run_judge(cfg, JUDGE_SYSTEM, juser, cwd, depth,
+            analysis = await _run_judge(cfg, JUDGE_SYSTEM, juser, fuse_cwd, depth,
                                         judge_web, judge_set, log, meters)
 
         a = cfg["aggregator"]
@@ -1487,7 +1601,7 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
         # Synthesis runs web-off by default (phases.synthesis), matching Fusion. When the
         # caller wants a live answer and the aggregator can stream, type it out token by
         # token; otherwise buffer it (helper handles the fallback if the stream is empty).
-        final, streamed = await _run_synth(cfg, aggregator_system, auser, cwd, depth,
+        final, streamed = await _run_synth(cfg, aggregator_system, auser, fuse_cwd, depth,
                                            synth_web, synth_set, log, meters,
                                            stream_final, on_stream_start)
         cost = summarize_cost(meters, time.time() - run_t0)
@@ -1505,6 +1619,8 @@ async def scry_run(cfg: dict, prompt: str, mode: str, settings: dict, log,
             "cost": cost,
         }
     finally:
+        if scrub_fuse_cwd:                # the throwaway judge/synth dir is always ours
+            shutil.rmtree(fuse_cwd, ignore_errors=True)
         if own_cwd:                       # never delete a caller-provided cwd
             shutil.rmtree(cwd, ignore_errors=True)
 
@@ -1604,9 +1720,10 @@ async def research_run(cfg: dict, prompt: str, settings: dict, log,
     is done by the caller and passed as `answers`; its `seed_meters` fold into the
     cost tally so the interview's calls aren't silently dropped."""
     own_cwd = cwd is None
+    depth = _depth_guard()   # before mkdtemp: a tripped recursion guard raises here,
+                             # outside the try/finally, so don't leak a temp dir
     if own_cwd:
         cwd = tempfile.mkdtemp(prefix="scry-research-")
-    depth = _depth_guard()
     phases = cfg.get("phases", {})
     rcfg = cfg.get("research", {})
     brief_set = _phase_settings(settings, phases, "brief", None, cli_overrides)
@@ -1733,18 +1850,23 @@ def do_dry_run(cfg: dict, mode: str, settings: dict,
                                 "{OUTFILE}", agentfile="{AGENTFILE}")
         argv, note = _dry_prompt(p, argv, "prompt")
         _show("PROPOSER", argv, env, note)
-    # Both fusion and research run a judge (research's is the per-round gap-finder);
-    # synthesize skips it. Research previews one round — the loop re-fans the gaps.
+    # Both fusion and research run a judge; synthesize skips it. Research's judge is the
+    # per-round REFLECT stage (the `reflect` phase); fusion's is the `judge` phase. Both
+    # resolve web-OFF now (only panelists do web) — preview the command that actually runs.
     if mode in ("fusion", "research"):
         j = cfg["judge"]
         p = cfg["providers"][j["provider"]]
-        judge_sys = RESEARCH_JUDGE_SYSTEM if mode == "research" else JUDGE_SYSTEM
+        is_research = mode == "research"
+        judge_sys = RESEARCH_JUDGE_SYSTEM if is_research else JUDGE_SYSTEM
+        jset = (_phase_settings(settings, phases, "reflect", None, cli_overrides)
+                if is_research else judge_set)
+        role = "REFLECT" if is_research else "JUDGE"
         sysv = judge_sys if p.get("system_flag") else None
         argv, env = render_call(p, j.get("model", ""), sysv,
-                                bool(judge_set.get("web_tools")), judge_set,
+                                bool(jset.get("web_tools")), jset,
                                 "{OUTFILE}", agentfile="{AGENTFILE}")
         argv, note = _dry_prompt(p, argv, "query+responses")
-        _show("JUDGE", argv, env, note)
+        _show(role, argv, env, note)
     a = cfg["aggregator"]
     p = cfg["providers"][a["provider"]]
     agg_sys = RESEARCH_SYNTH_SYSTEM if mode == "research" else MOA_AGGREGATOR_SYSTEM
@@ -1754,6 +1876,12 @@ def do_dry_run(cfg: dict, mode: str, settings: dict,
                             "{OUTFILE}", agentfile="{AGENTFILE}")
     argv, note = _dry_prompt(p, argv, "query+responses")
     _show("AGGREGATOR", argv, env, note)
+    if mode == "research":
+        rcfg = cfg.get("research", {})
+        print(f"\n[research] gap-driven loop: {rcfg.get('max_rounds', 3)}–"
+              f"{rcfg.get('hard_cap', 5)} rounds (each = the panel above + one "
+              f"REFLECT), then one AGGREGATOR synthesis. The PROPOSER/REFLECT lines "
+              f"above are previewed once; the loop re-fans the open gaps each round.")
 
 
 # --------------------------------------------------------------------------- #
@@ -2036,7 +2164,7 @@ def do_init(cfg: dict, out: str | None, force: bool, no_anim: bool = False,
             print(c(f"  ! {role} provider '{spec['provider']}' is not configured "
                     f"(choose from: {', '.join(names)})", "31"))
             return 1
-    web = _ask("Enable web search on the panel + judge? (y/n)", "y").lower().startswith("y")
+    web = _ask("Enable web search on the panel? (y/n)", "y").lower().startswith("y")
 
     new_cfg = {
         "mode": "fusion",
@@ -2167,7 +2295,20 @@ def do_check(cfg: dict, mode: str, settings: dict) -> int:
             continue
         probe = chk.get("probe")
         if not probe:
+            # No liveness probe (e.g. the API-key adapters). If the provider needs
+            # an API key, a present binary is NOT "ready" — verify the key is set so
+            # --check can't green-light a panel member that will fail on first run.
+            req = chk.get("requires_env")
+            if req and not os.environ.get(req):
+                print(f"  {c('✗', '31')} {name:<9} {c(req + ' not set', '31')}"
+                      f" — '{binary}' installed but unconfigured")
+                if chk.get("install"):
+                    print(f"      {c('↳ ' + chk['install'], '2')}")
+                hard_fail = True
+                continue
             print(f"  {c('✓', '32')} {name:<9} installed ({binary})")
+            if chk.get("note"):
+                print(f"      {c('↳ ' + chk['note'], '2')}")
             continue
         ok, detail = _probe(probe, p.get("env_unset"), chk.get("expect_code", 0),
                             chk.get("expect_text", ""), chk.get("timeout", 15))
@@ -2885,6 +3026,7 @@ async def gather_questions(cfg: dict, request: str, transcript: list,
     async def ask_one(m: dict) -> dict:
         label = m.get("label", m["provider"])
         cmeta: dict = {}
+        t0 = time.time()
         try:
             txt = await call_cli(cfg, m["provider"], m.get("model", ""),
                                  PLAN_INTERVIEWER_SYSTEM, user, cwd, depth,
@@ -2894,12 +3036,14 @@ async def gather_questions(cfg: dict, request: str, transcript: list,
             ready = bool(obj.get("ready")) and not qs
             log(f"  ✓ {label}: {len(qs)} question(s)" + (" · ready" if ready else ""))
             meters.append({"stage": "interview", "label": label,
-                           "provider": m["provider"], "ok": True, **cmeta})
+                           "provider": m["provider"], "ok": True,
+                           "seconds": round(time.time() - t0, 1), **cmeta})
             return {"ok": True, "ready": ready, "questions": qs}
         except Exception as e:  # noqa: BLE001 — one bad interviewer must not abort
             log(f"  ✗ {label}: {e}")
             meters.append({"stage": "interview", "label": label,
-                           "provider": m["provider"], "ok": False})
+                           "provider": m["provider"], "ok": False,
+                           "seconds": round(time.time() - t0, 1), "error": str(e)})
             return {"ok": False, "ready": False, "questions": []}
 
     results = await asyncio.gather(*(ask_one(m) for m in panel))
@@ -2924,12 +3068,14 @@ async def dedup_questions(cfg: dict, request: str, transcript: list, raw: list,
              + "\n\nNewly proposed clarifying questions (JSON):\n" + payload
              + "\n\nReturn the deduplicated JSON object.")
     jmeta: dict = {}
+    t0 = time.time()
     try:
         txt = await call_cli(cfg, j["provider"], j.get("model", ""),
                              PLAN_QUESTION_JUDGE_SYSTEM, juser, cwd, depth,
                              False, settings, jmeta)  # dedup never needs web
         meters.append({"stage": "dedup", "label": "dedup",
-                       "provider": j["provider"], "ok": True, **jmeta})
+                       "provider": j["provider"], "ok": True,
+                       "seconds": round(time.time() - t0, 1), **jmeta})
         qs = _questions_of(tolerant_json(txt))
         if qs:
             return qs
@@ -2937,7 +3083,8 @@ async def dedup_questions(cfg: dict, request: str, transcript: list, raw: list,
     except Exception as e:  # noqa: BLE001
         log(f"  ! dedup failed: {e}; using raw questions")
         meters.append({"stage": "dedup", "label": "dedup",
-                       "provider": j["provider"], "ok": False})
+                       "provider": j["provider"], "ok": False,
+                       "seconds": round(time.time() - t0, 1), "error": str(e)})
     return _local_dedup(raw)
 
 
@@ -3179,12 +3326,22 @@ def _diag_path(plan_path: str) -> str:
 
 def render_plan_diagnostics(result: dict, cfg: dict, settings: dict,
                             plan_settings: dict, run_id: str) -> str:
-    """A human-readable Markdown diagnostics report written alongside the plan:
-    per-stage model status/cost (so a failed panel member — e.g. an opus draft that
-    hit the turn cap — is visible at a glance), the settings the run used, and the
-    judge's consensus map. Plain Markdown, no ANSI."""
+    """A human-readable Markdown diagnostics report written alongside the plan. Built to
+    answer "where did the time and money go?" at a glance:
+
+      * header — true END-TO-END elapsed (cost.wall_seconds, spanning every interview
+        round + the answer time between them), the final-draft step on its own, and the
+        total cost (flagged as a floor when non-metering providers ran).
+      * bottleneck — the single slowest call and its share of the wall clock.
+      * timeline — per-round interview/dedup timing then the final panel→judge→synth, so
+        a slow round or a dedup that timed out is obvious.
+      * models — every call's status/time/tokens/cost, with the failure reason inline.
+      * settings — each phase's resolved budget + honest per-provider effort.
+      * consensus map — the judge's 5-field analysis. Plain Markdown, no ANSI."""
     cost = result.get("cost") or {}
-    # Per-panel error text + timing live on `responses`, not the cost meters.
+    by_stage = cost.get("by_stage", []) or []
+    # Per-panel error text + draft seconds also live on `responses` (older records, and
+    # the panel-draft timing); meters carry them now too, so prefer the meter, fall back.
     err_by_label = {r.get("model"): r.get("error")
                     for r in result.get("responses", [])
                     if not r.get("ok") and r.get("error")}
@@ -3201,29 +3358,115 @@ def render_plan_diagnostics(result: dict, cfg: dict, settings: dict,
         return x.get("label") or (x.get("provider", "")
                                   + (f":{x['model']}" if x.get("model") else ""))
 
+    def _num(x):
+        return x if isinstance(x, (int, float)) and not isinstance(x, bool) else None
+
+    def _secs(m: dict):
+        s = _num(m.get("seconds"))
+        if s is None and m.get("stage") == "panel":   # panel timing fell on `responses`
+            s = _num(secs_by_label.get(m.get("label")))
+        return s
+
+    def _err(m: dict) -> str:
+        return (m.get("error") or
+                (err_by_label.get(m.get("label")) if not m.get("ok") else "") or "")
+
+    wall = _num(cost.get("wall_seconds"))
+    step = _num(cost.get("seconds"))
+    if wall is not None and wall < 0:    # corrupt/clock-skewed record — don't render it
+        wall = None
+    elapsed = wall if wall is not None else step
+    calls, metered = _num(cost.get("calls")), _num(cost.get("metered_calls"))
+    unmetered = int(calls - metered) if (calls is not None and metered is not None) else 0
+
     lines = ["# scry plan — diagnostics", ""]
     lines.append(f"- **request:** {result.get('prompt', '')}")
     lines.append(f"- **run id:** {run_id}")
     lines.append(f"- **rounds:** {result.get('rounds', '')}")
-    if cost.get("seconds") is not None:
-        lines.append(f"- **elapsed:** {cost['seconds']}s")
-    lines.append(f"- **total cost:** {_money(cost.get('total_usd'))}")
+    if elapsed is not None:
+        lines.append(f"- **elapsed (end-to-end):** {elapsed}s")
+    # The draft step alone is only worth showing when it differs from the end-to-end wall
+    # — i.e. the headless `--step` protocol, where each round is its own process and the
+    # wall clock also covers the answer time between rounds (the old single-number elapsed
+    # silently reported ONLY this draft step, under-counting a 5-round run by ~an hour).
+    if step is not None and wall is not None and abs(step - wall) > 0.05:
+        lines.append(f"- **final-draft step:** {step}s "
+                     "(interview rounds + answer time make up the rest of the wall clock)")
+    lines.append(f"- **total cost:** {_money(cost.get('total_usd'))}"
+                 + (" · Claude-metered only (see metering note)" if unmetered else ""))
     lines.append("")
 
-    # Per-stage model table — every call across the pipeline, status before detail
-    # so a FAILED row jumps out.
+    # Bottleneck — the single slowest call, so a runaway opus draft jumps out.
+    timed = [(m, _secs(m)) for m in by_stage]
+    timed = [(m, s) for m, s in timed if s is not None]
+    if timed:
+        bm, bs = max(timed, key=lambda t: t[1])
+        share = f" — {bs / elapsed * 100:.0f}% of the end-to-end wall" if elapsed else ""
+        lines += ["## bottleneck", "",
+                  f"Slowest single call: **{bm.get('label')}** "
+                  f"({bm.get('stage')}) at **{bs}s**{share}. Panel stages fan out in "
+                  "parallel, so a stage's wall time is its slowest member — not the sum "
+                  "of the rows below.", ""]
+
+    # Timeline — where the wall clock went, round by round. Interview members run in
+    # parallel (wall = slowest), then the dedup; the final draft is panel→judge→synth.
+    tl = []
+    # Sort key tolerates a corrupted checkpoint whose round is a str (or mixed types):
+    # group by (is-non-number, value) so str vs int never get compared directly.
+    rounds = sorted({m.get("round") for m in by_stage if m.get("round")},
+                    key=lambda r: (not isinstance(r, (int, float)) or isinstance(r, bool),
+                                   str(r)))
+    for r in rounds:
+        ivs = [_secs(m) for m in by_stage
+               if m.get("round") == r and m.get("stage") == "interview"]
+        n_iv = sum(1 for m in by_stage
+                   if m.get("round") == r and m.get("stage") == "interview")
+        ivs = [s for s in ivs if s is not None]
+        part = f"interview {n_iv} model(s)" + (f" (slowest {max(ivs)}s)" if ivs else "")
+        ded = next((m for m in by_stage
+                    if m.get("round") == r and m.get("stage") == "dedup"), None)
+        if ded is not None:
+            ds = _secs(ded)
+            part += " + dedup " + (f"{ds}s" if ds is not None else "ran")
+            if not ded.get("ok", True):
+                part += f" — FAILED ({_err(ded) or 'see models table'})"
+        tl.append(f"- **round {r}** · {part}")
+    fd = [m for m in by_stage if not m.get("round")]      # final draft (untagged stages)
+    if fd:
+        panel_s = [s for s in (_secs(m) for m in fd if m.get("stage") == "panel")
+                   if s is not None]
+        js = next((_secs(m) for m in fd if m.get("stage") == "judge"), None)
+        ss = next((_secs(m) for m in fd if m.get("stage") == "synth"), None)
+        parts = ([f"panel slowest {max(panel_s)}s"] if panel_s else []) \
+            + ([f"judge {js}s"] if js is not None else []) \
+            + ([f"synth {ss}s"] if ss is not None else [])
+        if parts:
+            tl.append("- **final draft** · " + " + ".join(parts))
+    if tl:
+        lines += ["## timeline", ""] + tl
+        # Only assert "the gap is answer time" when we have the TRUE end-to-end wall (which
+        # always bounds total model time). With only the draft-step fallback, the per-round
+        # model time can exceed it, so the claim would be false — stay silent then.
+        if wall is not None:
+            lines += ["", f"End-to-end wall was {wall}s; any gap above is time spent "
+                      "answering the clarifying questions between rounds (not model time)."]
+        lines.append("")
+
+    # Per-stage model table — every call across the pipeline, status before detail so a
+    # FAILED row jumps out; the round tag rides in the stage cell.
     lines += ["## models", "",
               "| stage | model | status | time | tokens | cost | detail |",
               "|---|---|---|---|---|---|---|"]
-    for m in cost.get("by_stage", []):
+    for m in by_stage:
         label = m.get("label", "")
         ok = m.get("ok", True)
-        is_panel = m.get("stage") == "panel"
-        secs = secs_by_label.get(label) if is_panel else None
-        time_s = f"{secs}s" if secs is not None else ""
-        detail = err_by_label.get(label, "") if (is_panel and not ok) else ""
+        rnd = m.get("round")
+        stage_cell = (m.get("stage", "") or "") + (f" · r{rnd}" if rnd else "")
+        s = _secs(m)
+        time_s = f"{s}s" if s is not None else ""
+        detail = _err(m) if not ok else ""
         lines.append(
-            f"| {m.get('stage', '')} | {label} | {'ok' if ok else 'FAILED'} | "
+            f"| {stage_cell} | {label} | {'ok' if ok else 'FAILED'} | "
             f"{time_s} | {_ktok(m.get('output_tokens'))} | "
             f"{_money(m.get('cost_usd'))} | {detail} |")
     lines.append("")
@@ -3241,18 +3484,36 @@ def render_plan_diagnostics(result: dict, cfg: dict, settings: dict,
                 f"timeout {'off' if t is None else f'{int(t)}s'}")
 
     def _member_effort(m: dict) -> str:
-        # Effort is per-provider: a global/CLI effort wins, else the provider's own.
+        # Effort is per-provider: a global/CLI effort wins, else the provider's own. When
+        # neither is set, "default" iff the CLI even has an effort knob — else "n/a"
+        # (agy/gemini bake the tier into the model NAME; kimi has no effort flag at all),
+        # so the report never mislabels a maxed-but-knobless provider as "default".
         prov = cfg.get("providers", {}).get(m.get("provider"), {})
-        return settings.get("effort") or prov.get("effort") or "default"
+        explicit = settings.get("effort") or prov.get("effort")
+        if explicit:
+            return explicit
+        return "default" if (prov.get("caps") or {}).get("effort") else "n/a"
 
+    panel_members = cfg.get("panel") or []     # `or []` — a config with "panel": null
     lines += ["## settings", "",
-              f"- **panel:** {', '.join(_member(m) for m in cfg.get('panel', []))}",
+              f"- **panel:** {', '.join(_member(m) for m in panel_members)}",
               f"- **judge:** {_member(cfg.get('judge'))}",
               f"- **aggregator:** {_member(cfg.get('aggregator'))}",
-              f"- **effort:** {', '.join(f'{_member(m)}={_member_effort(m)}' for m in cfg.get('panel', [])) or (settings.get('effort') or 'default')}",
+              f"- **effort:** {', '.join(f'{_member(m)}={_member_effort(m)}' for m in panel_members) or (settings.get('effort') or 'default')}"
+              + "  (n/a = effort is model-encoded or the CLI has no effort flag, not low)",
               f"- **interview phase:** {_phase_summary('interview')}",
-              f"- **final draft:** {_phase_summary('panel', phases.get('final'))}",
+              f"- **final draft (panel):** {_phase_summary('panel', phases.get('final'))} "
+              "— web+tools+max reasoning, the deliberately slow part",
+              f"- **judge phase:** {_phase_summary('judge', phases.get('final'))}",
+              f"- **synthesis phase:** {_phase_summary('synthesis', phases.get('final'))} "
+              "— tool-free (fuses the drafts in a scrubbed cwd, no repo/web)",
               ""]
+
+    if unmetered:
+        lines += ["## metering", "",
+                  f"{unmetered} of {int(calls)} model calls reported no token/cost usage "
+                  "— only Claude surfaces it (codex/gemini/kimi/deepseek/glm do not), so "
+                  "the totals above are a floor, not the full spend.", ""]
 
     # Consensus map (the judge's 5-field analysis), rendered as Markdown.
     analysis = result.get("analysis")
@@ -3289,6 +3550,11 @@ def _load_plan_session(resume: str | bool, request: str) -> dict:
         "request": request, "transcript": [], "asked_keys": set(), "meters": [],
         "start_round": 1, "pending_qs": None, "all_ready": False,
         "interview_done": False, "run_id": str(int(time.time() * 1000)),
+        # Wall-clock anchor for the WHOLE session. Each `--step` is a fresh process, so
+        # this is persisted in the checkpoint and restored on resume — the only way to
+        # report true end-to-end elapsed (every step's t0 resets, so a per-step delta
+        # undercounts a multi-round interview by everything but the final draft).
+        "started_at": time.time(),
     }
     if not resume:
         return state
@@ -3325,21 +3591,35 @@ def _load_plan_session(resume: str | bool, request: str) -> dict:
         "all_ready": st.get("all_ready", False),
         "interview_done": st.get("interview_done", False),
         "run_id": p.stem,
+        # Pre-`started_at` checkpoints (or a corrupt value) fall back to now, so an old
+        # resumed session simply reports elapsed from the resuming step rather than crash.
+        "started_at": st.get("started_at") or state["started_at"],
     })
     return state
 
 
 def _plan_result_fields(result: dict, request: str, transcript: list,
-                        round_no: int, meters: list, t0: float) -> dict:
+                        round_no: int, meters: list, t0: float,
+                        started_at: float | None = None) -> dict:
     """Stamp the plan-specific fields onto a finished fusion `result` (original
     request as `prompt`, the Q&A transcript, round count, and a cost roll-up that
-    folds the interview meters into the draft's). Shared finalize step."""
+    folds the interview meters into the draft's). Shared finalize step.
+
+    `t0` is THIS step's start (the draft step's wall clock -> cost.seconds). `started_at`
+    is the WHOLE session's start (persisted across `--step` rounds); it yields
+    cost.wall_seconds, the true end-to-end elapsed. They coincide for the single-process
+    interactive run, but for the headless `--step` protocol `seconds` covers only the
+    final draft while `wall_seconds` spans every interview round + the answer time between
+    them — the difference is exactly what made the old diagnostics under-report by ~an hour."""
     result["mode"] = "plan"
     result["prompt"] = request
     result["transcript"] = transcript
     result["rounds"] = round_no
     final_meters = meters + (result.get("cost", {}).get("by_stage") or [])
     result["cost"] = summarize_cost(final_meters, time.time() - t0)
+    # max(0, …): a backwards clock jump or a corrupted (future) started_at must never
+    # surface a negative elapsed in the diagnostics.
+    result["cost"]["wall_seconds"] = round(max(0.0, time.time() - (started_at or t0)), 1)
     return result
 
 
@@ -3459,6 +3739,7 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
     all_ready = st["all_ready"]
     interview_done = st["interview_done"]
     run_id = st["run_id"]
+    started_at = st["started_at"]        # WHOLE-session anchor (survives --resume)
 
     def _save_state(qa_so_far: list = None) -> None:
         if no_save:
@@ -3474,6 +3755,7 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
             "pending_qs": pending_qs,
             "all_ready": all_ready,
             "interview_done": interview_done,
+            "started_at": started_at,
             "cost": summarize_cost(meters, time.time() - t0),
         }
         save_run(result, run_id)
@@ -3502,6 +3784,7 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
                 else:
                     own_cwd = repo_cwd is None
                     cwd = tempfile.mkdtemp(prefix="scry-plan-") if own_cwd else repo_cwd
+                    mark = len(meters)       # tag this round's interview+dedup meters
                     try:
                         start_orb(f"round {round_no}: consulting the panel…")
                         try:
@@ -3511,7 +3794,9 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
                     finally:
                         if own_cwd:          # never delete the user's repo cwd
                             shutil.rmtree(cwd, ignore_errors=True)
-                
+                    for m in meters[mark:]:
+                        m.setdefault("round", round_no)
+
                 pending_qs = deduped
                 _save_state()
 
@@ -3547,9 +3832,14 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
         # draft is web-on and long-form (slow), so give it a higher timeout ceiling; it
         # runs in the repo cwd too so the drafts can read the code.
         stream_final = (not as_json and not quiet and sys.stdout.isatty())
-        # The final draft is web-on, long-form and tool-heavy: the `final` phase overlay
-        # raises its tool-call/turn cap and timeout across the whole run so opus doesn't
-        # trip claude's --max-turns and fail with "model error: exit 1".
+        # The panel DRAFTS web-on, long-form and tool-heavy (the `final` overlay raises
+        # their timeout so opus doesn't trip --max-turns). But the judge + synthesis only
+        # fuse the drafts they're handed — they need no repo and no tools — so scrub_fuse_cwd
+        # runs them in a throwaway cwd (web-off synth in an empty dir => zero tool calls).
+        # Time the draft from HERE (not the session-start t0, which spans the interview) so
+        # cost.seconds is the draft step alone, mirroring the headless --step protocol;
+        # cost.wall_seconds (from started_at) still carries the true end-to-end elapsed.
+        t0_draft = time.time()
         start_orb("synthesizing the plan…")
         try:
             result = asyncio.run(scry_run(
@@ -3557,7 +3847,7 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
                 settings, log, stream_final, stop_orb,
                 aggregator_system=PLAN_SYNTH_SYSTEM, cwd=repo_cwd,
                 run_overlay=cfg["phases"].get("final"), cli_overrides=cli_overrides,
-                panel_system=PLAN_DRAFTER_SYSTEM))
+                panel_system=PLAN_DRAFTER_SYSTEM, scrub_fuse_cwd=True))
         finally:
             stop_orb()
     except AllPanelsFailed as e:
@@ -3577,7 +3867,8 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
     # Plan-specific record fields. Keep the ORIGINAL request as `prompt` so
     # `scry log`/`scry last` read cleanly (the enriched prompt rides only in the
     # model calls). The full Q&A transcript is saved alongside.
-    _plan_result_fields(result, request, transcript, round_no, meters, t0)
+    _plan_result_fields(result, request, transcript, round_no, meters, t0_draft,
+                        started_at=started_at)
 
     plan_md = result.get("final") or ""
     cost = result.get("cost")
@@ -3611,7 +3902,8 @@ def _plan_step_finalize(cfg: dict, request: str, transcript: list, settings: dic
                         repo_cwd: str | None, out: str | None, no_out: bool,
                         no_save: bool, round_no: int,
                         cli_overrides: dict | None = None, log=None,
-                        out_dir: str | None = None) -> dict:
+                        out_dir: str | None = None,
+                        started_at: float | None = None) -> dict:
     """Draft the plan from the gathered transcript and RETURN the terminal `done`
     envelope dict (or an `error` envelope if every panel draft fails). Writes the
     plan + diagnostics files unless no_out, and records the finished run to history.
@@ -3625,12 +3917,13 @@ def _plan_step_finalize(cfg: dict, request: str, transcript: list, settings: dic
             settings, log,
             aggregator_system=PLAN_SYNTH_SYSTEM, cwd=repo_cwd,
             run_overlay=cfg["phases"].get("final"), cli_overrides=cli_overrides,
-            panel_system=PLAN_DRAFTER_SYSTEM))
+            panel_system=PLAN_DRAFTER_SYSTEM, scrub_fuse_cwd=True))
     except AllPanelsFailed as e:
         return {"status": "error", "error": str(e),
                 "responses": [{"model": r["label"], "ok": r["ok"],
                                "error": r["error"]} for r in e.responses]}
-    _plan_result_fields(result, request, transcript, round_no, meters, t0)
+    _plan_result_fields(result, request, transcript, round_no, meters, t0,
+                        started_at=started_at)
     plan_md = result.get("final") or ""
     plan_path = diag_path = None
     if not no_out:
@@ -3684,6 +3977,7 @@ def plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *,
     meters = st["meters"]
     interview_done = st["interview_done"]
     run_id = st["run_id"]
+    started_at = st["started_at"]                      # WHOLE-session wall-clock anchor
     rounds_done = st["start_round"] if resume else 0   # question-rounds emitted so far
 
     done = bool(payload.get("done"))
@@ -3701,6 +3995,7 @@ def plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *,
                   "transcript": transcript, "asked_keys": list(asked_keys),
                   "meters": meters, "rounds": rounds_done, "pending_qs": pending_qs,
                   "all_ready": False, "interview_done": done_flag,
+                  "started_at": started_at,   # persist so the next step keeps true elapsed
                   "cost": summarize_cost(meters, time.time() - t0)}, run_id)
 
     # Finalize: draw the plan when asked, when the interview is already done, or when
@@ -3709,11 +4004,12 @@ def plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *,
         return _plan_step_finalize(cfg, request, transcript, settings, plan_settings,
                                    run_id, meters, t0, repo_cwd, out, no_out, no_save,
                                    rounds_done, cli_overrides=cli_overrides, log=log,
-                                   out_dir=out_dir)
+                                   out_dir=out_dir, started_at=started_at)
 
     # Otherwise gather the next round of clarifying questions.
     own_cwd = repo_cwd is None
     cwd = tempfile.mkdtemp(prefix="scry-plan-") if own_cwd else repo_cwd
+    mark = len(meters)                       # tag this round's interview+dedup meters
     try:
         log("▸ panel: gathering clarifying questions…")
         raw, all_ready = asyncio.run(gather_questions(
@@ -3730,6 +4026,9 @@ def plan_step(cfg: dict, request: str, settings: dict, plan_settings: dict, *,
         # to catch here; just clean up the scratch cwd.
         if own_cwd:
             shutil.rmtree(cwd, ignore_errors=True)
+
+    for m in meters[mark:]:              # this step gathered exactly one round
+        m.setdefault("round", rounds_done + 1)
 
     new_qs = [q for q in deduped if _qkey(q) not in asked_keys]
     if all_ready or not new_qs:
@@ -3968,6 +4267,21 @@ def do_research(cfg: dict, prompt: str, settings: dict, args, cli: dict) -> int:
     return 0
 
 
+def _check_known_providers(ap, cfg: dict, mode: str) -> None:
+    """Fail fast (argparse exit 2) if --panel/--judge/--aggregator named a provider
+    that isn't in config providers{}, instead of running a paid panel and then
+    crashing (or silently dropping an unknown panel member)."""
+    provs = cfg.get("providers", {})
+    names = [m.get("provider") for m in cfg.get("panel", [])]
+    names.append(cfg.get("aggregator", {}).get("provider"))
+    if mode != "synthesize":               # fusion + research both run a judge
+        names.append(cfg.get("judge", {}).get("provider"))
+    for n in names:
+        if n and n not in provs:
+            ap.error(f"unknown provider '{n}' — not in config providers{{}} "
+                     f"(known: {', '.join(sorted(provs))})")
+
+
 def main() -> int:
     # History sub-commands: `scry last`, `scry log [N]`. Intercepted before
     # argparse, and only when unambiguous (no extra words/flags) so a real prompt
@@ -3981,14 +4295,27 @@ def main() -> int:
             return do_history("log", rest)
     ap = argparse.ArgumentParser(
         prog="scry",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Local OpenRouter-Fusion-style multi-model synthesis over "
                     "headless subscription CLIs.",
-        epilog="history: `scry last` re-prints the most recent answer; "
-               "`scry log [N]` lists recent runs (stored in ~/.scry).")
+        epilog=(
+            "commands:\n"
+            '  scry "<question>"        deep-research answer (the default mode)\n'
+            '  scry plan "<request>"    interactive, panel-driven planning -> a '
+            "repo-grounded implementation plan\n"
+            "  scry web                 launch the local web UI for the full panel\n"
+            "  scry init                setup wizard (compose a panel from the CLIs "
+            "you have)\n"
+            "  scry update              upgrade scry in place to the latest build\n"
+            "  scry --check             verify your model CLIs are installed & logged "
+            "in (no paid calls)\n"
+            "  scry last | scry log [N] re-print the last answer / list recent runs "
+            "(stored in ~/.scry)\n"))
     ap.add_argument("prompt", nargs="*",
-                    help="the prompt (or pipe it via stdin); pass 'init' to run the "
-                         "setup wizard, 'update' to upgrade scry in place, or 'web' to "
-                         "launch the local web UI")
+                    help="the prompt (or pipe it via stdin); or a command word: "
+                         "'plan' (interactive planning), 'web' (local web UI), "
+                         "'init' (setup wizard), 'update' (upgrade scry). See "
+                         "'commands' below.")
     ap.add_argument("--mode", choices=["research", "fusion", "synthesize"], default=None,
                     help="research = iterative deep-research loop (default); "
                          "fusion = single-shot 3-stage panel/judge/synthesis; "
@@ -4002,7 +4329,7 @@ def main() -> int:
                     help="(research) ground the panel in a read-only repo (no arg = the "
                          "current directory); overrides research.repo_context")
     ap.add_argument("--no-web", action="store_true",
-                    help="disable web_search/web_fetch on the panel + judge")
+                    help="disable web_search/web_fetch on the panel (judge/synthesis are already web-off)")
     ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"],
                     help="reasoning effort for every stage (where the CLI supports it)")
     ap.add_argument("--max-tool-calls", type=int, metavar="N",
@@ -4095,7 +4422,7 @@ def main() -> int:
             from scry_web import serve
         except ImportError as e:
             print("scry web needs the optional web dependencies (FastAPI + uvicorn).\n"
-                  "  install:  pip install 'scry[web]'\n"
+                  "  install:  pip install fastapi 'uvicorn[standard]' python-multipart\n"
                   f"  (import error: {e})", file=sys.stderr)
             return 1
         return serve(host=args.web_host, port=args.web_port,
@@ -4113,6 +4440,7 @@ def main() -> int:
             cfg["aggregator"] = parse_member(args.aggregator)
         if args.judge:
             cfg["judge"] = parse_member(args.judge)
+        _check_known_providers(ap, cfg, "fusion")
         psettings = dict(cfg["settings"])
         if args.no_web:
             psettings["web_tools"] = False
@@ -4146,6 +4474,15 @@ def main() -> int:
     if args.judge:
         cfg["judge"] = parse_member(args.judge)
     mode = args.mode or cfg.get("mode", "research")
+    _check_known_providers(ap, cfg, mode)
+    # Warn (don't silently drop) when a research-only flag is set in another mode.
+    if mode != "research" and not args.quiet:
+        ignored = [f for f, v in (("--depth", args.depth is not None),
+                                  ("--no-clarify", args.no_clarify),
+                                  ("--repo", args.repo is not None)) if v]
+        if ignored:
+            print(f"scry: {', '.join(ignored)} only applies to research mode; "
+                  f"ignored in {mode} mode", file=sys.stderr)
 
     settings = dict(cfg["settings"])
     if args.no_web:
@@ -4227,6 +4564,17 @@ def main() -> int:
     except KeyboardInterrupt:
         return 130
 
+    # Degraded-success notice: if some proposers failed, the fused answer (and any
+    # "consensus map") was built from fewer voices than the panel — say so loudly,
+    # even under --quiet, so a 1-of-N answer is never silently dressed up as fused.
+    responses = result.get("responses", [])
+    failed = [r for r in responses if not r.get("ok")]
+    if failed and not args.as_json:
+        ok_n = len(responses) - len(failed)
+        labels = ", ".join(r.get("model", "?") for r in failed)
+        print(f"⚠ fused from {ok_n}/{len(responses)} proposers — "
+              f"{len(failed)} failed: {labels}", file=sys.stderr)
+
     # Consensus map: show the judge's analysis (auto on an interactive stderr;
     # --map forces it, --no-map suppresses it; never under --json/--quiet).
     analysis = result.get("analysis")
@@ -4263,4 +4611,18 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        # Clean Ctrl-C anywhere (incl. the research/plan clarify interview) — a
+        # tidy exit 130, never a raw traceback at the user.
+        print("\nscry: interrupted", file=sys.stderr)
+        sys.exit(130)
+    except Exception as e:  # noqa: BLE001
+        # Last-resort guard: after a possibly multi-minute paid run, an unexpected
+        # failure (e.g. a flaky/misconfigured aggregator) should print one clean
+        # line, not dump a stack trace. Set SCRY_DEBUG=1 to see the full traceback.
+        if os.environ.get("SCRY_DEBUG"):
+            raise
+        print(f"scry: {e}", file=sys.stderr)
+        sys.exit(1)

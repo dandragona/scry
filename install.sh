@@ -34,14 +34,29 @@ mkdir -p "$INSTALL_DIR" 2>/dev/null || true
 
 # Download one Python script from the repo and install it (executable AND world-
 # readable) into INSTALL_DIR. Used for both `scry` and its `scry-deepseek` sibling.
+#
+# We VALIDATE the whole download before swapping it into place — not just line 1.
+# A truncated download (dropped connection / CDN short read) still carries the
+# `python3` shebang, so a head-only check would happily install a half-written,
+# broken scry. So, mirroring `scry update`, we also require the payload's tail to
+# contain the entry-point marker AND that it actually compiles. The temp file
+# lives INSIDE INSTALL_DIR so the final `mv` is an atomic same-filesystem rename.
 install_file() {
   name="$1"
   dest="${INSTALL_DIR%/}/$name"
-  tmp="$(mktemp)"
+  tmp="$(mktemp "${INSTALL_DIR%/}/.${name}.XXXXXX")" \
+    || err "could not create a temp file in $INSTALL_DIR"
   curl -fsSL "$RAW_BASE/$name" -o "$tmp" \
     || { rm -f "$tmp"; err "download failed from $RAW_BASE/$name"; }
   head -n1 "$tmp" | grep -q 'python3' \
     || { rm -f "$tmp"; err "downloaded $name doesn't look like a scry script."; }
+  # Entry-point marker must be present (a truncated download won't have it).
+  grep -q '__name__ == "__main__"' "$tmp" \
+    || { rm -f "$tmp"; err "downloaded $name is incomplete (no entry point) — refusing to install a truncated file."; }
+  # And it must compile — the strongest "is this whole and valid Python?" check.
+  python3 -m py_compile "$tmp" 2>/dev/null \
+    || { rm -f "$tmp"; err "downloaded $name isn't valid Python (truncated or corrupt?) — not installing."; }
+  rm -f "${tmp}c" 2>/dev/null || true   # discard any stray bytecode py_compile left
   mv "$tmp" "$dest" || { rm -f "$tmp"; err "could not install $name to $INSTALL_DIR"; }
   # 755, not `+x`: scry is a Python script the interpreter must READ to run, so it
   # has to be world-readable (a bare `chmod +x` on a 0600 tempfile yields 0711).

@@ -119,17 +119,48 @@ class TestTolerantJson(unittest.TestCase):
         # "[1,2]" is valid JSON but a list, not a dict -> None.
         self.assertIsNone(self.scry.tolerant_json("[1,2]"))
 
-    def test_brace_slice_is_outermost_not_smallest(self):
-        # _slice_braces spans first '{' .. LAST '}'. With a trailing '}' after junk,
-        # the slice is the WHOLE (still-invalid) string, so recovery fails -> None.
-        # (Documents that tolerant_json's brace recovery is greedy/outermost, so a
-        # stray closing brace after garbage defeats it.)
-        self.assertIsNone(self.scry.tolerant_json('{"a": 1} then garbage }'))
+    def test_recovers_object_despite_trailing_stray_brace(self):
+        # A stray closing brace in trailing commentary must NOT defeat recovery:
+        # the balanced-object scan finds the real object and ignores the lone '}'.
+        self.assertEqual(
+            self.scry.tolerant_json('{"a": 1} then garbage }'), {"a": 1})
 
     def test_brace_slice_recovers_when_junk_has_no_trailing_brace(self):
         # Here the last '}' closes the object, so the slice is exactly the object.
         self.assertEqual(
             self.scry.tolerant_json('{"a": 1} then garbage'), {"a": 1})
+
+    def test_prose_with_its_own_braces_before_the_object(self):
+        # A chatty judge that writes set notation ({x, y}) before the real JSON: the
+        # greedy outermost slice would span both and fail; the balanced scan tries each
+        # {...} and returns the one that parses.
+        self.assertEqual(
+            self.scry.tolerant_json('I think the set {x, y} matters. {"consensus": ["a"]}'),
+            {"consensus": ["a"]})
+
+    def test_two_objects_returns_the_larger_real_one(self):
+        # When the judge emits a tiny preamble object then the real analysis, prefer
+        # the larger valid object (the real 5-field analysis dwarfs an incidental one).
+        s = '{"first": 1}\nhere it is:\n{"consensus": ["a"], "contradictions": []}'
+        self.assertEqual(
+            self.scry.tolerant_json(s),
+            {"consensus": ["a"], "contradictions": []})
+
+    def test_trailing_comma_is_tolerated(self):
+        # Models frequently emit a trailing comma; strip it before parsing.
+        self.assertEqual(
+            self.scry.tolerant_json('{"a": 1, "b": 2,}'), {"a": 1, "b": 2})
+
+    def test_trailing_comma_inside_prose(self):
+        self.assertEqual(
+            self.scry.tolerant_json('here: {"items": ["x", "y",],}'),
+            {"items": ["x", "y"]})
+
+    def test_brace_inside_string_value_not_treated_as_structure(self):
+        # A '}' inside a string value must not prematurely close the object.
+        self.assertEqual(
+            self.scry.tolerant_json('prose {"note": "use } carefully"} end'),
+            {"note": "use } carefully"})
 
 
 class TestSliceBraces(unittest.TestCase):

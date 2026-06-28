@@ -133,6 +133,19 @@ class WebApiTest(unittest.TestCase):
         r = self.c.post("/api/locations/open", json={"path": "/no/such/dir/zzz"})
         self.assertEqual(r.status_code, 400)
 
+    def test_open_project_unwritable_path_400_no_traceback(self):
+        # An existing dir we can't create .scry/ inside (PermissionError on mkdir)
+        # must surface as a clean 400, never a 500 leaking a stack trace.
+        d = tempfile.mkdtemp(prefix="scry-ro-")
+        os.chmod(d, 0o500)  # r-x: can't create children
+        try:
+            r = self.c.post("/api/locations/open", json={"path": d})
+        finally:
+            os.chmod(d, 0o700)
+        self.assertEqual(r.status_code, 400)
+        self.assertNotIn("Traceback", r.text)
+        self.assertNotIn("PermissionError", r.text)
+
     # -- conversation listing / message_count ----------------------------- #
     def test_conversation_listing_reports_message_count(self):
         # The web UI reuses an empty conversation (message_count == 0) instead of

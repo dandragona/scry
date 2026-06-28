@@ -142,7 +142,8 @@ class TestResearchCliDryRun(unittest.TestCase):
         self.assertEqual(r.returncode, 0, f"stderr={r.stderr!r}\nstdout={r.stdout!r}")
         self.assertIn("mode=research", r.stdout)
         self.assertIn("PROPOSER", r.stdout)
-        self.assertIn("JUDGE", r.stdout)
+        # Research's per-round judge is the REFLECT stage (web-off), not "JUDGE".
+        self.assertIn("REFLECT", r.stdout)
         self.assertIn("AGGREGATOR", r.stdout)
 
 

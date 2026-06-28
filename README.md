@@ -4,14 +4,14 @@
 [![ci](https://github.com/dandragona/scry/actions/workflows/ci.yml/badge.svg)](https://github.com/dandragona/scry/actions/workflows/ci.yml)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue.svg)
 ![deps](https://img.shields.io/badge/dependencies-zero%20(stdlib)-brightgreen.svg)
-![keys](https://img.shields.io/badge/API%20keys-none-brightgreen.svg)
+![auth](https://img.shields.io/badge/auth-your%20AI%20subscriptions-brightgreen.svg)
 
 **Local Mixture-of-Agents over the AI subscriptions you already pay for.** `scry` replicates
-**OpenRouter's Fusion** capability *without* OpenRouter and *without* API keys: it drives the AI
-CLIs you already pay for (Claude Code, OpenAI Codex, Google Antigravity, Moonshot Kimi) in headless mode, so
-every call bills against your existing subscription. It fans a prompt out to several models —
-each with web search — has one model deliberate over their answers, and synthesizes a single
-better answer. One stdlib-only Python file; nothing to `pip install`.
+**OpenRouter's Fusion** capability *without* OpenRouter: it drives the AI CLIs you already
+subscribe to (Claude Code, OpenAI Codex, Google Antigravity, Moonshot Kimi) in headless mode, so
+every call bills against your existing subscription rather than a metered API. It fans a prompt
+out to several models — each with web search — has one model deliberate over their answers, and
+synthesizes a single better answer. One stdlib-only Python file; nothing to `pip install`.
 
 <p align="center">
   <img src="docs/demo.gif" alt="scry in action: a panel of models race, a judge compares them, the fused answer streams in, then a consensus map of where they agreed and clashed" width="720">
@@ -25,7 +25,7 @@ better answer. One stdlib-only Python file; nothing to `pip install`.
                  └──────────► codex   (gpt)   + web ─┘
                                     │
                           ┌─────────▼─────────┐
-                          │  JUDGE  (web on,    │   →  JSON: consensus, contradictions,
+                          │  JUDGE  (no web,    │   →  JSON: consensus, contradictions,
                           │  compares ≠ merges) │      partial_coverage, unique_insights,
                           └─────────┬─────────┘        blind_spots
                                     │
@@ -37,6 +37,24 @@ better answer. One stdlib-only Python file; nothing to `pip install`.
 This mirrors how OpenRouter Fusion actually works (a productized **Mixture-of-Agents**:
 parallel web-enabled panel → judge analysis → synthesis). Verified against OpenRouter's docs; the
 synthesis prompt is the canonical MoA "Aggregate-and-Synthesize" template (arXiv:2406.04692).
+
+## Quickstart
+
+Zero → first answer, four commands:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/dandragona/scry/main/install.sh | sh   # install
+scry init                                  # pick which model CLIs to fan out to → writes your panel
+scry --check                               # pre-flight: are those CLIs installed + logged in? (free)
+scry "why is my Postgres query slow, and how do I fix it?"   # ask — deep research by default
+```
+
+> **Tip:** bare `scry "..."` runs the deep-research loop (clarify → multi-round panel → fused report),
+> which is thorough but slow and costs more. Want a fast single-shot answer instead?
+> `scry --mode fusion "..."`.
+
+If `~/.local/bin` isn't on your `PATH`, the installer prints the exact `export PATH=…` line to add.
+See [Install](#install) for hand-install and [Uninstall](#uninstall) to remove it.
 
 ## Fidelity to OpenRouter Fusion
 
@@ -139,6 +157,29 @@ checkout is left alone — update it with `git pull`.
 `scry init` is optional — `scry` runs with built-in defaults — but it's the fastest way to
 compose a panel from the subscriptions you actually have (Kimi included).
 
+### Uninstall
+
+There's no uninstaller — scry only drops files into user-owned directories, so removing it is
+just deleting them. The one-line installer (default `INSTALL_DIR=~/.local/bin`) creates:
+
+```sh
+# the binary, the API-key adapters, and the vendored web UI package (next to the binary)
+rm -f  ~/.local/bin/scry ~/.local/bin/scry-deepseek ~/.local/bin/scry-glm
+rm -rf ~/.local/bin/scry_web
+# the Claude Code skills (honors CLAUDE_CONFIG_DIR if you set it)
+rm -rf ~/.claude/skills/scry ~/.claude/skills/scry-plan
+# your config + saved env keys + web UI database (delete only if you don't want them back)
+rm -rf ~/.config/scry
+# CLI run history (transcripts + index), if you enabled it
+rm -rf ~/.scry
+# the optional web UI deps the installer pip-installed (skip if other tools need them)
+pip uninstall fastapi uvicorn python-multipart
+```
+
+(If you set a custom `INSTALL_DIR`, look there instead of `~/.local/bin`. `scry-eval` is **not**
+installed by the installer — remove it only if you copied it onto your PATH by hand. Per-project
+web history lives in each project's `<repo>/.scry/web/history.db` — remove it per repo.)
+
 ### Claude Code skill (`/scry`)
 
 scry ships a **[Claude Code](https://claude.com/claude-code) skill**, so you can consult the
@@ -197,7 +238,7 @@ scry log 50                                 # ...the last 50
 | `--max-rounds N` | (research) hard cap on rounds (overrides `research.hard_cap`); (plan) clarifying-round cap |
 | `--no-clarify` | (research) skip the clarifying-question interview |
 | `--repo [PATH]` / `--no-repo` | (research/plan) ground the panel read-only in a repo (no arg = cwd) / force the external-world default |
-| `--no-web` | disable web tools on panel + judge |
+| `--no-web` | disable web tools on the panel (judge/synthesis are already web-off) |
 | `--effort low\|medium\|high\|xhigh\|max` | reasoning effort, every stage (where supported) |
 | `--max-tool-calls N` | cap web tool iterations (Fusion default 8; claude only) |
 | `--max-output-tokens N` | cap output tokens (claude only) |
@@ -367,7 +408,7 @@ run `scry web` from anywhere. If you ever need to add the deps by hand (e.g. you
 `SCRY_NO_WEB=1`):
 
 ```sh
-pip install 'scry[web]'          # or, from a clone:  pip install -e '.[web]'
+pip install fastapi 'uvicorn[standard]' python-multipart
 ```
 
 The frontend ships **pre-built and vendored** (`scry_web/static/`) — no Node/npm needed to run.
@@ -450,8 +491,8 @@ The splash honors `--no-anim` / `NO_COLOR` / non-TTY (static frame, no keypress 
 
 ### Google (Antigravity / `agy`)
 
-Google is wired in via the **Antigravity CLI** (`agy`), already logged into your Google subscription —
-no API key. The default panel uses `Gemini 3.1 Pro (High)` (inherited from the provider's top-tier
+Google is wired in via the **Antigravity CLI** (`agy`), driven through your existing Google
+subscription. The default panel uses `Gemini 3.1 Pro (High)` (inherited from the provider's top-tier
 `model` field).
 
 - **Pick a different Gemini model:** run `agy models` to list them (e.g. `Gemini 3.5 Flash (High)`,
@@ -491,10 +532,11 @@ billing off the subscription). Install it with `curl -LsSf https://code.kimi.com
 
 ### The API-key providers: DeepSeek and GLM
 
-scry is built to avoid API keys, but two providers — **DeepSeek** and **GLM** (Zhipu/Z.ai) — have
-**no subscription CLI**, only an API. scry ships a small stdlib adapter for each (**`scry-deepseek`**,
-**`scry-glm`**) that calls the provider's OpenAI-compatible API. These are the **two providers that
-need an API key**; both ship in the default panel at top tier. DeepSeek first:
+scry's panel is built around the subscription CLIs above, but two providers — **DeepSeek** and
+**GLM** (Zhipu/Z.ai) — have **no subscription CLI**, only an API. scry ships a small stdlib adapter
+for each (**`scry-deepseek`**, **`scry-glm`**) that calls the provider's OpenAI-compatible API.
+These are the **two providers that need an API key**; both ship in the default panel at top tier.
+DeepSeek first:
 
 ```sh
 # Recommended: keep the key in scry's config dir (a sibling of config.json) — read
@@ -526,7 +568,7 @@ scry --check --panel "...,deepseek"                  # shows: ✓ deepseek insta
   `DEEPSEEK_BASE_URL`.
 - **No silent truncation:** the adapter requests the model's documented max output (V4: 384K tokens),
   so long answers are never cut short at the API's 4096-token default. Override with `--max-tokens`.
-- This deliberately **breaks the no-API-key rule** — it bills per token, not against a flat
+- Unlike the subscription providers, this one **bills per token against a metered API**, not a flat
   subscription.
 
 #### GLM (Zhipu / Z.ai)

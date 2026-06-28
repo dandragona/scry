@@ -46,6 +46,37 @@ class LocationsTest(unittest.TestCase):
         types = [l["type"] for l in lm.list()]
         self.assertIn("workspace", types)
 
+    def test_scaffold_gitignores_dot_scry(self):
+        lm = self.LM()
+        ws = lm.create_workspace("Private WS")
+        gi = Path(ws["root_path"]) / ".gitignore"
+        self.assertTrue(gi.exists())
+        entries = gi.read_text().splitlines()
+        self.assertIn(".scry/", entries)
+        # no duplicate entry
+        self.assertEqual(entries.count(".scry/"), 1)
+
+    def test_scaffold_appends_to_existing_gitignore(self):
+        # If the scaffold target already ships a .gitignore, _scaffold must append
+        # .scry/ without clobbering the existing contents or duplicating the entry.
+        lm = self.LM()
+        d = Path(tempfile.mkdtemp(prefix="scry-existing-gi-"))
+        (d / ".gitignore").write_text("node_modules/\n*.pyc\n")
+        lm._scaffold(d, "Has Gitignore", "workspace")
+        entries = (d / ".gitignore").read_text().splitlines()
+        self.assertIn("node_modules/", entries)
+        self.assertIn("*.pyc", entries)
+        self.assertIn(".scry/", entries)
+        self.assertEqual(entries.count(".scry/"), 1)
+
+    def test_scaffold_no_duplicate_when_already_ignored(self):
+        lm = self.LM()
+        d = Path(tempfile.mkdtemp(prefix="scry-already-ig-"))
+        (d / ".gitignore").write_text(".scry/\n")
+        lm._scaffold(d, "Already", "workspace")
+        entries = (d / ".gitignore").read_text().splitlines()
+        self.assertEqual(entries.count(".scry/"), 1)
+
     def test_create_workspace_unique_slugs(self):
         lm = self.LM()
         a = lm.create_workspace("dup")

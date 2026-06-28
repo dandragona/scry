@@ -111,6 +111,76 @@ class InstallShTest(unittest.TestCase):
         self.assertTrue(os.path.exists(self._user_bin("scry")))      # core still installs
         self.assertFalse(os.path.exists(self._user_bin("scry_web")))  # but not the web pkg
 
+    def _run_from_fake_repo(self, fake_repo):
+        """Run the installer with RAW_BASE pointed at a hand-built fake repo dir
+        (so we control exactly what `curl` "downloads" for each file). Returns the
+        completed process. Web steps are skipped — we only care about `scry` here.
+        """
+        env = dict(os.environ)
+        env["HOME"] = self.home
+        env["RAW_BASE"] = f"file://{fake_repo}"
+        env["SUDO_MARKER"] = self.sudo_marker
+        env.pop("INSTALL_DIR", None)
+        env.pop("CLAUDE_CONFIG_DIR", None)
+        env["SCRY_NO_WEB"] = "1"          # no web pkg/deps to fetch
+        env["SCRY_NO_WEB_DEPS"] = "1"
+        env["PATH"] = self.stubdir + os.pathsep + env["PATH"]
+        return subprocess.run(["sh", str(INSTALL_SH)], env=env,
+                              capture_output=True, text=True, timeout=120)
+
+    def _make_fake_repo(self, scry_body):
+        """A minimal fake repo dir holding a `scry` file with the given body, plus
+        the sibling adapter scripts (real ones, so the install only fails — if at
+        all — on the `scry` payload under test)."""
+        repo = tempfile.mkdtemp(prefix="scry-fake-repo-", dir=self.stubdir)
+        with open(os.path.join(repo, "scry"), "w") as f:
+            f.write(scry_body)
+        # Real sibling scripts so install_file for them succeeds.
+        for sib in ("scry-deepseek", "scry-glm"):
+            shutil.copy(str(h.REPO_ROOT / sib), os.path.join(repo, sib))
+        return repo
+
+    def test_truncated_payload_with_shebang_is_rejected(self):
+        # A download that keeps the `python3` shebang but is truncated mid-file —
+        # so it neither carries the entry-point marker nor compiles. The old
+        # head-of-file-only check passed it through; the installer must now reject
+        # it and NOT leave a broken `scry` on the user's PATH.
+        truncated = "#!/usr/bin/env python3\nimport sys\ndef main(\n"  # syntactically broken
+        repo = self._make_fake_repo(truncated)
+        r = self._run_from_fake_repo(repo)
+        self.assertNotEqual(r.returncode, 0,
+                            "installer must reject a truncated/non-compiling scry payload")
+        self.assertFalse(os.path.exists(self._user_bin("scry")),
+                         "a rejected payload must not be installed")
+
+    def test_noncompiling_payload_with_entry_marker_is_rejected(self):
+        # Has the shebang AND the entry marker, but a syntax error — so it would
+        # pass a grep-only check yet fail py_compile.
+        bad = ('#!/usr/bin/env python3\n'
+               'def main(:\n'         # syntax error
+               '    pass\n'
+               'if __name__ == "__main__":\n'
+               '    main()\n')
+        repo = self._make_fake_repo(bad)
+        r = self._run_from_fake_repo(repo)
+        self.assertNotEqual(r.returncode, 0,
+                            "installer must reject a non-compiling scry payload")
+        self.assertFalse(os.path.exists(self._user_bin("scry")))
+
+    def test_valid_payload_with_marker_and_compiles_is_accepted(self):
+        # The positive control: a tiny but COMPLETE, compilable scry-shaped file
+        # (shebang + entry marker + valid Python) must still install cleanly.
+        good = ('#!/usr/bin/env python3\n'
+                'import sys\n'
+                'def main():\n'
+                '    print("ok")\n'
+                'if __name__ == "__main__":\n'
+                '    main()\n')
+        repo = self._make_fake_repo(good)
+        r = self._run_from_fake_repo(repo)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertTrue(os.path.exists(self._user_bin("scry")))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

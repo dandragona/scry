@@ -83,6 +83,21 @@ class LocationManager:
             n += 1
         return root
 
+    @staticmethod
+    def _ensure_gitignored(root: Path, entry: str) -> None:
+        """Make sure `root/.gitignore` ignores `entry`. Creates the file if absent,
+        appends the entry if missing, and never duplicates it. Best-effort: a
+        write failure must not break scaffolding."""
+        gi = root / ".gitignore"
+        try:
+            existing = gi.read_text() if gi.exists() else ""
+            if entry in existing.splitlines():
+                return
+            sep = "" if (not existing or existing.endswith("\n")) else "\n"
+            gi.write_text(f"{existing}{sep}{entry}\n")
+        except OSError:
+            pass  # .gitignore is a privacy nicety — never fail the scaffold over it
+
     def _scaffold(self, root: Path, name: str, loc_type: str,
                   config_path: str | None = None) -> dict:
         """Build a CLI-compatible scry project scaffold at `root` and register it:
@@ -97,6 +112,9 @@ class LocationManager:
                                timeout=15)
             except (OSError, subprocess.SubprocessError):
                 pass  # no git on PATH (or it failed) — the workspace is still valid
+        # Keep the per-project web store (.scry/web/history.db — plaintext prompt/answer
+        # history) out of version control so a shared/committed dir can't leak it.
+        self._ensure_gitignored(root, ".scry/")
         # Seed scry.config.json from the user's global config so the panel matches.
         cfg_dest = root / "scry.config.json"
         written_config = None
@@ -136,7 +154,12 @@ class LocationManager:
         if existing:
             return existing
         db_path = paths.location_db_path(str(p))
-        Store(db_path)  # create <root>/.scry/web/history.db going forward
+        try:
+            Store(db_path)  # create <root>/.scry/web/history.db going forward
+        except OSError as e:
+            # Unwritable target (e.g. /etc) — surface a clean client error instead
+            # of a 500 leaking a traceback. api.py maps LocationError -> HTTP 400.
+            raise LocationError(f"cannot open project at {p}: {e}")
         cfg = p / "scry.config.json"
         loc = {
             "id": new_id("loc_"), "type": "project", "name": p.name,

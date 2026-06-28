@@ -50,7 +50,9 @@ def create_app(config_path: str | None = None, host: str = "127.0.0.1",
     @app.middleware("http")
     async def guard(request: Request, call_next):
         host_header = request.headers.get("host") or ""
-        if host_header and not _host_ok(host_header, allowed):
+        # A missing/empty Host is the canonical DNS-rebinding case — reject it
+        # outright rather than letting the leading truthiness check skip validation.
+        if not host_header or not _host_ok(host_header, allowed):
             return JSONResponse({"detail": "host not allowed"}, status_code=403)
         origin = request.headers.get("origin")
         if origin and not _origin_ok(origin, allowed):

@@ -17,6 +17,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -213,6 +214,37 @@ class DedupQuestionsTest(unittest.IsolatedAsyncioTestCase):
         out = await scry.dedup_questions(self.cfg, "req", [], raw,
                                          self.settings, self.log, [], 0, ".")
         self.assertEqual([q["q"] for q in out], ["A", "B"])
+
+    async def test_meter_records_seconds_on_success(self):
+        scry = self.scry
+
+        async def fake(*a, **k):
+            return json.dumps({"questions": [{"q": "A"}]})
+
+        self._patch_call_cli(fake)
+        meters = []
+        await scry.dedup_questions(self.cfg, "req", [], [{"q": "A"}, {"q": "B"}],
+                                   self.settings, self.log, meters, 0, ".")
+        self.assertEqual(len(meters), 1)
+        self.assertTrue(meters[0]["ok"])
+        self.assertIn("seconds", meters[0])     # every stage is timed now
+
+    async def test_failed_dedup_meter_carries_timeout_reason(self):
+        # Regression for the diagnosed run: a dedup that times out must leave a FAILED
+        # meter WITH the reason, so the diagnostics can show *why* (not a blank row).
+        scry = self.scry
+
+        async def fake(*a, **k):
+            raise scry.ProviderError("timeout after 420s")
+
+        self._patch_call_cli(fake)
+        meters = []
+        await scry.dedup_questions(self.cfg, "req", [], [{"q": "A"}, {"q": "B"}],
+                                   self.settings, self.log, meters, 0, ".")
+        self.assertEqual(len(meters), 1)
+        self.assertFalse(meters[0]["ok"])
+        self.assertIn("seconds", meters[0])
+        self.assertIn("timeout after 420s", meters[0]["error"])
 
 
 # --------------------------------------------------------------------------- #
@@ -506,26 +538,60 @@ class PlanSubprocessTest(unittest.TestCase):
         self.assertEqual(last_cp.returncode, 0, last_cp.stderr)
         self.assertIn("## Context", last_cp.stdout)
 
-    # ----- repo context: the panel runs in the invocation dir by default ---- #
-    def test_repo_context_runs_panel_in_invocation_dir(self):
+    def _cwd_by_stage(self, cwddump):
+        """Parse a SCRY_CWDDUMP file into {stage: set(cwds)}."""
+        by_stage = {}
+        with open(cwddump) as f:
+            for ln in f.read().splitlines():
+                if "\t" not in ln:
+                    continue
+                stage, cwd = ln.split("\t", 1)
+                by_stage.setdefault(stage, set()).add(cwd)
+        return by_stage
+
+    # ----- repo context: panelists read the repo; the synthesis is tool-free ---- #
+    def test_repo_context_panel_in_repo_but_synth_is_scrubbed(self):
+        # The panel DRAFTS in the invocation dir (so plans are grounded in the code), but
+        # the judge + synthesis only fuse the drafts they're handed — they run in a
+        # scrubbed throwaway cwd so the "final draft" makes no repo tool calls.
         repo = tempfile.mkdtemp(prefix="scry-fake-repo-")
         self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
         real = os.path.realpath(repo)
-        env = self._env(h.claude_plan(rounds_before_ready=1, report_cwd=True))
+        d = tempfile.mkdtemp(prefix="scry-cwddump-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        dump = os.path.join(d, "cwd.txt")
+        env = self._env(h.claude_plan(rounds_before_ready=1, report_cwd=True),
+                        SCRY_CWDDUMP=dump)
         cp = h.run_scry(self._args(), input="ok\n", env=env, cwd=repo)
         self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
-        self.assertIn("CWD=" + real, cp.stdout)        # final draft ran in the repo
-        self.assertIn("cwd is " + real, cp.stderr)     # interview ran in the repo too
+        by_stage = self._cwd_by_stage(dump)
+        # Panel drafts + interview ran in the repo:
+        self.assertIn(real, by_stage.get("draft", set()))
+        self.assertIn(real, by_stage.get("interview", set()))
+        # Synthesis (and judge) fused in a scrubbed temp cwd, NOT the repo:
+        self.assertTrue(by_stage.get("synth"))
+        self.assertTrue(all("scry-fuse-" in c and real not in c
+                            for c in by_stage["synth"]), by_stage.get("synth"))
+        self.assertTrue(all(real not in c for c in by_stage.get("judge", set())))
 
     def test_no_repo_uses_scrubbed_temp_cwd(self):
         repo = tempfile.mkdtemp(prefix="scry-fake-repo-")
         self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
         real = os.path.realpath(repo)
-        env = self._env(h.claude_plan(rounds_before_ready=1, report_cwd=True))
+        d = tempfile.mkdtemp(prefix="scry-cwddump-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        dump = os.path.join(d, "cwd.txt")
+        env = self._env(h.claude_plan(rounds_before_ready=1, report_cwd=True),
+                        SCRY_CWDDUMP=dump)
         cp = h.run_scry(self._args("--no-repo"), input="ok\n", env=env, cwd=repo)
         self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
         self.assertNotIn(real, cp.stdout)              # final draft did NOT see the repo
-        self.assertIn("scry-run-", cp.stdout)          # ran in a scrubbed temp cwd
+        by_stage = self._cwd_by_stage(dump)
+        # Panel drafts ran in their own scrubbed run cwd; synthesis in the fuse cwd.
+        self.assertTrue(all("scry-run-" in c and real not in c
+                            for c in by_stage.get("draft", set())), by_stage.get("draft"))
+        self.assertTrue(all("scry-fuse-" in c and real not in c
+                            for c in by_stage.get("synth", set())), by_stage.get("synth"))
         self.assertNotIn(real, cp.stderr)              # interview didn't see the repo
         self.assertIn("scry-plan-", cp.stderr)         # interview used a temp cwd
 
@@ -989,6 +1055,272 @@ class RenderPlanDiagnosticsTest(unittest.TestCase):
         md = self._render()
         self.assertIn("c1", md)
         self.assertIn("x1", md)
+
+
+# --------------------------------------------------------------------------- #
+# The enriched diagnostics — true end-to-end elapsed, per-round timeline, the
+# bottleneck call, the FAILED-dedup reason, and the metering-floor note. This is
+# the report rebuilt to actually diagnose the "why did it take an hour" run.
+# --------------------------------------------------------------------------- #
+class RenderPlanDiagnosticsRichTest(unittest.TestCase):
+    def setUp(self):
+        self.scry = h.load_scry()
+        self.cfg = {
+            "panel": [{"provider": "claude", "label": "claude-opus"},
+                      {"provider": "agy", "label": "gemini-pro"},
+                      {"provider": "kimi", "label": "kimi"}],
+            "judge": {"provider": "claude"}, "aggregator": {"provider": "claude"},
+            "providers": {
+                "claude": {"effort": "max", "caps": {"effort": ["--effort", "{e}"]}},
+                "agy": {"caps": {}},        # effort is model-encoded, no flag
+                "kimi": {"caps": {}},       # no effort flag at all
+            },
+            "phases": {"panel": {}, "judge": {}, "synthesis": {"web_tools": False},
+                       "interview": {"web_tools": False},
+                       "final": {"timeout": 2100}},
+        }
+        self.settings = {"web_tools": True, "max_tool_calls": None, "timeout": 420,
+                         "effort": None}
+        self.plan_settings = {"max_rounds": 6}
+        self.result = {
+            "prompt": "visualize kernel HW usage", "rounds": 2,
+            "responses": [{"model": "claude-opus", "ok": True, "error": "",
+                           "seconds": 1585.2, "content": "draft"}],
+            "analysis": {"consensus": ["c1"], "contradictions": [],
+                         "partial_coverage": [], "unique_insights": [],
+                         "blind_spots": []},
+            "cost": {
+                "total_usd": 12.95, "seconds": 1926.1, "wall_seconds": 5400.0,
+                "calls": 8, "metered_calls": 4,
+                "by_stage": [
+                    {"stage": "interview", "label": "claude-opus", "ok": True,
+                     "round": 1, "seconds": 40.0, "output_tokens": 8700, "cost_usd": 0.48},
+                    {"stage": "interview", "label": "gemini-pro", "ok": True,
+                     "round": 1, "seconds": 35.0, "output_tokens": 0},
+                    {"stage": "dedup", "label": "dedup", "ok": True, "round": 1,
+                     "seconds": 38.0, "output_tokens": 30000, "cost_usd": 0.90},
+                    {"stage": "dedup", "label": "dedup", "ok": False, "round": 2,
+                     "seconds": 420.0, "error": "timeout after 420s"},
+                    {"stage": "panel", "label": "claude-opus", "ok": True,
+                     "seconds": 1585.2, "output_tokens": 75000, "cost_usd": 6.64},
+                    {"stage": "panel", "label": "kimi", "ok": True,
+                     "seconds": 310.5, "output_tokens": 0},
+                    {"stage": "judge", "label": "judge", "ok": True,
+                     "seconds": 60.0, "output_tokens": 11000, "cost_usd": 1.10},
+                    {"stage": "synth", "label": "synth", "ok": True,
+                     "seconds": 40.0, "output_tokens": 16000, "cost_usd": 1.26},
+                ],
+            },
+        }
+
+    def _render(self):
+        return self.scry.render_plan_diagnostics(
+            self.result, self.cfg, self.settings, self.plan_settings, "1782535087888")
+
+    def test_elapsed_is_end_to_end_not_just_the_draft_step(self):
+        md = self._render()
+        self.assertIn("5400.0s", md)                 # true end-to-end wall
+        self.assertIn("end-to-end", md.lower())
+        self.assertIn("1926.1s", md)                 # the draft step, shown separately
+
+    def test_bottleneck_calls_out_the_slowest_call(self):
+        md = self._render()
+        self.assertIn("bottleneck", md.lower())
+        self.assertIn("claude-opus", md)
+        self.assertIn("1585.2s", md)
+
+    def test_timeline_groups_by_round_and_shows_dedup_timeout(self):
+        md = self._render()
+        self.assertIn("timeline", md.lower())
+        self.assertIn("round 1", md)
+        self.assertIn("round 2", md)
+        self.assertIn("FAILED", md)
+        self.assertIn("timeout after 420s", md)      # the *reason* is visible
+
+    def test_round_tag_in_models_table(self):
+        self.assertIn("· r2", self._render())        # dedup row tagged round 2
+
+    def test_metering_note_flags_unmetered_calls(self):
+        md = self._render()
+        self.assertIn("4 of 8", md)                  # 8 calls, 4 metered
+        self.assertIn("floor", md)
+        self.assertIn("Claude-metered only", md)     # caveat on the cost line
+
+    def test_effort_is_honest_not_default(self):
+        md = self._render()
+        # claude is maxed; gemini/kimi have no effort flag -> 'n/a', never a fake 'default'
+        self.assertIn("claude-opus=max", md)
+        self.assertIn("gemini-pro=n/a", md)
+        self.assertIn("kimi=n/a", md)
+
+    def test_synthesis_phase_marked_tool_free(self):
+        self.assertIn("tool-free", self._render().lower())
+
+
+# --------------------------------------------------------------------------- #
+# scry_run scrub_fuse_cwd — `scry plan` runs the panel in the repo cwd but the
+# judge + synthesis in a throwaway dir, so the "final draft" makes no tool calls.
+# --------------------------------------------------------------------------- #
+class ScryRunScrubFuseCwdTest(unittest.IsolatedAsyncioTestCase):
+    async def test_panel_keeps_cwd_but_judge_and_synth_are_scrubbed(self):
+        scry = h.load_scry()
+        seen = {}     # role -> set(cwd)
+
+        async def fake(cfg, provider, model, system, user, cwd, depth, web,
+                       settings, meta=None):
+            role = ("judge" if (system and "impartial judge" in system)
+                    else "panel" if system is None else "synth")
+            seen.setdefault(role, set()).add(cwd)
+            return json.dumps({"consensus": []}) if role == "judge" else "answer"
+
+        orig = scry.call_cli
+        scry.call_cli = fake
+        self.addCleanup(setattr, scry, "call_cli", orig)
+        cfg = {"panel": [{"provider": "claude", "label": "c"}],
+               "judge": {"provider": "claude"}, "aggregator": {"provider": "claude"},
+               "phases": {}, "providers": {}}
+        await scry.scry_run(cfg, "q", "fusion", {"web_tools": False},
+                            lambda *a, **k: None, cwd="/panel/cwd", scrub_fuse_cwd=True)
+        self.assertEqual(seen["panel"], {"/panel/cwd"})        # panel kept the repo cwd
+        for role in ("judge", "synth"):
+            self.assertTrue(all(c != "/panel/cwd" and "scry-fuse-" in c
+                                for c in seen[role]), seen.get(role))
+
+    async def test_without_scrub_all_stages_share_cwd(self):
+        scry = h.load_scry()
+        seen = {}
+
+        async def fake(cfg, provider, model, system, user, cwd, depth, web,
+                       settings, meta=None):
+            role = ("judge" if (system and "impartial judge" in system)
+                    else "panel" if system is None else "synth")
+            seen.setdefault(role, set()).add(cwd)
+            return json.dumps({"consensus": []}) if role == "judge" else "answer"
+
+        orig = scry.call_cli
+        scry.call_cli = fake
+        self.addCleanup(setattr, scry, "call_cli", orig)
+        cfg = {"panel": [{"provider": "claude", "label": "c"}],
+               "judge": {"provider": "claude"}, "aggregator": {"provider": "claude"},
+               "phases": {}, "providers": {}}
+        await scry.scry_run(cfg, "q", "fusion", {"web_tools": False},
+                            lambda *a, **k: None, cwd="/shared/cwd")
+        self.assertEqual(seen["panel"], {"/shared/cwd"})
+        self.assertEqual(seen["judge"], {"/shared/cwd"})       # default: one shared cwd
+        self.assertEqual(seen["synth"], {"/shared/cwd"})
+
+
+# --------------------------------------------------------------------------- #
+# The heavy web/tool wall-clock belongs to the PANELIST phases only: judge +
+# synthesis run web-off by default even when the global web_tools is on.
+# --------------------------------------------------------------------------- #
+class JudgeSynthWebOffTest(unittest.IsolatedAsyncioTestCase):
+    async def test_only_the_panel_gets_web_by_default(self):
+        scry = h.load_scry()
+        seen = {}     # role -> web flag the stage was called with
+
+        async def fake(cfg, provider, model, system, user, cwd, depth, web,
+                       settings, meta=None):
+            role = ("judge" if (system and "impartial judge" in system)
+                    else "panel" if system is None else "synth")
+            seen[role] = web
+            return json.dumps({"consensus": []}) if role == "judge" else "answer"
+
+        orig = scry.call_cli
+        scry.call_cli = fake
+        self.addCleanup(setattr, scry, "call_cli", orig)
+        cfg = {"panel": [{"provider": "claude", "label": "c"}],
+               "judge": {"provider": "claude"}, "aggregator": {"provider": "claude"},
+               "phases": dict(scry.DEFAULT_PHASES), "providers": {}}
+        # Global web ON — but only the panel (a panelist phase) should actually get it.
+        await scry.scry_run(cfg, "q", "fusion", {"web_tools": True},
+                            lambda *a, **k: None, cwd="/x")
+        self.assertTrue(seen["panel"])     # panelists do the web-heavy work
+        self.assertFalse(seen["judge"])    # judge reasons over panel output: no web
+        self.assertFalse(seen["synth"])    # synthesis: no web
+
+    def test_default_phases_pin_judge_web_off(self):
+        scry = h.load_scry()
+        jset = scry._phase_settings({"web_tools": True}, scry.DEFAULT_PHASES, "judge")
+        self.assertIs(jset["web_tools"], False)
+
+
+# --------------------------------------------------------------------------- #
+# _plan_result_fields — cost.seconds is the DRAFT step, cost.wall_seconds is the
+# true end-to-end (>= seconds), clamped non-negative against clock skew.
+# --------------------------------------------------------------------------- #
+class PlanResultFieldsTest(unittest.TestCase):
+    def setUp(self):
+        self.scry = h.load_scry()
+
+    def test_wall_spans_session_while_seconds_is_the_step(self):
+        now = time.time()
+        result = {}
+        # t0 = draft start (2s ago); started_at = session start (120s ago).
+        self.scry._plan_result_fields(result, "req", [], 2, [],
+                                      now - 2, started_at=now - 120)
+        cost = result["cost"]
+        self.assertGreaterEqual(cost["wall_seconds"], cost["seconds"])
+        self.assertGreaterEqual(cost["wall_seconds"], 100)   # ~120s end-to-end
+        self.assertLess(cost["seconds"], 60)                 # ~2s draft step only
+
+    def test_future_started_at_clamps_wall_to_zero(self):
+        now = time.time()
+        result = {}
+        self.scry._plan_result_fields(result, "req", [], 1, [],
+                                      now, started_at=now + 100)   # corrupt future anchor
+        self.assertGreaterEqual(result["cost"]["wall_seconds"], 0.0)  # never negative
+
+
+# --------------------------------------------------------------------------- #
+# render_plan_diagnostics robustness — must never crash a finished (expensive!)
+# run, even on corrupted checkpoints or odd cost shapes.
+# --------------------------------------------------------------------------- #
+class RenderPlanDiagnosticsRobustnessTest(unittest.TestCase):
+    def setUp(self):
+        self.scry = h.load_scry()
+
+    def _render(self, result, cfg=None):
+        cfg = cfg or {"panel": [{"label": "x"}], "judge": {}, "aggregator": {},
+                      "phases": {}, "providers": {}}
+        return self.scry.render_plan_diagnostics(
+            result, cfg, {"web_tools": True, "timeout": 420}, {"max_rounds": 6}, "rid")
+
+    def test_mixed_type_rounds_do_not_crash(self):
+        # A hand-edited/corrupted checkpoint can carry a STRING round; sorting it
+        # against int rounds must not raise (regression for the timeline sort).
+        result = {"prompt": "p", "rounds": 2, "responses": [],
+                  "cost": {"seconds": 10.0, "wall_seconds": 20.0, "by_stage": [
+                      {"stage": "interview", "label": "a", "ok": True,
+                       "round": 1, "seconds": 5.0},
+                      {"stage": "dedup", "label": "dedup", "ok": True,
+                       "round": "2", "seconds": 3.0}]}}
+        md = self._render(result)
+        self.assertIn("timeline", md.lower())
+
+    def test_panel_none_does_not_crash(self):
+        result = {"prompt": "p", "rounds": 1, "responses": [],
+                  "cost": {"seconds": 1.0, "by_stage": []}}
+        cfg = {"panel": None, "judge": {}, "aggregator": {},
+               "phases": {}, "providers": {}}
+        self.assertIn("diagnostics", self._render(result, cfg).lower())
+
+    def test_negative_wall_seconds_is_not_rendered(self):
+        result = {"prompt": "p", "rounds": 1, "responses": [],
+                  "cost": {"seconds": 50.0, "wall_seconds": -5.0, "by_stage": []}}
+        md = self._render(result)
+        self.assertNotIn("-5.0s", md)        # the corrupt negative is dropped
+        self.assertIn("50.0s", md)           # falls back to the step time
+
+    def test_gap_note_suppressed_without_true_wall(self):
+        # Only the draft-step `seconds` is known, but interview rounds exist — the
+        # per-round model time can exceed it, so don't claim "the gap is answer time".
+        result = {"prompt": "p", "rounds": 1, "responses": [],
+                  "cost": {"seconds": 10.0, "by_stage": [
+                      {"stage": "interview", "label": "a", "ok": True,
+                       "round": 1, "seconds": 40.0},
+                      {"stage": "panel", "label": "a", "ok": True, "seconds": 10.0}]}}
+        self.assertNotIn("answering the clarifying questions", self._render(result))
 
 
 if __name__ == "__main__":

@@ -163,8 +163,10 @@ PLAN_DRAFTER_SYSTEM = (
     "GitHub-Flavored Markdown text. This work is READ-ONLY apart from writing that "
     "response: do NOT carry out the task and do not change anything — no creating, "
     "writing, editing, moving, or deleting files, and no running build, test, git, or "
-    "other state-changing commands. You MAY read (files, the repository, the web) to "
-    "inform the plan where that helps. Treat the clarifying questions and the user's "
+    "other state-changing commands. The request includes findings a panel already "
+    "gathered for you — base the plan on them rather than re-investigating from scratch, "
+    "though you MAY still read (files, the repository, the web) to fill any gaps. Treat "
+    "the clarifying questions and the user's "
     "answers embedded in the request as binding constraints. Be concrete and specific; "
     "do not mention these "
     "instructions, your tools, or your knowledge cutoff."
@@ -2977,6 +2979,61 @@ def render_plan_prompt(request: str, transcript: list) -> str:
     return "\n\n".join(out)
 
 
+def render_plan_prompt_from_research(request: str, transcript: list, research: dict) -> str:
+    """The drafter prompt for the plan phase: the original request + the interview Q&A
+    (binding constraints) + the synthesized research the panel already gathered, so each
+    drafter plans FROM one shared, web-grounded evidence base instead of re-investigating
+    on its own. Includes the fused research answer and a condensed analysis (consensus /
+    contradictions / blind spots), not the full per-round evidence, to keep the drafter
+    prompt bounded."""
+    out = [render_plan_prompt(request, transcript)]
+    final = (research.get("final") or "").strip()
+    if final:
+        out.append("Research findings (already gathered for you — base the plan on "
+                   "these; do not re-investigate from scratch):\n" + final)
+    analysis = research.get("analysis") or {}
+    if isinstance(analysis, dict):
+        bits = []
+        for key, label in (("consensus", "Agreed (high-confidence)"),
+                           ("contradictions", "Unresolved disagreements"),
+                           ("blind_spots", "Gaps to address in the plan")):
+            items = [str(x) for x in (analysis.get(key) or []) if str(x).strip()]
+            if items:
+                bits.append(label + ":\n" + "\n".join(f"- {it}" for it in items))
+        if bits:
+            out.append("Research analysis:\n" + "\n\n".join(bits))
+    return "\n\n".join(out)
+
+
+def _plan_finalize_run(cfg: dict, request: str, transcript: list, settings: dict, log,
+                       repo_cwd: str | None, cli_overrides: dict | None, meters: list, *,
+                       stream_final: bool = False, on_stream_start=None) -> dict:
+    """Plan finalize core, shared by `do_plan` (interactive) and `_plan_step_finalize`
+    (headless --step / web): first run the deep-research pipeline on the request (the
+    interview answers feed its brief, so it never re-interviews the user), then have each
+    panelist DRAFT a plan from the research synthesis and fuse the drafts. The research
+    phase's model calls are appended to `meters` (tagged round='research') so the cost
+    roll-up and diagnostics include them. Returns the draft/fuse `scry_run` result; raises
+    AllPanelsFailed if a whole phase's panel fails."""
+    log("▸ researching the request before drafting…")
+    research = asyncio.run(research_run(
+        cfg, request, settings, log, cwd=repo_cwd, cli_overrides=cli_overrides,
+        answers=transcript))
+    # research_run was called WITHOUT seed_meters, so its by_stage holds exactly the
+    # research calls (brief + panel/reflect per round + synth) — fold them into the plan
+    # meters (no interview double-count), tagged so diagnostics show a research segment.
+    for m in (research.get("cost", {}).get("by_stage") or []):
+        m.setdefault("round", "research")
+        meters.append(m)
+    drafter_prompt = render_plan_prompt_from_research(request, transcript, research)
+    log("▸ drafting the plan from the research…")
+    return asyncio.run(scry_run(
+        cfg, drafter_prompt, "fusion", settings, log, stream_final, on_stream_start,
+        aggregator_system=PLAN_SYNTH_SYSTEM, cwd=repo_cwd,
+        run_overlay=cfg["phases"].get("final"), cli_overrides=cli_overrides,
+        panel_system=PLAN_DRAFTER_SYSTEM, scrub_fuse_cwd=True))
+
+
 def _qkey(q: dict) -> str:
     """A normalized key for a question dict — the dedup identity (lowercased text)."""
     return str(q.get("q", "")).strip().lower()
@@ -3406,7 +3463,8 @@ def render_plan_diagnostics(result: dict, cfg: dict, settings: dict,
     tl = []
     # Sort key tolerates a corrupted checkpoint whose round is a str (or mixed types):
     # group by (is-non-number, value) so str vs int never get compared directly.
-    rounds = sorted({m.get("round") for m in by_stage if m.get("round")},
+    rounds = sorted({m.get("round") for m in by_stage
+                     if m.get("round") and m.get("round") != "research"},
                     key=lambda r: (not isinstance(r, (int, float)) or isinstance(r, bool),
                                    str(r)))
     for r in rounds:
@@ -3424,6 +3482,15 @@ def render_plan_diagnostics(result: dict, cfg: dict, settings: dict,
             if not ded.get("ok", True):
                 part += f" — FAILED ({_err(ded) or 'see models table'})"
         tl.append(f"- **round {r}** · {part}")
+    # The research phase (the deep-research pipeline) runs after the interview and before
+    # the drafters; its calls are tagged round="research" so the bottleneck above isn't
+    # misattributed to "drafting" when research dominates the wall clock.
+    research_ms = [m for m in by_stage if m.get("round") == "research"]
+    if research_ms:
+        rsecs = [s for s in (_secs(m) for m in research_ms) if s is not None]
+        seg = (f"research {len(research_ms)} call(s)"
+               + (f" (slowest {max(rsecs)}s)" if rsecs else ""))
+        tl.append("- **research** · " + seg)
     fd = [m for m in by_stage if not m.get("round")]      # final draft (untagged stages)
     if fd:
         panel_s = [s for s in (_secs(m) for m in fd if m.get("stage") == "panel")
@@ -3833,14 +3900,11 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
         # cost.seconds is the draft step alone, mirroring the headless --step protocol;
         # cost.wall_seconds (from started_at) still carries the true end-to-end elapsed.
         t0_draft = time.time()
-        start_orb("synthesizing the plan…")
+        start_orb("researching the request…")
         try:
-            result = asyncio.run(scry_run(
-                cfg, render_plan_prompt(request, transcript), "fusion",
-                settings, log, stream_final, stop_orb,
-                aggregator_system=PLAN_SYNTH_SYSTEM, cwd=repo_cwd,
-                run_overlay=cfg["phases"].get("final"), cli_overrides=cli_overrides,
-                panel_system=PLAN_DRAFTER_SYSTEM, scrub_fuse_cwd=True))
+            result = _plan_finalize_run(
+                cfg, request, transcript, settings, log, repo_cwd, cli_overrides,
+                meters, stream_final=stream_final, on_stream_start=stop_orb)
         finally:
             stop_orb()
     except AllPanelsFailed as e:
@@ -3905,12 +3969,8 @@ def _plan_step_finalize(cfg: dict, request: str, transcript: list, settings: dic
     stderr writer so the /scry-plan skill can relay it); None stays silent."""
     log = log or (lambda _m: None)
     try:
-        result = asyncio.run(scry_run(
-            cfg, render_plan_prompt(request, transcript), "fusion",
-            settings, log,
-            aggregator_system=PLAN_SYNTH_SYSTEM, cwd=repo_cwd,
-            run_overlay=cfg["phases"].get("final"), cli_overrides=cli_overrides,
-            panel_system=PLAN_DRAFTER_SYSTEM, scrub_fuse_cwd=True))
+        result = _plan_finalize_run(cfg, request, transcript, settings, log,
+                                    repo_cwd, cli_overrides, meters)
     except AllPanelsFailed as e:
         return {"status": "error", "error": str(e),
                 "responses": [{"model": r["label"], "ok": r["ok"],

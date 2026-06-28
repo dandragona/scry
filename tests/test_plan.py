@@ -414,6 +414,31 @@ class PlanSubprocessTest(unittest.TestCase):
         self.assertIn(scry.PLAN_DRAFTER_SYSTEM, seen)
         self.assertNotEqual(scry.PLAN_DRAFTER_SYSTEM, scry.PLAN_SYNTH_SYSTEM)
 
+    # ----- plan = research + a plan phase ----------------------------------- #
+    def test_plan_researches_then_drafts_from_the_synthesis(self):
+        # Plan finalize now runs the deep-research pipeline first, then feeds its
+        # synthesis to the drafters. Assert (a) the research phase ran (its synthesis
+        # system prompt shows up alongside the drafter's), and (b) the drafter prompt
+        # carried the research synthesis text — not just the bare interview transcript.
+        scry = h.load_scry()
+        d = tempfile.mkdtemp(prefix="scry-research-plan-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        sysdump = os.path.join(d, "sys.txt")
+        draftdump = os.path.join(d, "draft.txt")
+        env = self._env(
+            h.claude_plan(rounds_before_ready=1, research_final="RESEARCH-MARKER-XYZ"),
+            SCRY_SYSDUMP=sysdump, SCRY_DRAFTDUMP=draftdump)
+        cp = h.run_scry(self._args(), input="linux\nok\n", env=env)
+        self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
+        with open(sysdump) as f:
+            seen = f.read()
+        self.assertIn(scry.RESEARCH_SYNTH_SYSTEM, seen)   # the research phase ran
+        self.assertIn(scry.PLAN_DRAFTER_SYSTEM, seen)     # the drafters ran too
+        with open(draftdump) as f:
+            draft_in = f.read()
+        # The drafters were handed the research synthesis, not just the Q&A transcript.
+        self.assertIn("RESEARCH-MARKER-XYZ", draft_in)
+
     # ----- done sentinel stops early ---------------------------------------- #
     def test_done_sentinel_stops_in_round_one(self):
         rec, _ = self._json_run(h.claude_plan(rounds_before_ready=99), "done\n")
@@ -518,6 +543,20 @@ class PlanSubprocessTest(unittest.TestCase):
         self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
         self.assertTrue(os.path.exists(out))
         self.assertTrue(os.path.exists(os.path.join(d, "myplan.diagnostics.md")))
+
+    # ----- diagnostics show the research phase as its own timeline segment --- #
+    def test_diagnostics_show_a_research_segment(self):
+        d = tempfile.mkdtemp(prefix="scry-plan-diag-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        out = os.path.join(d, "myplan.md")
+        env = self._env(h.claude_plan(rounds_before_ready=1))
+        cp = h.run_scry(self._args("--out", out), input="linux\nok\n", env=env, cwd=d)
+        self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
+        with open(os.path.join(d, "myplan.diagnostics.md")) as f:
+            diag = f.read()
+        self.assertIn("## timeline", diag)
+        # The research phase is a distinct timeline segment, not folded into the draft.
+        self.assertIn("**research**", diag)
 
     # ----- history records mode "plan"; `scry last` reprints it ------------- #
     def test_history_saved_as_plan_mode(self):

@@ -146,7 +146,7 @@ def claude_smart(proposer: str = "PROPOSER ANSWER", fused: str = "FUSED ANSWER",
 def claude_plan(rounds_before_ready: int = 1, questions=None,
                 fused: str = "## Context\nThe plan.\n## Steps\n1. do it",
                 unique_each_round: bool = False, report_cwd: bool = False,
-                fail_synthesis: bool = False) -> str:
+                fail_synthesis: bool = False, research_final: str = "RESEARCH SYNTHESIS") -> str:
     """A claude stub for `scry plan`: ONE binary that plays every plan role by
     branching on a substring UNIQUE to each system prompt (the prompts share phrases
     like 'implementation plan'/'clarifying questions', so we key on disjoint anchors):
@@ -184,6 +184,8 @@ def claude_plan(rounds_before_ready: int = 1, questions=None,
         # disjoint system-prompt anchors the role branches below use.
         "stage = ('dedup' if 'deduplicating' in sp else 'synth' if 'plan drafts' in sp"
         "  else 'interview' if 'scope a task' in sp else 'judge' if 'impartial judge' in sp"
+        "  else 'brief' if 'research brief' in sp else 'rpanel' if 'deep research analyst' in sp"
+        "  else 'reflect' if 'research referee' in sp else 'rsynth' if 'research synthesis' in sp"
         "  else 'title' if 'name files' in sp else 'draft')\n"
         "if os.environ.get('SCRY_CWDDUMP'):\n"
         "    open(os.environ['SCRY_CWDDUMP'], 'a').write(stage + '\\t' + os.getcwd() + '\\n')\n"
@@ -193,8 +195,21 @@ def claude_plan(rounds_before_ready: int = 1, questions=None,
         f"uniq = {bool(unique_each_round)!r}\n"
         f"rc = {bool(report_cwd)!r}\n"
         f"fail_synth = {bool(fail_synthesis)!r}\n"
+        f"research_final = {research_final!r}\n"
         "answered = len(re.findall(r'\\nA\\d+: ', data))\n"
-        "if 'deduplicating' in sp:\n"
+        # Research phase of plan finalize (research_run before the drafters): play each
+        # research role by its disjoint anchor; the referee returns no open_questions so
+        # the gap loop closes after one round.
+        "if 'research brief' in sp:\n"
+        "    print(json.dumps({'result': json.dumps({'intent': 'I', 'sub_questions': ['s1', 's2', 's3']}), 'is_error': False}))\n"
+        "elif 'deep research analyst' in sp:\n"
+        "    print(json.dumps({'result': 'RESEARCH FINDINGS', 'is_error': False}))\n"
+        "elif 'research referee' in sp:\n"
+        "    ra = {'consensus': [], 'contradictions': [], 'partial_coverage': [], 'unique_insights': [], 'blind_spots': [], 'open_questions': []}\n"
+        "    print(json.dumps({'result': json.dumps(ra), 'is_error': False}))\n"
+        "elif 'research synthesis' in sp:\n"
+        "    print(json.dumps({'result': research_final, 'is_error': False}))\n"
+        "elif 'deduplicating' in sp:\n"
         "    m = re.search(r'\\{.*\\}', data, re.S)\n"
         "    prop = json.loads(m.group(0)).get('proposed_questions', []) if m else []\n"
         "    seen = set(); out = []\n"
@@ -221,6 +236,10 @@ def claude_plan(rounds_before_ready: int = 1, questions=None,
         "                'unique_insights': [], 'blind_spots': []}\n"
         "    print(json.dumps({'result': json.dumps(analysis), 'is_error': False}))\n"
         "else:\n"
+        # The draft stage (PLAN_DRAFTER_SYSTEM panel proposer): optionally dump its stdin
+        # so a test can assert the drafter prompt carries the research synthesis.
+        "    if os.environ.get('SCRY_DRAFTDUMP'):\n"
+        "        open(os.environ['SCRY_DRAFTDUMP'], 'a').write(data + '\\n===SCRY-DRAFT-END===\\n')\n"
         "    print(json.dumps({'result': ('boom' if fail_synth else 'PLAN DRAFT'),\n"
         "                       'is_error': fail_synth}))\n"
     )

@@ -146,6 +146,20 @@ class WebApiTest(unittest.TestCase):
         self.assertNotIn("Traceback", r.text)
         self.assertNotIn("PermissionError", r.text)
 
+    # -- conversation listing / message_count ----------------------------- #
+    def test_conversation_listing_reports_message_count(self):
+        # The web UI reuses an empty conversation (message_count == 0) instead of
+        # minting a fresh blank one on every load, so the listing API must expose it.
+        empty = self._conv()
+        used = self._conv()
+        self.c.post(f"/api/conversations/{used['id']}/messages",
+                    json={"capability": "scry", "content": "hello there"})
+        convs = self.c.get("/api/locations/contextless/conversations").json()["conversations"]
+        by_id = {c["id"]: c for c in convs}
+        self.assertEqual(by_id[empty["id"]]["message_count"], 0)
+        # the user message is recorded immediately on send, so the count is >= 1
+        self.assertGreaterEqual(by_id[used["id"]]["message_count"], 1)
+
     # -- upgrade ----------------------------------------------------------- #
     def test_upgrade_contextless_conversation_to_project(self):
         conv = self._conv()

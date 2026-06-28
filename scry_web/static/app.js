@@ -1,5 +1,6 @@
 import { api } from "./api.js";
 import { renderMarkdown } from "./markdown.js";
+import { toast, confirmDialog, promptDialog } from "./ui.js";
 
 const CAPABILITIES = [
   { id: "scry", label: "Scry", hint: "multi-model fan-out + fused answer" },
@@ -12,6 +13,7 @@ const state = {
   locations: [],
   activeLocationId: "contextless",
   conv: null, // { conversation, location, messages, runs, attachments }
+  convList: [], // sibling conversations in the active location (for the picker)
   pendingAttachments: [],
   options: {
     capability: "scry",
@@ -21,6 +23,7 @@ const state = {
     max_tool_calls: "",
     max_output_tokens: "",
     timeout: "",
+    max_rounds: "",
   },
   polling: {},
 };
@@ -32,7 +35,12 @@ const el = (html) => {
   return t.content.firstElementChild;
 };
 const esc = (s) =>
-  (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  (s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 
 // --------------------------------------------------------------------------- //
 // Boot
@@ -40,9 +48,10 @@ const esc = (s) =>
 async function init() {
   try {
     wireComposer();
+    wireMobileNav();
     await refreshStatus();
     await refreshLocations();
-    await newConversation("contextless");
+    await openScratchOrNew("contextless");
   } catch (e) {
     fatalError(e);
   }
@@ -65,6 +74,70 @@ function fatalError(e) {
   if (banner) {
     banner.style.display = "block";
     banner.innerHTML = `⚠ Couldn't reach the scry server — is it running? <code>${esc(msg)}</code>`;
+  }
+}
+
+// --------------------------------------------------------------------------- //
+// Mobile navigation (sidebar becomes a slide-in drawer below 760px)
+// --------------------------------------------------------------------------- //
+function wireMobileNav() {
+  const toggle = document.getElementById("nav-toggle");
+  const backdrop = document.getElementById("nav-backdrop");
+  if (toggle) toggle.addEventListener("click", toggleMobileNav);
+  if (backdrop) backdrop.addEventListener("click", closeMobileNav);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && document.body.classList.contains("nav-open")) closeMobileNav();
+  });
+  // Crossing back to desktop must clear any open-drawer state, otherwise it
+  // lingers (stale aria-expanded) and slams open if the window shrinks again.
+  window.matchMedia("(min-width: 761px)").addEventListener("change", (e) => {
+    if (e.matches) closeMobileNav();
+  });
+}
+function openMobileNav() {
+  document.body.classList.add("nav-open");
+  const t = document.getElementById("nav-toggle");
+  const b = document.getElementById("nav-backdrop");
+  if (t) {
+    t.setAttribute("aria-expanded", "true");
+    t.setAttribute("aria-label", "Close navigation");
+    t.textContent = "✕";
+  }
+  if (b) b.hidden = false;
+}
+function closeMobileNav() {
+  document.body.classList.remove("nav-open");
+  const t = document.getElementById("nav-toggle");
+  const b = document.getElementById("nav-backdrop");
+  if (t) {
+    t.setAttribute("aria-expanded", "false");
+    t.setAttribute("aria-label", "Open navigation");
+    t.textContent = "☰";
+  }
+  if (b) b.hidden = true;
+}
+function toggleMobileNav() {
+  if (document.body.classList.contains("nav-open")) closeMobileNav();
+  else openMobileNav();
+}
+
+// Open an existing empty conversation in this location if there is one, else
+// create a fresh one. Stops blank "Untitled" conversations piling up on every
+// page load / "New chat" click.
+async function openScratchOrNew(locationId) {
+  let convs = [];
+  try {
+    const r = await api.locationConversations(locationId);
+    convs = r.conversations || [];
+  } catch (_e) {
+    /* fall through and create one */
+  }
+  const empty = convs.find((c) => (c.message_count || 0) === 0);
+  if (empty) {
+    state.activeLocationId = locationId;
+    await loadConversation(empty.id);
+  } else {
+    await newConversation(locationId);
   }
 }
 
@@ -95,14 +168,27 @@ async function newConversation(locationId) {
 }
 
 async function loadConversation(cid) {
+  // Stop polls from the conversation we're leaving — their interval callbacks
+  // read/mutate state.conv and would otherwise corrupt the one we're loading.
+  for (const id of Object.keys(state.polling)) stopPolling(id);
   state.conv = await api.getConversation(cid);
   state.activeLocationId = state.conv.location.id;
   state.pendingAttachments = [];
+  // Load sibling conversations so the picker is available immediately (not only
+  // after clicking a location row).
+  try {
+    const r = await api.locationConversations(state.activeLocationId);
+    state.convList = r.conversations || [];
+  } catch (_e) {
+    state.convList = [];
+  }
   renderSidebar();
   renderThread();
-  // resume polling any non-terminal runs
+  // resume polling any in-flight runs. A "questions" run is already rendered by
+  // renderThread() above and is waiting on the user — polling it would only
+  // re-render and wipe in-progress answers, so we don't resume it here.
   for (const run of state.conv.runs || []) {
-    if (["running", "questions", "ready"].includes(run.status)) startPolling(run.id);
+    if (["running", "ready"].includes(run.status)) startPolling(run.id);
   }
 }
 
@@ -120,7 +206,8 @@ function renderSidebar() {
       ${locs
         .map(
           (loc) => `
-        <div class="loc ${loc.id === state.activeLocationId ? "active" : ""}" data-loc="${loc.id}">
+        <div class="loc ${loc.id === state.activeLocationId ? "active" : ""}" data-loc="${loc.id}"
+             role="button" tabindex="0" aria-label="${esc(loc.name)}, ${loc.conversation_count || 0} conversations">
           <span class="loc-name">${esc(loc.name)}</span>
           <span class="loc-count">${loc.conversation_count || 0}</span>
         </div>`
@@ -152,31 +239,45 @@ function renderSidebar() {
       }
     </div>`;
 
-  side.querySelectorAll(".loc").forEach((node) =>
-    node.addEventListener("click", () => onLocationClick(node.dataset.loc))
-  );
-  side.querySelector('[data-action="new-chat"]').addEventListener("click", () =>
-    newConversation(state.activeLocationId || "contextless")
-  );
+  side.querySelectorAll(".loc").forEach((node) => {
+    const go = () => onLocationClick(node.dataset.loc);
+    node.addEventListener("click", go);
+    node.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        go();
+      }
+    });
+  });
+  side.querySelector('[data-action="new-chat"]').addEventListener("click", () => {
+    closeMobileNav();
+    openScratchOrNew(state.activeLocationId || "contextless");
+  });
   side.querySelector('[data-action="new-workspace"]').addEventListener("click", onNewWorkspace);
   side.querySelector('[data-action="open-project"]').addEventListener("click", onOpenProject);
 }
 
 async function onLocationClick(locId) {
+  closeMobileNav();
   state.activeLocationId = locId;
   const r = await api.locationConversations(locId);
   if (r.conversations.length) {
     await loadConversation(r.conversations[0].id);
-    showConversationPicker(r.conversations);
   } else {
     await newConversation(locId);
   }
 }
 
-function showConversationPicker(convs) {
-  // Render the location's conversation list in the thread header for quick switching.
+// Render the active location's conversations as a switcher in the thread header.
+// Shown whenever there's more than one conversation to switch between.
+function renderConvPicker() {
   const host = $("#conv-picker");
   if (!host) return;
+  const convs = state.convList || [];
+  if (convs.length <= 1) {
+    host.innerHTML = "";
+    return;
+  }
   host.innerHTML = convs
     .map(
       (c) =>
@@ -189,22 +290,34 @@ function showConversationPicker(convs) {
 }
 
 async function onNewWorkspace() {
-  const name = prompt("New workspace name:");
+  const name = await promptDialog("Name your new workspace.", {
+    title: "New workspace",
+    placeholder: "e.g. payments-refactor",
+    okText: "Create",
+  });
   if (!name) return;
-  const r = await api.createWorkspace(name);
-  await refreshLocations();
-  await onLocationClick(r.location.id);
+  try {
+    const r = await api.createWorkspace(name);
+    await refreshLocations();
+    await onLocationClick(r.location.id);
+  } catch (e) {
+    toast("Could not create workspace: " + e.message, "error");
+  }
 }
 
 async function onOpenProject() {
-  const path = prompt("Absolute path to a directory to open as a project:");
+  const path = await promptDialog("Absolute path to a directory to open as a project.", {
+    title: "Open project",
+    placeholder: "/Users/you/code/my-project",
+    okText: "Open",
+  });
   if (!path) return;
   try {
     const r = await api.openProject(path);
     await refreshLocations();
     await onLocationClick(r.location.id);
   } catch (e) {
-    alert("Could not open project: " + e.message);
+    toast("Could not open project: " + e.message, "error");
   }
 }
 
@@ -259,6 +372,7 @@ function renderThread() {
   const up = thread.querySelector('[data-action="upgrade"]');
   if (up) up.addEventListener("click", onUpgrade);
   thread.querySelector('[data-action="export"]').addEventListener("click", onExport);
+  renderConvPicker();
   wireRunControls(thread);
   thread.querySelector(".messages").scrollTop = thread.querySelector(".messages").scrollHeight;
   thread.scrollTop = thread.scrollHeight;
@@ -298,10 +412,21 @@ function capLabel(cap) {
 // --------------------------------------------------------------------------- //
 // Run rendering (in-flight + completed details)
 // --------------------------------------------------------------------------- //
+function fmtElapsed(s) {
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${String(s % 60).padStart(2, "0")}s`;
+}
+
 function runBlock(run) {
   let body = "";
   if (run.status === "running") {
-    body = `<div class="working"><span class="spinner"></span> the panel is deliberating…</div>`;
+    // Elapsed in the *current* phase (updated_at is set when it entered running),
+    // so a slow panel draft visibly ticks instead of looking frozen.
+    const base = run.updated_at || run.created_at;
+    const secs = base ? Math.max(0, Math.round(Date.now() / 1000 - base)) : null;
+    const elapsed = secs != null ? ` <span class="elapsed">${fmtElapsed(secs)}</span>` : "";
+    body = `<div class="working"><span class="spinner"></span> the panel is deliberating…${elapsed}</div>`;
   } else if (run.status === "questions") {
     body = questionCards(run);
   } else if (run.status === "ready") {
@@ -322,7 +447,7 @@ function questionCards(run) {
       const opts = (q.options || [])
         .map(
           (o, oi) =>
-            `<button type="button" class="opt" data-q="${idx}" data-opt="${oi}">${esc(o)}</button>`
+            `<button type="button" class="opt" data-q="${idx}" data-opt="${oi}" aria-pressed="false">${esc(o)}</button>`
         )
         .join("");
       return `<div class="qcard" data-qidx="${idx}">
@@ -417,8 +542,12 @@ function wireRunControls(root) {
   root.querySelectorAll(".opt").forEach((b) =>
     b.addEventListener("click", () => {
       const card = b.closest(".qcard");
-      card.querySelectorAll(".opt").forEach((o) => o.classList.remove("sel"));
+      card.querySelectorAll(".opt").forEach((o) => {
+        o.classList.remove("sel");
+        o.setAttribute("aria-pressed", "false");
+      });
       b.classList.add("sel");
+      b.setAttribute("aria-pressed", "true");
       const input = card.querySelector(".qinput");
       input.value = b.textContent;
     })
@@ -428,7 +557,7 @@ function wireRunControls(root) {
       try {
         await api.reveal(b.dataset.run, b.dataset.index);
       } catch (e) {
-        alert("Reveal failed: " + e.message);
+        toast("Reveal failed: " + e.message, "error");
       }
     })
   );
@@ -440,23 +569,18 @@ async function submitAnswers(runId, done) {
   if (done) {
     payload.done = true;
   } else {
+    if (!node) return; // thread re-rendered out from under us — nothing to submit
     const run = (state.conv.runs || []).find((r) => r.id === runId);
     const qs = (run && run.questions) || [];
     const answers = [];
     node.querySelectorAll(".qcard").forEach((card) => {
       const idx = +card.dataset.qidx;
       const val = card.querySelector(".qinput").value.trim();
-      if (val) answers.push({ q: qs[idx].q, a: val });
+      if (val && qs[idx]) answers.push({ q: qs[idx].q, a: val });
     });
     payload.answers = answers;
   }
-  if (node) {
-    // Drop the data-run marker so the poll loop no longer treats this as the
-    // live, must-preserve questions UI — the next poll re-renders fresh state
-    // (a new round of questions, or the drafting spinner).
-    node.removeAttribute("data-run");
-    node.innerHTML = `<div class="working"><span class="spinner"></span> thinking…</div>`;
-  }
+  if (node) node.innerHTML = `<div class="working"><span class="spinner"></span> thinking…</div>`;
   await api.answerRun(runId, payload);
   startPolling(runId);
 }
@@ -466,28 +590,39 @@ async function submitAnswers(runId, done) {
 // --------------------------------------------------------------------------- //
 function startPolling(runId) {
   if (state.polling[runId]) return;
+  const ownerCid = state.conv && state.conv.conversation.id;
   state.polling[runId] = setInterval(async () => {
+    // If the user navigated to a different conversation, this poll is stale.
+    if (!state.conv || state.conv.conversation.id !== ownerCid) {
+      stopPolling(runId);
+      return;
+    }
     let run;
     try {
       run = (await api.getRun(runId)).run;
     } catch (_e) {
       return;
     }
+    // The conversation may have changed during the await — bail before touching
+    // state.conv so a stale poll can't write a run into the wrong conversation.
+    if (!state.conv || state.conv.conversation.id !== ownerCid) return;
     patchRun(run);
     if (run.status === "ready") {
       // auto-advance: the panel is confident → draft the plan
       stopPolling(runId);
       await api.answerRun(runId, { done: true });
-      startPolling(runId);
+      if (state.conv && state.conv.conversation.id === ownerCid) startPolling(runId);
       return;
     }
     if (["done", "error"].includes(run.status)) {
       stopPolling(runId);
       await loadConversation(state.conv.conversation.id);
-    } else if (run.status === "questions" && $(`.questions[data-run="${run.id}"]`)) {
-      // Questions are already on screen and don't change while we wait for
-      // answers — re-rendering would wipe the user's in-progress inputs/focus.
-      // Skip the re-render so typing survives across polls.
+    } else if (run.status === "questions") {
+      // Render the questions once, then stop polling. The run won't change
+      // server-side until the user answers, and re-rendering on every tick
+      // would wipe answers they're typing into the cards.
+      renderThread();
+      stopPolling(runId);
     } else {
       renderThread();
     }
@@ -516,13 +651,20 @@ function wireComposer() {
   const cap = $("#cap-picker");
   cap.innerHTML = CAPABILITIES.map(
     (c) =>
-      `<button class="cap ${c.id === state.options.capability ? "active" : ""}" data-cap="${c.id}" title="${c.hint}">${c.label}</button>`
+      `<button class="cap ${c.id === state.options.capability ? "active" : ""}" data-cap="${c.id}" aria-pressed="${
+        c.id === state.options.capability
+      }" title="${c.hint}">${c.label}</button>`
   ).join("");
   cap.querySelectorAll(".cap").forEach((b) =>
     b.addEventListener("click", () => {
       state.options.capability = b.dataset.cap;
-      cap.querySelectorAll(".cap").forEach((x) => x.classList.remove("active"));
+      cap.querySelectorAll(".cap").forEach((x) => {
+        x.classList.remove("active");
+        x.setAttribute("aria-pressed", "false");
+      });
       b.classList.add("active");
+      b.setAttribute("aria-pressed", "true");
+      applyCapabilityUI(b.dataset.cap);
     })
   );
 
@@ -547,6 +689,63 @@ function wireComposer() {
   bindAdv("opt-tool-calls", "max_tool_calls");
   bindAdv("opt-out-tokens", "max_output_tokens");
   bindAdv("opt-timeout", "timeout");
+  bindAdv("opt-max-rounds", "max_rounds");
+
+  applyCapabilityUI(state.options.capability);
+}
+
+// Keep the composer's options + placeholder honest about what each mode uses:
+// Mode (fusion/synthesize) only affects Scry; Research always runs web-on
+// (the engine forces it); Max plan rounds only applies to the Plan interview.
+function applyCapabilityUI(cap) {
+  const ta = $("#composer-input");
+  const placeholders = {
+    scry: "Ask the panel…  (⌘/Ctrl + Enter to send)",
+    plan: "Describe what you want to plan…  (⌘/Ctrl + Enter to send)",
+    research: "What should the panel research?  (⌘/Ctrl + Enter to send)",
+  };
+  if (placeholders[cap]) ta.placeholder = placeholders[cap];
+
+  setOptEnabled("opt-mode", cap === "scry", cap === "scry" ? "" : "scry only");
+
+  const web = document.getElementById("opt-web");
+  if (web) {
+    if (cap === "research") {
+      web.value = "on";
+      setOptEnabled("opt-web", false, "forced on for research");
+    } else {
+      web.value =
+        state.options.web_tools === true
+          ? "on"
+          : state.options.web_tools === false
+          ? "off"
+          : "";
+      setOptEnabled("opt-web", true, "");
+    }
+  }
+
+  const roundsLabel = document.getElementById("opt-max-rounds")?.closest("label");
+  if (roundsLabel) roundsLabel.style.display = cap === "plan" ? "" : "none";
+}
+
+function setOptEnabled(id, enabled, note = "") {
+  const ctl = document.getElementById(id);
+  if (!ctl) return;
+  ctl.disabled = !enabled;
+  const label = ctl.closest("label");
+  if (!label) return;
+  label.classList.toggle("disabled", !enabled);
+  let hint = label.querySelector(".opt-note");
+  if (note) {
+    if (!hint) {
+      hint = document.createElement("span");
+      hint.className = "opt-note";
+      label.appendChild(hint);
+    }
+    hint.textContent = note;
+  } else if (hint) {
+    hint.remove();
+  }
 }
 
 function bindAdv(id, key, tri) {
@@ -567,7 +766,7 @@ async function onAttach(e) {
     state.pendingAttachments.push(r.attachment);
     renderPending();
   } catch (err) {
-    alert("Upload failed: " + err.message);
+    toast("Upload failed: " + err.message, "error");
   }
   e.target.value = "";
 }
@@ -582,7 +781,7 @@ function renderPending() {
 function collectOptions() {
   const o = { mode: state.options.mode };
   if (state.options.web_tools !== null) o.web_tools = state.options.web_tools;
-  for (const k of ["effort", "max_tool_calls", "max_output_tokens", "timeout"]) {
+  for (const k of ["effort", "max_tool_calls", "max_output_tokens", "timeout", "max_rounds"]) {
     const v = state.options[k];
     if (v !== "" && v != null) {
       o[k] = ["effort"].includes(k) ? v : Number(v);
@@ -596,33 +795,28 @@ async function sendMessage() {
   const content = ta.value.trim();
   if (!content || !state.conv) return;
   if (state.status && !state.status.ready && !state.status.fake_engine) {
-    if (!confirm("The panel isn't reporting ready. Send anyway?")) return;
+    const go = await confirmDialog("The panel isn't reporting ready. Send anyway?", {
+      okText: "Send anyway",
+    });
+    if (!go) return;
   }
-  // Capture what we're sending and clear the UI optimistically, but keep a copy
-  // so a transient send failure doesn't eat a long composed prompt/attachments.
-  const sentAttachments = state.pendingAttachments;
   const payload = {
     capability: state.options.capability,
     content,
     options: collectOptions(),
-    attachment_ids: sentAttachments.map((a) => a.id),
+    attachment_ids: state.pendingAttachments.map((a) => a.id),
   };
-  ta.value = "";
-  state.pendingAttachments = [];
-  renderPending();
-  ta.disabled = true;
   try {
     const r = await api.postMessage(state.conv.conversation.id, payload);
+    // Clear the composer only once the message is safely accepted, so a failed
+    // send never discards what the user typed (or their pending attachments).
+    ta.value = "";
+    state.pendingAttachments = [];
+    renderPending();
     await loadConversation(state.conv.conversation.id);
     startPolling(r.run.id);
   } catch (e) {
-    // Restore the user's input + attachments so nothing is lost.
-    ta.value = content;
-    state.pendingAttachments = sentAttachments;
-    renderPending();
-    alert("Send failed: " + e.message);
-  } finally {
-    ta.disabled = false;
+    toast("Send failed — your message was kept. " + e.message, "error");
   }
 }
 
@@ -630,15 +824,19 @@ async function sendMessage() {
 // Misc actions
 // --------------------------------------------------------------------------- //
 async function onUpgrade() {
-  const name = prompt("Promote this session into a new scry project. Project name:");
+  const name = await promptDialog("Promote this session into a new scry project.", {
+    title: "Promote to project",
+    placeholder: "project name",
+    okText: "Promote",
+  });
   if (!name) return;
   try {
     const r = await api.upgradeConversation(state.conv.conversation.id, name);
     await refreshLocations();
     await loadConversation(r.conversation_id);
-    alert("Promoted to project at:\n" + r.location.root_path);
+    toast("Promoted to project at " + r.location.root_path, "success", 7000);
   } catch (e) {
-    alert("Promote failed: " + e.message);
+    toast("Promote failed: " + e.message, "error");
   }
 }
 

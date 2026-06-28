@@ -524,7 +524,7 @@ DEFAULT_CONFIG = {
         "max_rounds": 5,
         # Give the panel read-only access to the directory `scry plan` is run in, so
         # plans are grounded in the actual code (not the scrubbed temp cwd normal runs
-        # use). Read-only — mutating tools stay disabled. Disable with --no-repo.
+        # use). Read-only — mutating tools stay disabled. Disable with --repo none.
         "repo_context": True,
     },
     # Deep Research mode — the default bare `scry`. The gap-driven loop runs `max_rounds`
@@ -532,7 +532,7 @@ DEFAULT_CONFIG = {
     # `hard_cap` (the absolute ceiling). early_exit lets it stop at depth once gaps are
     # exhausted; clarify gates the (interactive-only) clarifying interview. repo_context
     # "auto" grounds the panel in a surrounding git repo when one is detected; "off"
-    # forces external-world. --depth/--max-rounds/--no-clarify/--repo/--no-repo override.
+    # forces external-world. --depth/--hard-cap/--no-clarify/--repo override.
     "research": {
         "clarify": True,
         "max_rounds": 3,
@@ -1735,7 +1735,7 @@ async def research_run(cfg: dict, prompt: str, settings: dict, log,
     reflect_web = bool(reflect_set.get("web_tools"))
     synth_web = bool(synth_set.get("web_tools"))
     # target = adaptive minimum depth; cap = absolute ceiling. The cap wins: an
-    # explicit low --max-rounds clamps the target down rather than being raised to it.
+    # explicit low --hard-cap clamps the target down rather than being raised to it.
     target = max(1, int(depth_override or rcfg.get("max_rounds", 3) or 3))
     cap = max(1, int(cap_override or rcfg.get("hard_cap", 5) or 5))
     target = min(target, cap)
@@ -3933,7 +3933,7 @@ def do_plan(cfg: dict, request: str, settings: dict, plan_settings: dict,
         print(format_cost_tally(cost, color_enabled(sys.stderr)), file=sys.stderr)
 
     # Writing the plan + a diagnostics file is the default; --out overrides the path,
-    # --no-out suppresses both (print-to-stdout only). The diagnostics file rides
+    # `--out -` suppresses both (print-to-stdout only). The diagnostics file rides
     # alongside the plan so a failed panel member (e.g. an opus draft that hit the
     # turn cap) is visible without digging through ~/.scry.
     if not no_out:
@@ -4296,7 +4296,7 @@ def do_research(cfg: dict, prompt: str, settings: dict, args, cli: dict) -> int:
         return 130
 
     # Consensus map from the final round's referee analysis (auto on an interactive
-    # stderr; --map forces, --no-map suppresses; never under --json/--quiet).
+    # stderr; --map on forces, --map off suppresses; never under --json/--quiet).
     analysis = result.get("analysis")
     if (analysis and args.map != "off" and not as_json and not quiet
             and (args.map == "on" or sys.stderr.isatty())):

@@ -307,7 +307,6 @@ DEFAULT_PHASES = {
 }
 
 DEFAULT_CONFIG = {
-    "mode": "research",
     "settings": dict(DEFAULT_SETTINGS),
     "phases": {ph: dict(ov) for ph, ov in DEFAULT_PHASES.items()},
     "providers": {
@@ -1827,19 +1826,20 @@ def _show(role: str, argv: list, env_over: dict, stdin_note: str) -> None:
     print(f"{role:<10} {envp}{shlex.join(_trunc(t) for t in argv)}   <{stdin_note}>")
 
 
-def do_dry_run(cfg: dict, mode: str, settings: dict,
+def do_dry_run(cfg: dict, settings: dict,
                cli_overrides: dict | None = None) -> None:
-    # Each stage renders from its own resolved (phase) settings, so the previewed
-    # commands match what would actually run (e.g. a judge configured web-off).
+    # The deep-research pipeline (the only query pipeline): panel (web on) -> per-round
+    # REFLECT judge (web off) -> AGGREGATOR synthesis (web off). Each stage renders from
+    # its own resolved (phase) settings, so the previewed commands match what runs.
     phases = cfg.get("phases", {})
-    panel_set = _phase_settings(settings, phases, "panel", None, cli_overrides)
-    judge_set = _phase_settings(settings, phases, "judge", None, cli_overrides)
+    panel_set = _phase_settings(settings, phases, "research", None, cli_overrides)
+    reflect_set = _phase_settings(settings, phases, "reflect", None, cli_overrides)
     synth_set = _phase_settings(settings, phases, "synthesis", None, cli_overrides)
-    print(f"[dry-run] mode={mode}  web_tools={bool(panel_set.get('web_tools'))}"
+    print(f"[dry-run] research  web_tools={bool(panel_set.get('web_tools'))}"
           f"  max_tool_calls={panel_set.get('max_tool_calls') or 'uncapped'}"
           f"  effort={panel_set.get('effort') or 'per-provider'}"
           f"  max_output_tokens={panel_set.get('max_output_tokens')}"
-          f"  (per-phase resolved; judge/synthesis may differ)\n")
+          f"  (per-phase resolved; reflect/synthesis run web-off)\n")
     for m in cfg.get("panel", []):
         p = cfg["providers"].get(m["provider"])
         if not p:
@@ -1850,38 +1850,28 @@ def do_dry_run(cfg: dict, mode: str, settings: dict,
                                 "{OUTFILE}", agentfile="{AGENTFILE}")
         argv, note = _dry_prompt(p, argv, "prompt")
         _show("PROPOSER", argv, env, note)
-    # Both fusion and research run a judge; synthesize skips it. Research's judge is the
-    # per-round REFLECT stage (the `reflect` phase); fusion's is the `judge` phase. Both
-    # resolve web-OFF now (only panelists do web) — preview the command that actually runs.
-    if mode in ("fusion", "research"):
-        j = cfg["judge"]
-        p = cfg["providers"][j["provider"]]
-        is_research = mode == "research"
-        judge_sys = RESEARCH_JUDGE_SYSTEM if is_research else JUDGE_SYSTEM
-        jset = (_phase_settings(settings, phases, "reflect", None, cli_overrides)
-                if is_research else judge_set)
-        role = "REFLECT" if is_research else "JUDGE"
-        sysv = judge_sys if p.get("system_flag") else None
-        argv, env = render_call(p, j.get("model", ""), sysv,
-                                bool(jset.get("web_tools")), jset,
-                                "{OUTFILE}", agentfile="{AGENTFILE}")
-        argv, note = _dry_prompt(p, argv, "query+responses")
-        _show(role, argv, env, note)
+    # Research's per-round judge is the REFLECT stage (web-off — only panelists do web).
+    j = cfg["judge"]
+    p = cfg["providers"][j["provider"]]
+    sysv = RESEARCH_JUDGE_SYSTEM if p.get("system_flag") else None
+    argv, env = render_call(p, j.get("model", ""), sysv,
+                            bool(reflect_set.get("web_tools")), reflect_set,
+                            "{OUTFILE}", agentfile="{AGENTFILE}")
+    argv, note = _dry_prompt(p, argv, "query+responses")
+    _show("REFLECT", argv, env, note)
     a = cfg["aggregator"]
     p = cfg["providers"][a["provider"]]
-    agg_sys = RESEARCH_SYNTH_SYSTEM if mode == "research" else MOA_AGGREGATOR_SYSTEM
-    sysv = agg_sys if p.get("system_flag") else None
+    sysv = RESEARCH_SYNTH_SYSTEM if p.get("system_flag") else None
     argv, env = render_call(p, a.get("model", ""), sysv,
                             bool(synth_set.get("web_tools")), synth_set,
                             "{OUTFILE}", agentfile="{AGENTFILE}")
     argv, note = _dry_prompt(p, argv, "query+responses")
     _show("AGGREGATOR", argv, env, note)
-    if mode == "research":
-        rcfg = cfg.get("research", {})
-        print(f"\n[research] gap-driven loop: {rcfg.get('max_rounds', 3)}–"
-              f"{rcfg.get('hard_cap', 5)} rounds (each = the panel above + one "
-              f"REFLECT), then one AGGREGATOR synthesis. The PROPOSER/REFLECT lines "
-              f"above are previewed once; the loop re-fans the open gaps each round.")
+    rcfg = cfg.get("research", {})
+    print(f"\n[research] gap-driven loop: {rcfg.get('max_rounds', 3)}–"
+          f"{rcfg.get('hard_cap', 5)} rounds (each = the panel above + one "
+          f"REFLECT), then one AGGREGATOR synthesis. The PROPOSER/REFLECT lines "
+          f"above are previewed once; the loop re-fans the open gaps each round.")
 
 
 # --------------------------------------------------------------------------- #
@@ -2167,7 +2157,6 @@ def do_init(cfg: dict, out: str | None, force: bool, no_anim: bool = False,
     web = _ask("Enable web search on the panel? (y/n)", "y").lower().startswith("y")
 
     new_cfg = {
-        "mode": "fusion",
         "settings": {"web_tools": web, "effort": None, "max_output_tokens": None},
         "panel": panel,
         "judge": parse_member(judge),
@@ -2261,7 +2250,7 @@ def _probe(argv: list, env_unset, expect_code: int = 0,
     return ok, first[:80]
 
 
-def do_check(cfg: dict, mode: str, settings: dict) -> int:
+def do_check(cfg: dict, settings: dict) -> int:
     on = color_enabled(sys.stderr)
 
     def c(s: str, code: str) -> str:
@@ -2269,8 +2258,7 @@ def do_check(cfg: dict, mode: str, settings: dict) -> int:
 
     providers = cfg.get("providers", {})
     used: list = [m["provider"] for m in cfg.get("panel", [])]
-    if mode == "fusion":
-        used.append(cfg.get("judge", {}).get("provider"))
+    used.append(cfg.get("judge", {}).get("provider"))   # research runs a judge (reflect) every round
     used.append(cfg.get("aggregator", {}).get("provider"))
     seen: list = []
     for p in used:
@@ -2325,12 +2313,17 @@ def do_check(cfg: dict, mode: str, settings: dict) -> int:
                 print(f"      {c('↳ ' + chk['note'], '2')}")
 
     panel = [m.get("label", m["provider"]) for m in cfg.get("panel", [])]
-    calls = len(panel) + (2 if mode == "fusion" else 1)
+    rcfg = cfg.get("research", {})
+    lo = max(1, int(rcfg.get("max_rounds", 3) or 3))
+    hi = max(lo, int(rcfg.get("hard_cap", 5) or 5))
+    per_round = len(panel) + 1                 # panel fan-out + one REFLECT judge
+    lo_calls = 1 + per_round * lo + 1          # brief + rounds + synthesis
+    hi_calls = 1 + per_round * hi + 1
     web = bool(settings.get("web_tools"))
     print()
     print(f"  panel ({len(panel)}): " + ", ".join(panel))
-    print(f"  mode: {mode}  →  ~{calls} model calls/run"
-          f" (panel{'+judge' if mode == 'fusion' else ''}+synthesis)"
+    print(f"  research: {lo}–{hi} rounds  →  ~{lo_calls}–{hi_calls} model calls/run"
+          f" (brief + [panel+reflect]×rounds + synthesis)"
           + (c("  · +web-search billing", "2") if web else ""))
     if hard_fail:
         print("\n" + c("✗ not ready", "31") + " — fix the items above, then re-run scry --check.")
@@ -4267,15 +4260,14 @@ def do_research(cfg: dict, prompt: str, settings: dict, args, cli: dict) -> int:
     return 0
 
 
-def _check_known_providers(ap, cfg: dict, mode: str) -> None:
+def _check_known_providers(ap, cfg: dict) -> None:
     """Fail fast (argparse exit 2) if --panel/--judge/--aggregator named a provider
     that isn't in config providers{}, instead of running a paid panel and then
     crashing (or silently dropping an unknown panel member)."""
     provs = cfg.get("providers", {})
     names = [m.get("provider") for m in cfg.get("panel", [])]
     names.append(cfg.get("aggregator", {}).get("provider"))
-    if mode != "synthesize":               # fusion + research both run a judge
-        names.append(cfg.get("judge", {}).get("provider"))
+    names.append(cfg.get("judge", {}).get("provider"))   # research always runs a judge (reflect)
     for n in names:
         if n and n not in provs:
             ap.error(f"unknown provider '{n}' — not in config providers{{}} "
@@ -4316,10 +4308,6 @@ def main() -> int:
                          "'plan' (interactive planning), 'web' (local web UI), "
                          "'init' (setup wizard), 'update' (upgrade scry). See "
                          "'commands' below.")
-    ap.add_argument("--mode", choices=["research", "fusion", "synthesize"], default=None,
-                    help="research = iterative deep-research loop (default); "
-                         "fusion = single-shot 3-stage panel/judge/synthesis; "
-                         "synthesize = 2-stage panel/synthesis")
     ap.add_argument("--depth", type=int, metavar="N",
                     help="(research) target number of research rounds (overrides "
                          "research.max_rounds)")
@@ -4440,7 +4428,7 @@ def main() -> int:
             cfg["aggregator"] = parse_member(args.aggregator)
         if args.judge:
             cfg["judge"] = parse_member(args.judge)
-        _check_known_providers(ap, cfg, "fusion")
+        _check_known_providers(ap, cfg)
         psettings = dict(cfg["settings"])
         if args.no_web:
             psettings["web_tools"] = False
@@ -4473,16 +4461,7 @@ def main() -> int:
         cfg["aggregator"] = parse_member(args.aggregator)
     if args.judge:
         cfg["judge"] = parse_member(args.judge)
-    mode = args.mode or cfg.get("mode", "research")
-    _check_known_providers(ap, cfg, mode)
-    # Warn (don't silently drop) when a research-only flag is set in another mode.
-    if mode != "research" and not args.quiet:
-        ignored = [f for f, v in (("--depth", args.depth is not None),
-                                  ("--no-clarify", args.no_clarify),
-                                  ("--repo", args.repo is not None)) if v]
-        if ignored:
-            print(f"scry: {', '.join(ignored)} only applies to research mode; "
-                  f"ignored in {mode} mode", file=sys.stderr)
+    _check_known_providers(ap, cfg)
 
     settings = dict(cfg["settings"])
     if args.no_web:
@@ -4495,119 +4474,18 @@ def main() -> int:
         settings["max_output_tokens"] = args.max_output_tokens
 
     if args.dry_run:
-        do_dry_run(cfg, mode, settings, cli_overrides=cli)
+        do_dry_run(cfg, settings, cli_overrides=cli)
         return 0
 
     if args.check:
-        return do_check(cfg, mode, settings)
+        return do_check(cfg, settings)
 
     prompt = read_prompt(args.prompt)
     if not prompt:
         ap.error("no prompt given (pass as arguments or pipe via stdin)")
 
-    # Deep research is the default; --mode fusion/synthesize take the single-shot path.
-    if mode == "research":
-        return do_research(cfg, prompt, settings, args, cli)
-
-    # The scrying orb animates only on an interactive, color-capable stderr.
-    # Reduced motion (--no-anim / SCRY_NO_ANIM) or a no-color terminal (NO_COLOR,
-    # TERM=dumb) falls back to plain log lines, so piped/redirected/low-vision
-    # output stays clean. (color_enabled() already encodes the isatty check.)
-    reduced_motion = args.no_anim or ("SCRY_NO_ANIM" in os.environ)
-    animate = (not args.quiet and not reduced_motion
-               and color_enabled(sys.stderr) and sys.stderr.isatty())
-    orb = ScryingOrb() if animate else None
-
-    def log(msg: str) -> None:
-        if args.quiet:
-            return
-        if orb is None:
-            print(msg, file=sys.stderr, flush=True)
-            return
-        # A leading "▸" marks a new stage -> it becomes the orb's caption;
-        # everything else (proposer ✓/✗, judge notes) scrolls above the orb.
-        s = msg.strip()
-        if s.startswith("▸"):
-            orb.set_caption(s.lstrip("▸").strip())
-        else:
-            orb.note(msg)
-
-    # Stream the fused answer live only when stdout is an interactive terminal
-    # and we're not emitting JSON or running quiet. Panel + judge stay buffered;
-    # only the final synthesis types itself out, token by token.
-    stream_final = (not args.as_json and not args.quiet and sys.stdout.isatty())
-
-    orb_stopped = {"v": False}
-
-    def stop_orb() -> None:
-        if orb is not None and not orb_stopped["v"]:
-            orb.stop()
-            orb_stopped["v"] = True
-
-    try:
-        if orb is not None:
-            orb.start("awakening the orb…")
-        try:
-            result = asyncio.run(scry_run(cfg, prompt, mode, settings, log,
-                                          stream_final, stop_orb, cli_overrides=cli))
-        finally:
-            stop_orb()
-    except AllPanelsFailed as e:
-        if args.as_json:
-            print(json.dumps({"status": "error", "failure_reason": e.failure_reason,
-                              "responses": [{"model": r["label"], "ok": r["ok"],
-                                             "error": r["error"]} for r in e.responses]},
-                             indent=2))
-        else:
-            print(f"scry: {e}", file=sys.stderr)
-        return 1
-    except KeyboardInterrupt:
-        return 130
-
-    # Degraded-success notice: if some proposers failed, the fused answer (and any
-    # "consensus map") was built from fewer voices than the panel — say so loudly,
-    # even under --quiet, so a 1-of-N answer is never silently dressed up as fused.
-    responses = result.get("responses", [])
-    failed = [r for r in responses if not r.get("ok")]
-    if failed and not args.as_json:
-        ok_n = len(responses) - len(failed)
-        labels = ", ".join(r.get("model", "?") for r in failed)
-        print(f"⚠ fused from {ok_n}/{len(responses)} proposers — "
-              f"{len(failed)} failed: {labels}", file=sys.stderr)
-
-    # Consensus map: show the judge's analysis (auto on an interactive stderr;
-    # --map forces it, --no-map suppresses it; never under --json/--quiet).
-    analysis = result.get("analysis")
-    if (analysis and not args.no_map and not args.as_json and not args.quiet
-            and (args.map or sys.stderr.isatty())):
-        rendered = render_consensus_map(analysis, color_enabled(sys.stderr))
-        if rendered:
-            print(rendered + "\n", file=sys.stderr)
-
-    # Cost/usage tally: a one-line run footer on stderr (the numbers also ride
-    # along in --json). Suppressed under --quiet/--json so piped output stays clean.
-    cost = result.get("cost")
-    if cost and not args.as_json and not args.quiet:
-        print(format_cost_tally(cost, color_enabled(sys.stderr)), file=sys.stderr)
-
-    # Record the run for `scry last` / `scry log` (best-effort, never fatal).
-    if settings.get("save_history", True) and not args.no_save:
-        save_run(result)
-
-    if args.show_proposers:
-        for r in result["responses"]:
-            tag = "ok" if r["ok"] else "FAILED"
-            print(f"\n----- {r['model']} ({tag}, {r['seconds']}s) -----", file=sys.stderr)
-            print(r["content"] or r["error"] or "", file=sys.stderr)
-        print("\n----- fused answer -----", file=sys.stderr)
-
-    if args.as_json:
-        out = {k: v for k, v in result.items() if k != "streamed"}
-        print(json.dumps(out, ensure_ascii=False, indent=2))
-    elif not result.get("streamed"):
-        # If the answer already streamed to stdout during synthesis, don't reprint it.
-        print(result["final"])
-    return 0
+    # Deep research is the only query pipeline (bare `scry "<prompt>"`).
+    return do_research(cfg, prompt, settings, args, cli)
 
 
 if __name__ == "__main__":

@@ -62,16 +62,13 @@ class TestLoadConfigDefaults(unittest.TestCase):
         scry = self.scry
         cfg = self._load_none()
         # Same content as DEFAULT_CONFIG...
-        self.assertEqual(cfg["mode"], scry.DEFAULT_CONFIG["mode"])
         self.assertEqual(cfg["providers"].keys(), scry.DEFAULT_CONFIG["providers"].keys())
         # ...but a DISTINCT object (deepcopy), not the module global.
         self.assertIsNot(cfg, scry.DEFAULT_CONFIG)
         self.assertIsNot(cfg["providers"], scry.DEFAULT_CONFIG["providers"])
         self.assertIsNot(cfg["panel"], scry.DEFAULT_CONFIG["panel"])
         # Mutating the returned cfg must not bleed into the module default.
-        cfg["mode"] = "MUTATED"
         cfg["panel"].append({"provider": "x"})
-        self.assertEqual(scry.DEFAULT_CONFIG["mode"], "research")
         self.assertEqual(
             len(scry.DEFAULT_CONFIG["panel"]),
             len(self._load_none()["panel"]),
@@ -143,7 +140,7 @@ class TestLoadConfigExplicitPath(unittest.TestCase):
         self.assertEqual(len(cfg["panel"]), 1)
         self.assertEqual(cfg["panel"][0]["provider"], "kimi")
         # Untouched top-level keys keep their defaults.
-        self.assertEqual(cfg["mode"], scry.DEFAULT_CONFIG["mode"])
+        self.assertEqual(cfg["settings"], dict(scry.DEFAULT_SETTINGS))
         self.assertIn("claude", cfg["providers"])
 
     def test_explicit_path_no_settings_key_yields_full_defaults(self):
@@ -158,9 +155,7 @@ class TestLoadConfigExplicitPath(unittest.TestCase):
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
             cfg = scry.load_config(p)  # must NOT raise
-        # Falls back to defaults.
-        self.assertEqual(cfg["mode"], scry.DEFAULT_CONFIG["mode"])
-        # Settings still complete.
+        # Falls back to defaults — settings still complete.
         for k in scry.DEFAULT_SETTINGS:
             self.assertIn(k, cfg["settings"])
         # A warning was emitted to stderr.
@@ -173,7 +168,6 @@ class TestLoadConfigExplicitPath(unittest.TestCase):
         missing = os.path.join(d, "does-not-exist.json")
         # c.exists() is False -> loop falls through, no error, defaults returned.
         cfg = scry.load_config(missing)
-        self.assertEqual(cfg["mode"], scry.DEFAULT_CONFIG["mode"])
         self.assertEqual(cfg["settings"], dict(scry.DEFAULT_SETTINGS))
 
 
@@ -265,7 +259,7 @@ class TestLoadConfigResolution(unittest.TestCase):
 
     def test_no_config_anywhere_yields_defaults(self):
         cfg = self._load()
-        self.assertEqual(cfg["mode"], self.scry.DEFAULT_CONFIG["mode"])
+        self.assertNotIn("mode", cfg)   # mode was removed from the config schema
         self.assertEqual(cfg["settings"], dict(self.scry.DEFAULT_SETTINGS))
 
 

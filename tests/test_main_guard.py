@@ -4,28 +4,40 @@
     raw Python traceback;
   * an unknown --aggregator/--panel provider name is rejected at parse time (exit 2),
     rather than running a paid panel and then crashing;
-  * a partially-failed fusion panel prints a visible 'fused from N/M' degraded notice
-    instead of silently presenting a one-model answer as 'fused'.
+  * `scry plan` and `scry --check` stay discoverable from --help.
 
 All paths are driven through the real ./scry subprocess with stub provider binaries
-(no paid calls).
+(no paid calls). Bare `scry` is the deep-research pipeline (the only query mode).
 """
+import json
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
 import _harness as h  # noqa: E402
 
 
+def _cfg(panel="claude", judge="claude", aggregator="claude"):
+    obj = {"panel": [{"provider": panel, "label": panel}],
+           "judge": {"provider": judge}, "aggregator": {"provider": aggregator},
+           "research": {"max_rounds": 1, "hard_cap": 1, "clarify": False}}
+    d = tempfile.mkdtemp(prefix="scry-guard-cfg-")
+    p = os.path.join(d, "scry.config.json")
+    with open(p, "w") as f:
+        json.dump(obj, f)
+    return p
+
+
 class TestNoRawTraceback(unittest.TestCase):
     def test_aggregator_failure_is_clean_not_a_traceback(self):
-        # Panel (claude) succeeds; the aggregator (codex) errors at synthesis time
-        # (stubbed to fail, so we never touch a real codex). The user must see a
-        # clean 'scry: ...' message and exit 1 — never a raw Traceback.
-        with h.StubBins({"claude": h.claude_json("A"), "codex": h.fail()}) as bins:
-            r = h.run_scry(["--mode", "synthesize", "--panel", "claude",
-                            "--aggregator", "codex", "hello"], env=bins.env)
+        # Panel + brief + reflect (claude) succeed; the aggregator/synthesis (codex)
+        # errors. The user must see a clean 'scry: ...' message and exit 1 — never a
+        # raw Traceback. We never touch a real codex.
+        cfg = _cfg(panel="claude", judge="claude", aggregator="codex")
+        with h.StubBins({"claude": h.claude_research(), "codex": h.fail()}) as bins:
+            r = h.run_scry(["--no-anim", "--config", cfg, "hello"], input="", env=bins.env)
         self.assertEqual(r.returncode, 1, r.stderr)
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("scry:", r.stderr)
@@ -33,51 +45,14 @@ class TestNoRawTraceback(unittest.TestCase):
 
 class TestProviderNameValidation(unittest.TestCase):
     def test_unknown_aggregator_rejected_at_parse(self):
-        r = h.run_scry(["--mode", "fusion", "--aggregator", "ghostzz", "hello"])
+        r = h.run_scry(["--aggregator", "ghostzz", "hello"], input="")
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("ghostzz", r.stderr)
 
     def test_unknown_panel_member_rejected_at_parse(self):
-        r = h.run_scry(["--mode", "fusion", "--panel", "claude,ghostzz", "hello"])
+        r = h.run_scry(["--panel", "claude,ghostzz", "hello"], input="")
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("ghostzz", r.stderr)
-
-
-class TestDegradedFusionNotice(unittest.TestCase):
-    def test_partial_panel_failure_prints_degraded_notice(self):
-        # 2-member panel: claude ok, codex fails. The run still succeeds (>=1
-        # proposer), but the user must be told the panel was degraded.
-        stubs = {"claude": h.claude_json("ONLY ANSWER"), "codex": h.fail()}
-        with h.StubBins(stubs) as bins:
-            r = h.run_scry(["--mode", "synthesize", "--panel", "claude,codex",
-                            "hello"], env=bins.env)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        # A visible 'fused from 1/2 proposers' style notice on stderr.
-        self.assertIn("1/2", r.stderr)
-        self.assertIn("failed", r.stderr.lower())
-
-    def test_full_panel_success_has_no_degraded_notice(self):
-        stubs = {"claude": h.claude_json("A"), "codex": h.codex_outfile("B")}
-        with h.StubBins(stubs) as bins:
-            r = h.run_scry(["--mode", "synthesize", "--panel", "claude,codex",
-                            "hello"], env=bins.env)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("fused from", r.stderr)
-
-
-class TestIgnoredFlagWarning(unittest.TestCase):
-    def test_research_flag_in_fusion_mode_warns(self):
-        # --no-clarify is research-only; using it with --mode fusion silently did
-        # nothing. Now it warns (via --dry-run so no model is called).
-        r = h.run_scry(["--mode", "fusion", "--no-clarify", "--dry-run", "hello"])
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("--no-clarify", r.stderr)
-        self.assertIn("research", r.stderr.lower())
-
-    def test_no_warning_when_flag_matches_mode(self):
-        r = h.run_scry(["--mode", "research", "--no-clarify", "--dry-run", "hello"])
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("only applies to research", r.stderr)
 
 
 class TestHelpDiscoverability(unittest.TestCase):

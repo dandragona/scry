@@ -140,7 +140,7 @@ class TestResearchCliDryRun(unittest.TestCase):
         cfg = _write_cfg(CLAUDE_ONLY, {"max_rounds": 1, "hard_cap": 1, "clarify": False})
         r = h.run_scry(["--dry-run", "--config", cfg, "what is X?"], input="")
         self.assertEqual(r.returncode, 0, f"stderr={r.stderr!r}\nstdout={r.stdout!r}")
-        self.assertIn("mode=research", r.stdout)
+        self.assertIn("[dry-run] research", r.stdout)
         self.assertIn("PROPOSER", r.stdout)
         # Research's per-round judge is the REFLECT stage (web-off), not "JUDGE".
         self.assertIn("REFLECT", r.stdout)

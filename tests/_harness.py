@@ -228,7 +228,7 @@ def claude_plan(rounds_before_ready: int = 1, questions=None,
 
 def claude_research(findings: str = "CLAUDE FINDINGS", fused: str = "RESEARCH ANSWER",
                     subqs=None, gaps: bool = False, needs_web: bool = True,
-                    report_cwd: bool = False) -> str:
+                    report_cwd: bool = False, analysis_fields: dict | None = None) -> str:
     """A claude stub for Deep Research mode: ONE binary that plays every research role
     by branching on the UNIQUE anchor in each system prompt:
 
@@ -246,6 +246,8 @@ def claude_research(findings: str = "CLAUDE FINDINGS", fused: str = "RESEARCH AN
     oq = [{"question": "What remains unresolved?", "needs_web": bool(needs_web)}] if gaps else []
     analysis = {"consensus": [], "contradictions": [], "partial_coverage": [],
                 "unique_insights": [], "blind_spots": [], "open_questions": oq}
+    if analysis_fields:
+        analysis.update({k: v for k, v in analysis_fields.items() if k != "open_questions"})
     brief = {"intent": "INTENT", "sub_questions": subqs}
     return _py(
         "import sys, json, os\n"

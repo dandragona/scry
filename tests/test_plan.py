@@ -414,6 +414,31 @@ class PlanSubprocessTest(unittest.TestCase):
         self.assertIn(scry.PLAN_DRAFTER_SYSTEM, seen)
         self.assertNotEqual(scry.PLAN_DRAFTER_SYSTEM, scry.PLAN_SYNTH_SYSTEM)
 
+    # ----- plan = research + a plan phase ----------------------------------- #
+    def test_plan_researches_then_drafts_from_the_synthesis(self):
+        # Plan finalize now runs the deep-research pipeline first, then feeds its
+        # synthesis to the drafters. Assert (a) the research phase ran (its synthesis
+        # system prompt shows up alongside the drafter's), and (b) the drafter prompt
+        # carried the research synthesis text — not just the bare interview transcript.
+        scry = h.load_scry()
+        d = tempfile.mkdtemp(prefix="scry-research-plan-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        sysdump = os.path.join(d, "sys.txt")
+        draftdump = os.path.join(d, "draft.txt")
+        env = self._env(
+            h.claude_plan(rounds_before_ready=1, research_final="RESEARCH-MARKER-XYZ"),
+            SCRY_SYSDUMP=sysdump, SCRY_DRAFTDUMP=draftdump)
+        cp = h.run_scry(self._args(), input="linux\nok\n", env=env)
+        self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
+        with open(sysdump) as f:
+            seen = f.read()
+        self.assertIn(scry.RESEARCH_SYNTH_SYSTEM, seen)   # the research phase ran
+        self.assertIn(scry.PLAN_DRAFTER_SYSTEM, seen)     # the drafters ran too
+        with open(draftdump) as f:
+            draft_in = f.read()
+        # The drafters were handed the research synthesis, not just the Q&A transcript.
+        self.assertIn("RESEARCH-MARKER-XYZ", draft_in)
+
     # ----- done sentinel stops early ---------------------------------------- #
     def test_done_sentinel_stops_in_round_one(self):
         rec, _ = self._json_run(h.claude_plan(rounds_before_ready=99), "done\n")
@@ -425,7 +450,7 @@ class PlanSubprocessTest(unittest.TestCase):
     def test_max_rounds_cap(self):
         rec, _ = self._json_run(
             h.claude_plan(rounds_before_ready=99, unique_each_round=True),
-            "a\na\na\na\n", "--max-rounds", "2")
+            "a\na\na\na\n", "--interview-rounds", "2")
         self.assertEqual(rec["rounds"], 2)
         self.assertIn("## Context", rec["final"])
 
@@ -434,7 +459,7 @@ class PlanSubprocessTest(unittest.TestCase):
         # never "ready", but the same two questions every round -> round 2 yields
         # no NEW questions (asked_keys filters them) -> stop and synthesize.
         rec, _ = self._json_run(
-            h.claude_plan(rounds_before_ready=99), "linux\nok\n", "--max-rounds", "9")
+            h.claude_plan(rounds_before_ready=99), "linux\nok\n", "--interview-rounds", "9")
         self.assertEqual(rec["rounds"], 2)
         self.assertEqual(len(rec["transcript"]), 2)
 
@@ -503,7 +528,7 @@ class PlanSubprocessTest(unittest.TestCase):
         d = tempfile.mkdtemp(prefix="scry-plan-noout-")
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         env = self._env(h.claude_plan(rounds_before_ready=1))
-        cp = h.run_scry(self._args("--no-out"), input="linux\nok\n", env=env, cwd=d)
+        cp = h.run_scry(self._args("--out", "-"), input="linux\nok\n", env=env, cwd=d)
         self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
         self.assertEqual([f for f in os.listdir(d) if f.startswith("scry-plan-")], [])
         self.assertIn("## Context", cp.stdout)            # still printed to stdout
@@ -518,6 +543,20 @@ class PlanSubprocessTest(unittest.TestCase):
         self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
         self.assertTrue(os.path.exists(out))
         self.assertTrue(os.path.exists(os.path.join(d, "myplan.diagnostics.md")))
+
+    # ----- diagnostics show the research phase as its own timeline segment --- #
+    def test_diagnostics_show_a_research_segment(self):
+        d = tempfile.mkdtemp(prefix="scry-plan-diag-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        out = os.path.join(d, "myplan.md")
+        env = self._env(h.claude_plan(rounds_before_ready=1))
+        cp = h.run_scry(self._args("--out", out), input="linux\nok\n", env=env, cwd=d)
+        self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
+        with open(os.path.join(d, "myplan.diagnostics.md")) as f:
+            diag = f.read()
+        self.assertIn("## timeline", diag)
+        # The research phase is a distinct timeline segment, not folded into the draft.
+        self.assertIn("**research**", diag)
 
     # ----- history records mode "plan"; `scry last` reprints it ------------- #
     def test_history_saved_as_plan_mode(self):
@@ -583,7 +622,7 @@ class PlanSubprocessTest(unittest.TestCase):
         dump = os.path.join(d, "cwd.txt")
         env = self._env(h.claude_plan(rounds_before_ready=1, report_cwd=True),
                         SCRY_CWDDUMP=dump)
-        cp = h.run_scry(self._args("--no-repo"), input="ok\n", env=env, cwd=repo)
+        cp = h.run_scry(self._args("--repo", "none"), input="ok\n", env=env, cwd=repo)
         self.assertEqual(cp.returncode, 0, cp.stderr + cp.stdout)
         self.assertNotIn(real, cp.stdout)              # final draft did NOT see the repo
         by_stage = self._cwd_by_stage(dump)
@@ -625,7 +664,7 @@ class ResumeSubprocessTest(unittest.TestCase):
         return env
 
     def _base(self, *extra):
-        return ["plan", *extra, "--no-anim", "--no-repo",
+        return ["plan", *extra, "--no-anim", "--repo", "none",
                 "--panel", "claude:opus", "--judge", "claude:opus",
                 "--aggregator", "claude:opus"]
 
@@ -806,7 +845,7 @@ class PlanListSubprocessTest(unittest.TestCase):
         self.assertEqual(cp.returncode, 0, cp.stderr)
         rid = json.loads(cp.stdout)[0]["id"]
         self.assertEqual(rid, "1700000000888")          # bare id, no `.json`
-        resumed = h.run_scry(["plan", f"--resume={rid}", "--no-anim", "--no-repo",
+        resumed = h.run_scry(["plan", f"--resume={rid}", "--no-anim", "--repo", "none",
                               "--panel", "claude:opus", "--judge", "claude:opus",
                               "--aggregator", "claude:opus"], env=env)
         self.assertEqual(resumed.returncode, 0, resumed.stderr + resumed.stdout)

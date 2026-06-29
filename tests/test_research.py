@@ -57,8 +57,10 @@ class TestResearchPrompts(unittest.TestCase):
 # in DEFAULT_CONFIG and survive load_config's shallow merge.
 # --------------------------------------------------------------------------- #
 class TestResearchConfig(unittest.TestCase):
-    def test_default_mode_is_research(self):
-        self.assertEqual(S.DEFAULT_CONFIG["mode"], "research")
+    def test_no_mode_key_in_default_config(self):
+        # `mode` was removed from the config schema — research is the only query
+        # pipeline, selected by code, not a config key. A leftover mode key is ignored.
+        self.assertNotIn("mode", S.DEFAULT_CONFIG)
 
     def test_research_block_defaults(self):
         r = S.DEFAULT_CONFIG["research"]

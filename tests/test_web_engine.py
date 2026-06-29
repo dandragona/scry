@@ -63,10 +63,10 @@ class EngineInProcessRunTest(unittest.TestCase):
     """Drive scry_run THROUGH the engine using real stub binaries (no real models,
     no nested scry process)."""
 
-    def test_run_scry_sync_over_stub_binaries(self):
+    def test_run_ask_over_stub_binaries(self):
         cfg = _claude_only_cfg()
         with h.StubBins({"claude": h.claude_smart("PROP", "FUSED ANSWER")}):
-            result = engine.run_scry_sync(cfg, "what is 2+2", {"mode": "fusion"})
+            result = engine.run_research_sync(cfg, "what is 2+2", {})
         self.assertEqual(result["final"], "FUSED ANSWER")
         self.assertTrue(any(r["ok"] for r in result["responses"]))
 

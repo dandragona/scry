@@ -112,15 +112,14 @@ fi
 pass "--check exit non-zero when a provider binary is missing"
 
 # --- dry-run constructs the expected pipeline (no spend) ---------------------
-# Force fusion: the default mode is now Deep Research, whose per-round judge previews
-# as REFLECT (web-off), not JUDGE — so pin --mode fusion to exercise the 3-stage
-# panel/JUDGE/synthesis pipeline these assertions describe.
-OUT="$(PATH="$STUB:$PATH" "$SCRY" --mode fusion --dry-run "smoke test prompt")"
+# Bare scry is the deep-research pipeline: panel (web-on) -> per-round REFLECT judge
+# (web-off) -> AGGREGATOR synthesis.
+OUT="$(PATH="$STUB:$PATH" "$SCRY" --dry-run "smoke test prompt")"
 echo "$OUT" | grep -q "^PROPOSER"   || fail "dry-run missing PROPOSER lines"
-echo "$OUT" | grep -q "^JUDGE"      || fail "dry-run missing JUDGE line"
+echo "$OUT" | grep -q "^REFLECT"    || fail "dry-run missing REFLECT line"
 echo "$OUT" | grep -q "^AGGREGATOR" || fail "dry-run missing AGGREGATOR line"
 echo "$OUT" | grep -q -- "--output-format json" || fail "dry-run missing claude json flag"
-pass "--dry-run builds panel + judge + aggregator argv"
+pass "--dry-run builds panel + reflect + aggregator argv"
 
 # --- dry-run renders the kimi provider (quiet + generated agent file) ---------
 # Default (no model): kimi uses the account default, so no --model is emitted.
@@ -131,11 +130,6 @@ echo "$KOUT" | grep -q -- "--agent-file" || fail "dry-run missing kimi '--agent-
 PATH="$STUB:$PATH" "$SCRY" --dry-run --panel "kimi:kimi-for-coding" "x" \
   | grep -q -- "--model kimi-for-coding" || fail "dry-run missing explicit kimi --model"
 pass "--dry-run renders kimi (default = no --model; explicit model = --model)"
-
-# --- synthesize mode skips the judge -----------------------------------------
-PATH="$STUB:$PATH" "$SCRY" --mode synthesize --dry-run "x" | grep -q "^JUDGE" \
-  && fail "synthesize mode should not emit a JUDGE stage" || true
-pass "--mode synthesize skips the judge"
 
 # --- streaming plumbing: final answer types out token-by-token ---------------
 python3 - "$ROOT" "$STUB" <<'PY' || fail "stream_call plumbing"
@@ -250,15 +244,15 @@ print(json.dumps({"type": "result", "is_error": False, "result": "Fused.",
 EOF
 chmod +x "$CLI2/claude"
 
-# --mode fusion, panel=claude only -> 3 claude calls (panel+judge+synth), all metered.
-# (bare `scry` now defaults to research; this smoke asserts the single-shot fusion cost.)
-COST_JSON="$(PATH="$CLI2:$PATH" SCRY_HOME="$HOME2" "$SCRY" --mode fusion --panel claude:opus --json "q1" 2>/dev/null)"
+# bare `scry` is the deep-research pipeline; panel=claude only. Every claude call is
+# metered and the per-call cost/tokens/web roll up into the --json cost block.
+COST_JSON="$(PATH="$CLI2:$PATH" SCRY_HOME="$HOME2" "$SCRY" --panel claude:opus --no-clarify --json "q1" 2>/dev/null)"
 echo "$COST_JSON" | python3 -c '
 import json, sys
 c = json.load(sys.stdin)["cost"]
-assert c["total_usd"] == 0.15, c
-assert c["calls"] == 3 and c["metered_calls"] == 3, c
-assert c["web_searches"] == 3 and c["output_tokens"] == 1200, c
+assert c["total_usd"] > 0, c
+assert c["calls"] >= 3 and c["metered_calls"] == c["calls"], c
+assert c["web_searches"] >= 1 and c["output_tokens"] > 0, c
 ' || fail "cost block not threaded through --json"
 pass "cost meter: \$/tokens/web roll up into the --json cost block"
 
@@ -268,7 +262,7 @@ PATH="$CLI2:$PATH" SCRY_HOME="$HOME2" "$SCRY" log | grep -q "q1" \
 PATH="$CLI2:$PATH" SCRY_HOME="$HOME2" "$SCRY" last 2>/dev/null | grep -q "Fused." \
   || fail "scry last didn't reprint the saved answer"
 ROWS_BEFORE="$(wc -l < "$HOME2/history.jsonl")"
-PATH="$CLI2:$PATH" SCRY_HOME="$HOME2" "$SCRY" --mode fusion --panel claude:opus --no-save "q2" >/dev/null 2>&1
+PATH="$CLI2:$PATH" SCRY_HOME="$HOME2" "$SCRY" --panel claude:opus --no-clarify --no-save "q2" >/dev/null 2>&1
 [ "$ROWS_BEFORE" = "$(wc -l < "$HOME2/history.jsonl")" ] || fail "--no-save still wrote a history row"
 pass "run history: scry log / scry last / --no-save"
 

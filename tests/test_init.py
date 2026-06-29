@@ -53,7 +53,7 @@ class InitWizardSubprocessTest(unittest.TestCase):
     def _run(self, stdin, out=None, force=False):
         args = ["init", "--no-anim", "--out", out or self.out]
         if force:
-            args.append("--force")
+            args.append("--overwrite")
         return h.run_scry(args, input=stdin, env=self.env, timeout=60)
 
     def _load_out(self, path=None):
@@ -79,8 +79,9 @@ class InitWizardSubprocessTest(unittest.TestCase):
         self.assertEqual(cfg["judge"]["provider"], "claude")
         self.assertEqual(cfg["aggregator"]["provider"], "claude")
         self.assertIs(cfg["settings"]["web_tools"], True)
-        # mode is fusion + the canonical settings keys are present
-        self.assertEqual(cfg["mode"], "fusion")
+        # init no longer pins a mode (research is the only query pipeline); the
+        # canonical settings keys are present.
+        self.assertNotIn("mode", cfg)
         for k in ("web_tools", "effort", "max_output_tokens"):
             self.assertIn(k, cfg["settings"])
 

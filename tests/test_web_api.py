@@ -63,11 +63,17 @@ class WebApiTest(unittest.TestCase):
         self.assertTrue(s["fake_engine"])
         self.assertTrue(s["ready"])
 
-    # -- one-shot scry ----------------------------------------------------- #
-    def test_scry_message_runs_to_done_and_persists(self):
+    def test_status_has_no_mode_field(self):
+        # The two-mode surface dropped the fusion/synthesize mode knob entirely, so
+        # /api/status must no longer carry a "mode" field.
+        s = self.c.get("/api/status").json()
+        self.assertNotIn("mode", s)
+
+    # -- one-shot ask ------------------------------------------------------ #
+    def test_ask_message_runs_to_done_and_persists(self):
         conv = self._conv()
         run = self.c.post(f"/api/conversations/{conv['id']}/messages",
-                          json={"capability": "scry", "content": "what is 2+2"}
+                          json={"capability": "ask", "content": "what is 2+2"}
                           ).json()["run"]
         self.assertEqual(run["status"], "running")
         done = self._poll(run["id"], ("done", "error"))
@@ -80,11 +86,27 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(roles, ["user", "assistant"])
         self.assertEqual(full["runs"][0]["status"], "done")
 
-    def test_unknown_capability_rejected(self):
+    def test_message_defaults_to_ask_capability(self):
+        # No capability sent -> defaults to "ask" and runs to done.
         conv = self._conv()
-        r = self.c.post(f"/api/conversations/{conv['id']}/messages",
-                        json={"capability": "bogus", "content": "x"})
-        self.assertEqual(r.status_code, 400)
+        run = self.c.post(f"/api/conversations/{conv['id']}/messages",
+                          json={"content": "what is 2+2"}).json()["run"]
+        self.assertEqual(run["capability"], "ask")
+        done = self._poll(run["id"], ("done", "error"))
+        self.assertEqual(done["status"], "done")
+
+    def test_only_ask_and_plan_capabilities_accepted(self):
+        conv = self._conv()
+        # "ask" and "plan" are accepted (non-400 on POST)
+        for cap in ("ask", "plan"):
+            r = self.c.post(f"/api/conversations/{conv['id']}/messages",
+                            json={"capability": cap, "content": "x"})
+            self.assertNotEqual(r.status_code, 400, f"{cap} should be accepted")
+        # the removed verbs (and anything else) are rejected with HTTP 400
+        for cap in ("fusion", "scry", "research", "synthesize", "bogus"):
+            r = self.c.post(f"/api/conversations/{conv['id']}/messages",
+                            json={"capability": cap, "content": "x"})
+            self.assertEqual(r.status_code, 400, f"{cap} should be rejected")
 
     # -- interactive plan loop -------------------------------------------- #
     def test_plan_questions_answer_finalize(self):
@@ -153,7 +175,7 @@ class WebApiTest(unittest.TestCase):
         empty = self._conv()
         used = self._conv()
         self.c.post(f"/api/conversations/{used['id']}/messages",
-                    json={"capability": "scry", "content": "hello there"})
+                    json={"capability": "ask", "content": "hello there"})
         convs = self.c.get("/api/locations/contextless/conversations").json()["conversations"]
         by_id = {c["id"]: c for c in convs}
         self.assertEqual(by_id[empty["id"]]["message_count"], 0)
@@ -164,7 +186,7 @@ class WebApiTest(unittest.TestCase):
     def test_upgrade_contextless_conversation_to_project(self):
         conv = self._conv()
         run = self.c.post(f"/api/conversations/{conv['id']}/messages",
-                          json={"capability": "scry", "content": "build a parser"}
+                          json={"capability": "ask", "content": "build a parser"}
                           ).json()["run"]
         self._poll(run["id"], ("done", "error"))
         up = self.c.post(f"/api/conversations/{conv['id']}/upgrade",
@@ -178,7 +200,7 @@ class WebApiTest(unittest.TestCase):
     def test_download_artifact_and_export(self):
         conv = self._conv()
         run = self.c.post(f"/api/conversations/{conv['id']}/messages",
-                          json={"capability": "research", "content": "study X"}
+                          json={"capability": "ask", "content": "study X"}
                           ).json()["run"]
         done = self._poll(run["id"], ("done", "error"))
         self.assertTrue(done["artifact_paths"])
@@ -195,7 +217,7 @@ class WebApiTest(unittest.TestCase):
     def _research_run(self):
         conv = self._conv()
         run = self.c.post(f"/api/conversations/{conv['id']}/messages",
-                          json={"capability": "research", "content": "study X"}
+                          json={"capability": "ask", "content": "study X"}
                           ).json()["run"]
         done = self._poll(run["id"], ("done", "error"))
         self.assertTrue(done["artifact_paths"])

@@ -6,6 +6,73 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Removed (breaking)
+- **`--mode` and the `fusion` / `synthesize` query modes are gone.** Bare `scry "<question>"` is now
+  the **one and only query mode** — always the deep-research pipeline (clarify → brief → gap-driven
+  rounds → fused, cited answer). There is **no alias**: passing `--mode …` is now an argparse error
+  (exit 2). A leftover top-level `"mode"` key in a config is **silently ignored**, and `scry init` no
+  longer writes one.
+- **Old flags removed with no aliases.** `--no-map`, `--no-repo`, `--no-out`, `--max-rounds`, and
+  `--force` no longer exist; passing any of them errors. See the replacements under **Changed** below.
+
+### Changed (breaking)
+- **`scry plan` now runs deep research before drafting.** It is now "research **plus** a plan phase":
+  the clarifying interview, then the full deep-research pipeline on the clarified request, then each
+  panelist **drafts an implementation plan from the shared research synthesis** (not the bare Q&A
+  transcript), and the drafts are fused into one repo-grounded Markdown plan (+ a `.diagnostics.md`).
+- **Web UI collapsed to a two-button Ask / Plan surface.** The capability/mode picker is replaced by
+  **Ask** (web-on deep research) and **Plan** (the interactive plan interview, which now includes the
+  research phase). The `fusion`/`synthesize` selector and any `mode` field in the run payload /
+  `/api/status` are gone.
+- **`--map {auto,on,off}`** (default `auto`) replaces `--map` / `--no-map`.
+- **`--repo {auto,none,PATH}`** replaces `--repo[PATH]` / `--no-repo`: `auto` detects a surrounding
+  repo, `none` is the scrubbed external world, and a `PATH` (`.` = current dir) grounds in that repo.
+- **`--out PATH`** replaces `--out` / `--no-out`; for `scry plan`, **`--out -`** prints to stdout only
+  (writes no files).
+- **`--interview-rounds N`** (plan) and **`--hard-cap N`** (research) replace the overloaded
+  `--max-rounds` (which used to mean clarifying-round cap for plan and hard round cap for research).
+  `--depth N` (research target/minimum rounds) is unchanged.
+- **`--overwrite`** (init) and **`--allow-downgrade`** (update) replace the overloaded `--force`.
+
+### Added
+- **`scry --check` now verifies API-key providers.** DeepSeek and GLM ship in the default panel but
+  need a key; `--check` now reports them as **not ready** (✗) when `DEEPSEEK_API_KEY` / `GLM_API_KEY`
+  is unset, and surfaces their setup note, instead of green-lighting a panel that would silently drop
+  voices on the first run.
+- **Degraded-run notice.** When some proposers fail, scry prints `⚠ fused from N/M proposers — …`
+  (even under `--quiet`) so a one-model answer is never silently presented as "fused".
+- **Provider-name validation.** An unknown `--panel` / `--judge` / `--aggregator` provider now fails
+  fast with an argparse error (exit 2) instead of running a paid panel and then crashing (or silently
+  dropping the unknown member). A research-only flag (`--depth`/`--no-clarify`/`--repo`) passed to a
+  command that doesn't use it now warns instead of doing nothing.
+- **`commands:` section in `--help`** listing `plan` / `web` / `init` / `update` / `--check` / `last`
+  / `log`, so the headline subcommands are discoverable.
+
+### Changed
+- **Cross-vendor API-key isolation.** Each managed provider key is now stripped from every *other*
+  provider's child process, so an exported `DEEPSEEK_API_KEY` / `GLM_API_KEY` is no longer handed to
+  the claude/codex/agy/kimi CLIs.
+- **Child processes run in their own session/process-group** and are killed on Ctrl-C / timeout /
+  cancellation, so an interrupted run can no longer orphan a still-billing model CLI.
+- **`--dry-run` for a query** now previews the per-round **REFLECT** stage (web-off, as it
+  actually runs) and notes the gap-driven loop's round range.
+
+### Fixed
+- **No more raw tracebacks at the user.** A top-level guard turns an unexpected failure (e.g. a flaky
+  aggregator after a multi-minute paid run) or a Ctrl-C during the research/plan clarify interview
+  into a clean `scry: …` message / exit 130 (set `SCRY_DEBUG=1` for the full traceback).
+- **Tolerant JSON recovery** for chatty judge output: handles prose with its own braces, multiple
+  objects, a stray trailing brace, trailing commas, and braces inside string values (the consensus
+  map no longer silently disappears on a slightly-malformed judge reply).
+- **Web UI:** plan-mode answer inputs no longer wiped by the status poller; a failed send restores the
+  typed message + attachments; a boot/API failure shows a visible error instead of a blank page; the
+  Markdown renderer now handles tables and indented code blocks; empty-Host requests are rejected by
+  the web server's guard; opening an unwritable project path returns a clean 400 instead of a 500.
+- **Installer** validates the downloaded payload (entry-point marker + `py_compile`) before the atomic
+  swap, so a truncated/corrupt download can't install a broken `scry`.
+
+## [0.3.0] — 2026-06-24
+
 ### Added
 - **`scry --check` now verifies API-key providers.** DeepSeek and GLM ship in the default panel but
   need a key; `--check` now reports them as **not ready** (✗) when `DEEPSEEK_API_KEY` / `GLM_API_KEY`

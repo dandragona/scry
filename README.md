@@ -11,7 +11,12 @@
 subscribe to (Claude Code, OpenAI Codex, Google Antigravity, Moonshot Kimi) in headless mode, so
 every call bills against your existing subscription rather than a metered API. It fans a prompt
 out to several models — each with web search — has one model deliberate over their answers, and
-synthesizes a single better answer. One stdlib-only Python file; nothing to `pip install`.
+synthesizes a single better answer. **No API keys required to start** — the subscription-CLI panel
+works out of the box — and **full support for the API-key providers (DeepSeek, GLM)** when you want
+them as first-class panel members. One stdlib-only Python file; nothing to `pip install`.
+
+Two commands cover everything: **`scry "<question>"`** for a deep-research, cited answer, and
+**`scry plan "<request>"`** for an interactive, repo-grounded implementation plan.
 
 <p align="center">
   <img src="docs/demo.gif" alt="scry in action: a panel of models race, a judge compares them, the fused answer streams in, then a consensus map of where they agreed and clashed" width="720">
@@ -49,9 +54,9 @@ scry --check                               # pre-flight: are those CLIs installe
 scry "why is my Postgres query slow, and how do I fix it?"   # ask — deep research by default
 ```
 
-> **Tip:** bare `scry "..."` runs the deep-research loop (clarify → multi-round panel → fused report),
-> which is thorough but slow and costs more. Want a fast single-shot answer instead?
-> `scry --mode fusion "..."`.
+> **Tip:** bare `scry "..."` is the one query mode — a deep-research loop (clarify → multi-round
+> panel → fused, cited report). It's thorough, so it's slower and costs more than a single call;
+> tune how deep it goes with `--depth N` / `--hard-cap N`, or skip the interview with `--no-clarify`.
 
 If `~/.local/bin` isn't on your `PATH`, the installer prints the exact `export PATH=…` line to add.
 See [Install](#install) for hand-install and [Uninstall](#uninstall) to remove it.
@@ -143,7 +148,7 @@ downloads the newest `scry` from GitHub, verifies it's complete and valid (lengt
 entry point, and that it compiles), and **atomically** replaces your installed copy —
 keeping it executable and forcing it world-readable (so an older, broken root-owned
 install self-heals). It won't install a truncated download or an older version (pass
-`--force` to downgrade). For a user-owned install (the default) no `sudo` is needed;
+`--allow-downgrade` to downgrade). For a user-owned install (the default) no `sudo` is needed;
 if scry lives in a system directory it prints the exact elevated command.
 
 It then **refreshes the rest of the install in lockstep** (best-effort, from one repo
@@ -209,14 +214,13 @@ state carried via resume checkpoints).
 scry init                                   # interactive setup: choose CLIs → write your panel
 scry update                                 # upgrade scry to the latest build, in place
 scry --check                                # pre-flight: are my CLIs installed + logged in?
-scry "Explain why my Postgres query is slow and how to fix it"   # deep research (default; see below)
+scry "Explain why my Postgres query is slow and how to fix it"   # deep research (the one query mode; see below)
 cat prompt.txt | scry                       # prompt from stdin
 scry "..." --no-clarify                     # skip the clarifying interview
 scry "..." --depth 4                        # target more research rounds (default 3, cap 5)
-scry "..." --repo                            # ground the panel read-only in the current git repo
+scry "..." --hard-cap 6                      # raise the absolute ceiling on research rounds
+scry "..." --repo .                          # ground the panel read-only in the current git repo
 scry plan "add rate limiting to my API"     # interactive, panel-driven planning (see below)
-scry --mode fusion "..."                    # single-shot 3-stage panel/judge/synthesis (fast)
-scry --mode synthesize "..."                # lighter 2-stage (skip the judge)
 scry --no-web "..."                         # pure generation, no web tools
 scry --effort high "..."                    # raise reasoning effort on every stage
 scry --json "..." > out.json                # research: {brief, rounds, responses, analysis, final, cost}
@@ -227,20 +231,21 @@ scry --no-anim "..."                        # plain progress (reduced motion); h
 scry last                                   # re-print the most recent answer (pipeable on stdout)
 scry log                                    # list recent runs with cost + pass/fail
 scry log 50                                 # ...the last 50
+scry --help                                 # everyday flags;  scry --help-all  for the complete list
 ```
 
 ### Flags
 
 | Flag | Effect |
 |---|---|
-| `--mode research\|fusion\|synthesize` | iterative deep research (default) vs single-shot 3-stage vs 2-stage |
-| `--depth N` | (research) target research rounds (overrides `research.max_rounds`) |
-| `--max-rounds N` | (research) hard cap on rounds (overrides `research.hard_cap`); (plan) clarifying-round cap |
-| `--no-clarify` | (research) skip the clarifying-question interview |
-| `--repo [PATH]` / `--no-repo` | (research/plan) ground the panel read-only in a repo (no arg = cwd) / force the external-world default |
+| `--depth N` | target/minimum research rounds (overrides `research.max_rounds`) |
+| `--hard-cap N` | absolute ceiling on research rounds (overrides `research.hard_cap`) |
+| `--no-clarify` | skip the clarifying-question interview |
+| `--repo {auto,none,PATH}` | ground the panel read-only in a repo: `auto` (detect a surrounding repo), `none` (external world), or a `PATH` (`.` = current dir) |
+| `--map {auto,on,off}` | the consensus map: `auto` shows it on a TTY, `on` forces it, `off` hides it |
 | `--no-web` | disable web tools on the panel (judge/synthesis are already web-off) |
 | `--effort low\|medium\|high\|xhigh\|max` | reasoning effort, every stage (where supported) |
-| `--max-tool-calls N` | cap web tool iterations (Fusion default 8; claude only) |
+| `--max-tool-calls N` | cap web tool iterations (claude only) |
 | `--max-output-tokens N` | cap output tokens (claude only) |
 | `--panel`, `--judge`, `--aggregator` | override models, e.g. `--panel "claude:opus,codex,agy:Gemini 3.1 Pro (High),kimi"` |
 | `--check` | verify each provider CLI is installed + logged in, then exit (no paid calls) |
@@ -279,54 +284,58 @@ model into identical sub-agents, whereas scry already has **five different front
 ```sh
 scry "what's the best embedding model for code search in 2026, and why?"   # full deep research
 scry "..." --no-clarify                     # skip the interview, go straight to research
-scry "..." --depth 4 --max-rounds 6         # deeper: target 4 rounds, hard cap 6
-scry "..." --repo                            # ground the search-capable panel in the current git repo
+scry "..." --depth 4 --hard-cap 6           # deeper: target 4 rounds, ceiling 6
+scry "..." --repo .                          # ground the search-capable panel in the current git repo
 scry "..." --repo ../other-project           # ...or a specific repo path
-scry "..." --no-repo                         # force external-world (ignore an auto-detected repo)
+scry "..." --repo none                       # force external-world (ignore an auto-detected repo)
 scry "..." --json                            # {brief, rounds:[{responses, analysis}], final, cost}
-scry --mode fusion "..."                     # opt out: today's fast single-shot pipeline
 ```
 
 **Repo grounding.** `research.repo_context: "auto"` (the default) grounds the search-capable panel
 **read-only** in a surrounding git repo when one is detected, so research can draw on your code as
-well as the web; `--repo [PATH]` forces it (no arg = cwd), `--no-repo` forces the scrubbed,
-external-world cwd. Read-only-unsafe providers (e.g. agy) are isolated from the repo, as in `scry
-plan`. Note this sends repo contents to your panel models.
+well as the web. `--repo` is tri-state: `auto` (detect a surrounding repo), `none` (force the
+scrubbed, external-world cwd), or a `PATH` (`.` for the current dir, or any repo path). Read-only-unsafe
+providers (e.g. agy) are isolated from the repo, as in `scry plan`. Note this sends repo contents to
+your panel models.
 
 **Cost.** Deep research is **deliberately expensive** — five heterogeneous CLIs across multiple
 rounds on your subscription quotas. The structural mitigations are baked in (gap-targeted re-fan of
 only the open gaps to only the capable models; a low default round count; the judge compresses
-findings before synthesis), but if you want one fast pass, use `--mode fusion`. Tune depth in the
-`research` block (`max_rounds`/`hard_cap`/`early_exit`) and per-round budgets in `phases.research`
+findings before synthesis). Keep it cheaper with a shallower `--depth`, a tighter `--hard-cap`, or
+`--no-clarify` to skip the interview. Tune depth in the `research` block
+(`max_rounds`/`hard_cap`/`early_exit`) and per-round budgets in `phases.research`
 (web-on, `timeout: 2100` by default).
 
-> **Existing configs:** a config that pins `"mode": "fusion"` keeps getting the single-shot pipeline.
-> Set `"mode": "research"` in your `~/.config/scry/config.json` (or re-run `scry init --force`) to
-> make deep research your default.
+> **Upgrading from an older scry?** Deep research is now the only query mode — there is no `--mode`
+> flag any more, and a leftover `"mode"` key in your `~/.config/scry/config.json` is simply ignored.
+> `scry init` no longer writes one.
 
 ### Plan mode (`scry plan "<request>"`)
 
-An interactive mode for producing the **best possible implementation plan** — like a "grill-me"
-interrogation, but driven by the whole panel instead of one model. It is deliberately expensive
-(several panel fan-outs); that's the point.
+`scry plan` is **deep research plus a plan phase** — it produces the **best possible implementation
+plan** like a "grill-me" interrogation driven by the whole panel instead of one model. It is
+deliberately expensive (a clarifying interview, then the full research pipeline, then a drafting
+fan-out); that's the point.
 
 Each round, the **whole panel** proposes clarifying questions; the **judge deduplicates** them
 (merging duplicates and dropping already-answered ones, but surfacing *every* distinct question — no
 ranking); they're asked **one at a time**. Your answers accumulate, and rounds repeat until the
-panel is confident — or you type `done` — then the normal fusion pipeline (panel → judge → synthesis)
-drafts and fuses one structured Markdown plan (`## Context / Approach / Key files / Steps /
-Verification / Risks`).
+panel is confident — or you type `done`. Then scry runs its **deep-research pipeline** on the
+clarified request (brief → web-on panel → gap-driven rounds → synthesis), and each panelist
+**drafts an implementation plan** from that shared research synthesis; the drafts are fused into one
+repo-grounded, structured Markdown plan (`## Context / Approach / Key files / Steps / Verification /
+Risks`), with a `<plan>.diagnostics.md` alongside.
 
 ```sh
 scry plan "add rate limiting to my API"     # interactive: answer questions one at a time
 scry plan "..." --out plan.md               # write the plan to a chosen path (default: ./scry-plan-<id>.md)
-scry plan "..." --no-out                    # don't write any files; print to stdout only
-scry plan "..." --max-rounds 3              # cap the clarifying rounds (default 5)
-scry plan "..." --json                      # {mode:"plan", transcript, rounds, final, ...}
+scry plan "..." --out -                      # don't write any files; print to stdout only
+scry plan "..." --interview-rounds 3        # cap the clarifying-interview rounds (default 5)
+scry plan "..." --json                      # {transcript, rounds, final, ...}
 scry plan --resume                          # continue the most recent interrupted session
 scry plan --resume=<id>                     # continue a specific session by id
 scry plan --list                            # list unfinished, resumable sessions (free; no models)
-scry plan "..." --no-repo                   # don't let the panel read the current directory
+scry plan "..." --repo none                  # don't let the panel read the current directory
 ```
 
 The plan prints to stdout (pipeable) and is saved to history — `scry last` re-prints it. Progress and
@@ -334,7 +343,7 @@ the clarifying questions go to stderr, so a redirected/piped stdout stays clean.
 two files next to where you run it: the plan (`./scry-plan-<id>.md`, or your `--out PATH`) and a
 human-readable **diagnostics file** alongside it (`<plan>.diagnostics.md`) — a per-stage table of which
 models ran, their status/timing/cost, **any failures** (e.g. a panel member that errored), the settings the
-run used, and the judge's consensus map. Pass `--no-out` to skip both and print to stdout only. The
+run used, and the judge's consensus map. Pass `--out -` to skip both files and print to stdout only. The
 clarifying-question rounds run with web tools **off** by default (they're about your intent, not external
 facts; configurable via `phases.interview`); the final plan drafting uses web per your normal settings.
 Tune `max_rounds` / `repo_context` in the top-level `plan` block, and per-phase budgets (the interview and
@@ -342,7 +351,7 @@ the final draft) in the `phases` block (`phases.interview`, `phases.final`).
 
 **Repo-aware by default.** Unlike a normal `scry` run (which fans out in a scrubbed temp cwd), `scry plan`
 gives the panel **read-only** access to the directory you launch it in, so the plan is grounded in your
-actual code. Mutating tools stay disabled; pass `--no-repo` (or set `plan.repo_context: false`) to opt out.
+actual code. Mutating tools stay disabled; pass `--repo none` (or set `plan.repo_context: false`) to opt out.
 Note this sends repo contents to your panel models — the same exposure as running `claude`/`codex` in the
 repo directly.
 
@@ -361,21 +370,21 @@ the round it reached, how many questions you answered, and the original request.
 
 | Flag | Effect (with `plan`) |
 |---|---|
-| `--max-rounds N` | cap interactive clarifying rounds (default 5; the hard backstop on cost) |
+| `--interview-rounds N` | cap the clarifying-interview rounds (default 5; the hard backstop on cost) |
 | `--out PATH` | write the Markdown plan to `PATH` (default `./scry-plan-<id>.md`); a `<plan>.diagnostics.md` is written alongside |
-| `--no-out` | don't write the plan or diagnostics files; print to stdout only |
+| `--out -` | don't write the plan or diagnostics files; print to stdout only |
 | `--resume[=<id>]` | continue the most recent (or a specific) unfinished planning session |
 | `--list` | list unfinished, resumable sessions (free — reads history, runs no models) |
-| `--no-repo` | don't give the panel read-only access to the current directory |
+| `--repo {auto,none,PATH}` | give the panel read-only access to a repo: `auto`/`PATH` (default detects the launch dir), or `none` to opt out |
 | `--panel`, `--judge`, `--aggregator`, `--effort`, `--no-web`, `--json`, `--no-save` | as for a normal run |
 
 ## Web UI (`scry web`)
 
-A local, single-user web app that puts the full panel — one-shot **scry**, the interactive
-**plan** interview, and web-on **deep research** — behind a sleek browser UI, so you can
-use scry *outside any project directory* (the thing you'd otherwise open gemini/claude/chatgpt
-for). It reuses scry's Python internals **in-process** (no extra `scry` subprocess) and never
-sends your prompts anywhere except the model CLIs scry already drives.
+A local, single-user web app that puts the full panel behind a sleek browser UI with a simple
+two-button surface — **Ask** (web-on deep research) and **Plan** (the interactive plan interview) —
+so you can use scry *outside any project directory* (the thing you'd otherwise open
+gemini/claude/chatgpt for). It reuses scry's Python internals **in-process** (no extra `scry`
+subprocess) and never sends your prompts anywhere except the model CLIs scry already drives.
 
 ```sh
 scry web                 # → http://127.0.0.1:8765 (opens your browser)
@@ -387,10 +396,11 @@ scry web --host 127.0.0.1   # localhost-only by default (see security note below
 What you get:
 
 - **Sidebar + chat** — a *Scratchpad* for ad-hoc, contextless questions, plus **Workspaces**
-  (managed scry project scaffolds) and any **Project** directory you open. Pick a capability
-  (scry / plan / research) per message; multi-turn context carries between messages.
-- **Interactive plan interview** — the same clarifying-question loop as `/scry-plan`, as cards
-  in the browser. Answer, the panel converges, then it drafts and fuses the Markdown plan.
+  (managed scry project scaffolds) and any **Project** directory you open. Pick **Ask** or **Plan**
+  per message; multi-turn context carries between messages.
+- **Interactive plan interview** — choosing **Plan** runs the same clarifying-question loop as
+  `/scry-plan`, as cards in the browser. Answer, the panel converges, scry researches the request,
+  then it drafts and fuses the Markdown plan.
 - **Full structured results** — the fused answer, an expandable per-model panel, the judge's
   consensus map, and a cost tally. Plans/reports are written to disk (in place for projects,
   under `~/.config/scry/runs/` for scratchpad sessions) with copy/download/reveal.
@@ -431,11 +441,12 @@ overrides the global config whenever `scry` runs from that directory. Precedence
 bundled [`config.json`](config.json) for a fully-worked example (it is a reference, **not**
 auto-loaded by name — pass it with `--config ./config.json` to use it directly).
 
-- **`settings`** — the global default Fusion knobs (`web_tools`, `max_tool_calls`, `effort`,
+- **`settings`** — the global default per-call knobs (`web_tools`, `max_tool_calls`, `effort`,
   `max_output_tokens`, `timeout`, `save_history`). `timeout` is the per-call timeout in seconds (default
   420). Every pipeline phase inherits these and may override them in `phases` (below).
 - **`phases`** — per-phase overrides of `settings`. Each stage inherits every global setting and overrides
-  only what it lists. Stages: `panel`, `judge`, `synthesis` (a fusion run); `interview`, `final` (plan);
+  only what it lists. Stages: `panel`, `judge`, `synthesis` (the panel/judge/synthesis drafting stages,
+  shared by deep research's final synthesis and the plan draft); `interview`, `final` (plan);
   `brief`, `research`, `reflect` (deep research). Resolution per call (later wins): `settings` →
   `phases[stage]` → the `final` overlay (plan draft only) → explicit CLI flags. Defaults reproduce scry's
   built-in behavior (synthesis/interview/brief/reflect web-off; `research` web-on with `timeout: 2100`;
@@ -445,7 +456,7 @@ auto-loaded by name — pass it with `--config ./config.json` to use it directly
   `--max-turns`. e.g. `"judge": {"web_tools": false, "max_tool_calls": 4}`.
 - **`providers`** — how to drive each CLI: base `cmd`, `model_flag`, capture (`json`+`result_path`,
   `outfile`+`-o`, or `text`), `system_flag`, `env_unset`, and a **`caps`** block mapping each
-  Fusion knob to that CLI's flags (`web_on`/`web_off`, `tool_cap`, `effort`, `max_tokens_env`). A
+  per-call knob to that CLI's flags (`web_on`/`web_off`, `tool_cap`, `effort`, `max_tokens_env`). A
   provider can instead carry an **`agent_file`** block (kimi) when the CLI has no argv flags for
   tool/web control — scry then writes a temp read-only agent file per call (see "Adding Moonshot").
   Each provider record also carries a top-tier **`model`** field (e.g. `"model": "opus"` for claude).
@@ -466,14 +477,13 @@ auto-loaded by name — pass it with `--config ./config.json` to use it directly
   contrast, has **built-in web search**. Compose your own panel with
   **`scry init`** or `--panel`.
 - **`judge`**, **`aggregator`** — `{provider, model}` per stage (default `claude:opus`).
-- **`mode`** — the default pipeline for bare `scry`: `research` (deep research, the default), `fusion`
-  (single-shot 3-stage), or `synthesize` (2-stage). `--mode` overrides it per run.
-- **`research`** — Deep Research mode knobs: `clarify` (the interactive interview, on by default),
-  `max_rounds` (target depth, 3), `hard_cap` (ceiling, 5), `early_exit` (stop on no new gaps),
-  `sub_questions` (brief decomposition target, 6), and `repo_context` (`"auto"` detects a surrounding
-  git repo, `"off"` forces external-world). `--depth`/`--max-rounds`/`--no-clarify`/`--repo`/`--no-repo`
-  override. A provider record may also set `"no_web": true` (deepseek) so a live-web gap is never routed
-  to it.
+- **`research`** — Deep Research knobs (deep research is the one query mode, so these govern every bare
+  `scry "..."` run): `clarify` (the interactive interview, on by default), `max_rounds` (target depth, 3),
+  `hard_cap` (ceiling, 5), `early_exit` (stop on no new gaps), `sub_questions` (brief decomposition target,
+  6), and `repo_context` (`"auto"` detects a surrounding git repo, `"off"` forces external-world).
+  `--depth`/`--hard-cap`/`--no-clarify`/`--repo` override. A provider record may also set `"no_web": true`
+  (deepseek) so a live-web gap is never routed to it. (A leftover top-level `"mode"` key from an older
+  config is ignored.)
 
 ### Setup wizard (`scry init`)
 
@@ -485,7 +495,7 @@ continue) — then lists the known provider CLIs with their install status, lets
 an aggregator, and whether to enable web search, and writes a minimal config (it references the
 built-in provider records, so the file stays small). By default it writes the global
 `~/.config/scry/config.json`; **`--local`** writes a project-local `./scry.config.json` instead. Flags:
-`--out PATH` to choose an exact path (overrides `--local`), `--force` to overwrite without a prompt.
+`--out PATH` to choose an exact path (overrides `--local`), `--overwrite` to overwrite without a prompt.
 The splash honors `--no-anim` / `NO_COLOR` / non-TTY (static frame, no keypress needed), so scripted
 `scry init --out …` stays non-interactive. Re-run it any time to recompose your panel.
 
@@ -607,18 +617,19 @@ DeepSeek above). It ships in the default panel at top tier (`glm-5.2`).
 - **Streaming** — on an interactive terminal the fused answer types itself out token-by-token as
   the synthesizer writes it (claude aggregator, via `--output-format stream-json`). Piped or
   `--json` output stays byte-clean and buffered; a provider that can't stream falls back silently.
-- **Consensus map** — after a fusion run, `scry` surfaces the judge's analysis (otherwise computed
+- **Consensus map** — after a run, `scry` surfaces the judge's analysis (otherwise computed
   and discarded) as a colored panel: what the panel **agreed** on (trust it), where they
   **contradicted** (scrutinize), each model's **unique insight**, and the **blind spots** none
-  addressed — i.e. what the extra fusion cost actually bought. Auto-shown on a TTY; `--map` forces
-  it, `--no-map` hides it.
+  addressed — i.e. what the extra multi-model cost actually bought. Tri-state via `--map`:
+  `auto` (the default) shows it on a TTY, `on` forces it, `off` hides it.
 - **Accessible** — honors `NO_COLOR` / `FORCE_COLOR` / `TERM=dumb`; `--no-anim` (or `SCRY_NO_ANIM`)
   swaps the scrying-orb animation (and the `scry init` rune-circle splash) for a plain static fallback.
 
 ## Cost & run history
 
-Fusion fans one prompt across N+2 model calls, so **knowing what a run cost matters.** Every
-run ends with a one-line tally on stderr:
+scry fans one prompt across the whole panel plus a judge and a synthesizer — and deep research does
+that over multiple rounds — so **knowing what a run cost matters.** Every run ends with a one-line
+tally on stderr:
 
 ```
 ✦ 5 calls · $0.34 · 47k→6k tok · 3 web · 72s

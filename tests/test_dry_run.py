@@ -1,10 +1,10 @@
-"""Tests for scry.do_dry_run(cfg, mode, settings).
+"""Tests for scry.do_dry_run(cfg, settings, cli_overrides).
 
-do_dry_run prints a human-readable preview of the exact provider command lines
-Fusion would run, without invoking any model. We capture stdout and assert on the
-PROPOSER / JUDGE / AGGREGATOR lines and the header. No subprocesses, no money.
-
-Source under test: scry lines 763-790 (do_dry_run), 750-760 (_dry_prompt/_show).
+do_dry_run prints a human-readable preview of the exact provider command lines the
+deep-research pipeline would run (the only query pipeline), without invoking any
+model: PROPOSER lines (web-on panel), one REFLECT line (the per-round judge, web-off),
+one AGGREGATOR line (synthesis, web-off), and a header. We capture stdout and assert.
+No subprocesses, no money.
 """
 import contextlib
 import copy
@@ -17,12 +17,12 @@ sys.path.insert(0, os.path.dirname(__file__))
 import _harness as h  # noqa: E402
 
 
-def _dry(cfg, mode, settings):
+def _dry(cfg, settings, cli_overrides=None):
     """Run do_dry_run and return its captured stdout."""
     scry = h.load_scry()
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        scry.do_dry_run(cfg, mode, settings)
+        scry.do_dry_run(cfg, settings, cli_overrides=cli_overrides)
     return buf.getvalue()
 
 
@@ -37,62 +37,46 @@ class TestDryRun(unittest.TestCase):
         # Fresh config per test; deepcopy so mutation can't leak between tests.
         self.cfg = self.scry.load_config(str(h.CONFIG_JSON))
 
-    # ---- fusion mode, default panel ------------------------------------- #
-    def test_fusion_default_panel_structure(self):
-        out = _dry(self.cfg, "fusion", self.cfg["settings"])
-        # 6 proposers (claude/codex/agy/deepseek/kimi/glm), one judge, one aggregator.
+    # ---- research pipeline, default panel ------------------------------- #
+    def test_research_default_panel_structure(self):
+        out = _dry(self.cfg, self.cfg["settings"])
+        # 6 proposers (claude/codex/agy/deepseek/kimi/glm), one REFLECT, one aggregator.
         self.assertEqual(len(_lines(out, "PROPOSER")), 6, out)
-        self.assertEqual(len(_lines(out, "JUDGE")), 1, out)
+        self.assertEqual(len(_lines(out, "REFLECT")), 1, out)
+        self.assertEqual(len(_lines(out, "JUDGE")), 0, out)        # research uses REFLECT
         self.assertEqual(len(_lines(out, "AGGREGATOR")), 1, out)
 
-    def test_fusion_header_line(self):
-        out = _dry(self.cfg, "fusion", self.cfg["settings"])
+    def test_research_header_line(self):
+        out = _dry(self.cfg, self.cfg["settings"])
         header = out.splitlines()[0]
         self.assertIn("[dry-run]", header)
-        self.assertIn("mode=fusion", header)
+        self.assertIn("research", header)
         self.assertIn("web_tools=True", header)
         self.assertIn("max_tool_calls=uncapped", header)   # uncapped by default
 
+    def test_research_loop_footer(self):
+        out = _dry(self.cfg, self.cfg["settings"])
+        self.assertIn("[research]", out)
+        self.assertIn("gap-driven loop", out)
+
     def test_claude_proposer_json_output_format(self):
-        out = _dry(self.cfg, "fusion", self.cfg["settings"])
-        claude_proposer = next(
-            ln for ln in _lines(out, "PROPOSER") if " claude " in ln
-        )
+        out = _dry(self.cfg, self.cfg["settings"])
+        claude_proposer = next(ln for ln in _lines(out, "PROPOSER") if " claude " in ln)
         self.assertIn("--output-format json", claude_proposer)
         self.assertIn("<prompt on stdin>", claude_proposer)
 
     def test_agy_proposer_prompt_as_arg(self):
-        out = _dry(self.cfg, "fusion", self.cfg["settings"])
-        agy_proposer = next(
-            ln for ln in _lines(out, "PROPOSER") if " agy " in ln
-        )
-        # agy takes the prompt as a CLI arg (prompt:"arg", prompt_flag "-p").
+        out = _dry(self.cfg, self.cfg["settings"])
+        agy_proposer = next(ln for ln in _lines(out, "PROPOSER") if " agy " in ln)
         self.assertIn("<prompt as arg>", agy_proposer)
         self.assertIn("-p", agy_proposer.split())
-        # The prompt placeholder is rendered as {PROMPT} (upper of "prompt").
         self.assertIn("{PROMPT}", agy_proposer)
-
-    def test_claude_proposer_prompt_on_stdin(self):
-        out = _dry(self.cfg, "fusion", self.cfg["settings"])
-        claude_proposer = next(
-            ln for ln in _lines(out, "PROPOSER") if " claude " in ln
-        )
-        self.assertIn("<prompt on stdin>", claude_proposer)
-        self.assertNotIn("<prompt as arg>", claude_proposer)
-
-    # ---- synthesize mode (no judge) ------------------------------------- #
-    def test_synthesize_mode_omits_judge(self):
-        out = _dry(self.cfg, "synthesize", self.cfg["settings"])
-        self.assertEqual(len(_lines(out, "JUDGE")), 0, out)
-        self.assertEqual(len(_lines(out, "PROPOSER")), 6, out)
-        self.assertEqual(len(_lines(out, "AGGREGATOR")), 1, out)
-        self.assertIn("mode=synthesize", out.splitlines()[0])
 
     # ---- unknown provider in the panel ---------------------------------- #
     def test_unknown_provider_panel_line(self):
         cfg = copy.deepcopy(self.cfg)
         cfg["panel"] = [{"provider": "ghost", "model": "", "label": "x"}]
-        out = _dry(cfg, "fusion", cfg["settings"])
+        out = _dry(cfg, cfg["settings"])
         proposers = _lines(out, "PROPOSER")
         self.assertEqual(len(proposers), 1, out)
         self.assertIn("PROPOSER   (unknown provider 'ghost')", out)
@@ -100,58 +84,41 @@ class TestDryRun(unittest.TestCase):
     # ---- kimi in the panel ---------------------------------------------- #
     def test_kimi_proposer_agent_file(self):
         cfg = copy.deepcopy(self.cfg)
-        cfg["panel"].append(
-            {"provider": "kimi", "model": "kimi-k2.6", "label": "kimi"}
-        )
-        out = _dry(cfg, "fusion", cfg["settings"])
+        cfg["panel"].append({"provider": "kimi", "model": "kimi-k2.6", "label": "kimi"})
+        out = _dry(cfg, cfg["settings"])
         kimi_line = next(ln for ln in _lines(out, "PROPOSER") if "kimi" in ln)
         self.assertIn("kimi-cli --quiet", kimi_line)
         self.assertIn("--agent-file", kimi_line)
-        # The generated agent-file path is shown as the {AGENTFILE} placeholder.
         self.assertIn("{AGENTFILE}", kimi_line)
 
-    # ---- web tools off -------------------------------------------------- #
+    # ---- web tools off (via --no-web, i.e. a CLI override) -------------- #
     def test_web_off_header_and_claude_disallow(self):
-        cfg = copy.deepcopy(self.cfg)
-        settings = copy.deepcopy(cfg["settings"])
-        settings["web_tools"] = False
-        out = _dry(cfg, "fusion", settings)
+        # --no-web flows through as a CLI override, which wins over the research
+        # phase's web_tools=True default — so the panel preview goes web-off.
+        out = _dry(self.cfg, self.cfg["settings"], cli_overrides={"web_tools": False})
         self.assertIn("web_tools=False", out.splitlines()[0])
-        claude_proposer = next(
-            ln for ln in _lines(out, "PROPOSER") if " claude " in ln
-        )
-        # web off => the web_off --disallowedTools form, never --allowedTools.
+        claude_proposer = next(ln for ln in _lines(out, "PROPOSER") if " claude " in ln)
         self.assertIn("--disallowedTools", claude_proposer)
         self.assertNotIn("--allowedTools", claude_proposer)
 
-    # ---- research mode previews the REFLECT stage (web off), not JUDGE ---- #
-    def test_research_reflect_preview_is_web_off(self):
-        # In research mode the per-round judge IS the REFLECT stage, which runs
-        # web-OFF (config: reflect.web_tools=false). The preview must label it REFLECT
-        # (not JUDGE) so a user running --dry-run to estimate the default mode isn't
-        # misled. (Both judges are web-off now — only the panelist phases use web.)
-        out = _dry(self.cfg, "research", self.cfg["settings"])
-        judge_lines = _lines(out, "JUDGE") + _lines(out, "REFLECT")
-        self.assertEqual(len(judge_lines), 1, out)
-        line = judge_lines[0]
+    # ---- the REFLECT per-round judge previews web-off ------------------- #
+    def test_reflect_preview_is_web_off(self):
+        out = _dry(self.cfg, self.cfg["settings"])
+        reflect = _lines(out, "REFLECT")
+        self.assertEqual(len(reflect), 1, out)
+        line = reflect[0]
         self.assertNotIn("--allowedTools", line)     # web off
         self.assertIn("--disallowedTools", line)
-        # And it's labeled as the reflect stage, not "JUDGE".
-        self.assertTrue(line.startswith("REFLECT"), line)
 
-    # ---- aggregator always runs with web off ---------------------------- #
+    # ---- aggregator always runs with web off --------------------------- #
     def test_aggregator_always_web_off(self):
-        # Even in fusion + web_tools=True, the AGGREGATOR (final synthesis) is
-        # rendered with web off: no --allowedTools on its claude command line.
-        out = _dry(self.cfg, "fusion", self.cfg["settings"])
+        # The AGGREGATOR (final synthesis) is rendered web-off even though the panel
+        # is web-on — proving the web-off is the synthesis phase, not a config default.
+        out = _dry(self.cfg, self.cfg["settings"])
         agg = _lines(out, "AGGREGATOR")[0]
         self.assertNotIn("--allowedTools", agg)
         self.assertIn("--disallowedTools", agg)
-        # Sanity: a panel claude line in the SAME run does carry --allowedTools,
-        # proving the aggregator's web-off is not just a config-wide default.
-        claude_proposer = next(
-            ln for ln in _lines(out, "PROPOSER") if " claude " in ln
-        )
+        claude_proposer = next(ln for ln in _lines(out, "PROPOSER") if " claude " in ln)
         self.assertIn("--allowedTools", claude_proposer)
 
 

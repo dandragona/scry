@@ -127,7 +127,7 @@ class TestUpdate(unittest.TestCase):
     def test_downgrade_with_force_applies(self):
         payload = self._bump("0.0.1")
         with h.FileServer(payload) as srv:
-            r = _run_update(self.copy, srv.url, "--force")
+            r = _run_update(self.copy, srv.url, "--allow-downgrade")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertIn("updated", r.stdout)
         self.assertIn('VERSION = "0.0.1"', self.copy.read_text())

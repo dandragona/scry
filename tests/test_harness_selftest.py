@@ -52,7 +52,7 @@ class TestHarness(unittest.TestCase):
             # deepseek/glm are API-key providers; --check now verifies their keys.
             with h.env_vars(DEEPSEEK_API_KEY="x", GLM_API_KEY="x"):
                 with contextlib.redirect_stdout(io.StringIO()):
-                    rc = scry.do_check(cfg, "fusion", cfg["settings"])
+                    rc = scry.do_check(cfg, cfg["settings"])
         self.assertEqual(rc, 0)
 
     def test_call_cli_through_stub(self):
